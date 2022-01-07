@@ -676,6 +676,9 @@ public:
   void set_max_objects(int64_t v) {
     max_objects = v;
   }
+  void set_block_writes_upfront(bool v) {
+    block_writes_upfront = v;
+  }
 
 
   // file functions
@@ -700,11 +703,12 @@ public:
 
   int file_write(ObjectSet *oset, file_layout_t *layout,
 		 const SnapContext& snapc, loff_t offset, uint64_t len,
-		 ceph::buffer::list& bl, ceph::real_time mtime, int flags) {
+		 ceph::buffer::list& bl, ceph::real_time mtime, int flags,
+		 Context *onfreespace) {
     OSDWrite *wr = prepare_write(snapc, bl, mtime, flags, 0);
     Striper::file_to_extents(cct, oset->ino, layout, offset, len,
 			     oset->truncate_size, wr->extents);
-    return writex(wr, oset, nullptr);
+    return writex(wr, oset, onfreespace);
   }
 
   bool file_flush(ObjectSet *oset, file_layout_t *layout,

@@ -9738,6 +9738,7 @@ void Client::unlock_fh_pos(Fh *f)
 int Client::uninline_data(Inode *in, Context *onfinish)
 {
   if (!in->inline_data.length()) {
+    // TODO - should we drop the client_lock here?
     onfinish->complete(0);
     return 0;
   }
@@ -9823,18 +9824,315 @@ int Client::preadv(int fd, const struct iovec *iov, int iovcnt, loff_t offset)
   return _preadv_pwritev(fd, iov, iovcnt, offset, false);
 }
 
-int64_t Client::_read(Fh *f, int64_t offset, uint64_t size, bufferlist *bl)
+class Client_Read_Finisher : public Context {
+public:
+  bool iofinished;
+  void finish_io(int r);
+  void finish_onuninline(int r);
+  void finish_ui(int r);
+  Client_Read_Finisher(Client *clnt, Context *onfinish, Context *onuninline,
+                       Context *iofinish, bool is_read_async, int have,
+                       bool movepos, utime_t start, Fh *f, Inode *in,
+                       uint64_t fpos, int64_t offset, uint64_t size)
+    : clnt(clnt), onfinish(onfinish), onuninline(onuninline),
+      iofinish(iofinish), is_read_async(is_read_async), have(have),
+      f(f), in(in), start(start), fpos(fpos), offset(offset),
+      size(size), movepos(movepos) {
+    iofinished_r = 0;
+    onuninlinefinished_r = 0;
+    iofinished = false;
+    onuninlinefinished = onuninline == nullptr;
+  }
+
+  void finish(int r) override {
+    //
+    delete this;
+  }
+
+private:
+  Client *clnt;
+  Context *onfinish;
+  Context *onuninline;
+  Context *iofinish;
+  bool is_read_async;
+  int have;
+  Fh *f;
+  Inode *in;
+  utime_t start;
+  uint64_t fpos;
+  int64_t offset;
+  uint64_t size;
+  int64_t iofinished_r;
+  int64_t onuninlinefinished_r;
+  bool onuninlinefinished;
+  bool movepos;
+  bool try_complete();
+};
+
+void Client_Read_Finisher::finish_io(int r)
+{
+  bool fini;
+  utime_t lat;
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "finish read io r = " << r << dendl;
+
+  // Caller holds client_lock so we don't need to take it.
+
+  clnt->put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
+
+  if (r >= 0) {
+    if (is_read_async) {
+    } else {
+      // may need to retry on short read
+    }
+
+    ceph_assert(r >= 0);
+    if (movepos) {
+      // adjust fd pos
+      f->pos = offset + r;
+    }
+    
+    lat = ceph_clock_now();
+    lat -= start;
+    clnt->logger->tinc(l_c_read, lat);
+  }
+
+  iofinished = true;
+  iofinished_r = r;
+  fini = try_complete();
+
+  if (fini)
+    delete this;
+}
+
+void Client_Read_Finisher::finish_onuninline(int r)
+{
+  bool fini;
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "finish read uninline r = " << r << dendl;
+
+  clnt->client_lock.lock();
+
+  if (r >= 0 || r == -CEPHFS_ECANCELED) {
+    in->inline_data.clear();
+    in->inline_version = CEPH_INLINE_NONE;
+    in->mark_caps_dirty(CEPH_CAP_FILE_WR);
+    clnt->check_caps(in, 0);
+  }
+
+  onuninlinefinished = true;
+  onuninlinefinished_r = r;
+  fini = try_complete();
+
+  clnt->client_lock.unlock();
+
+  if (fini)
+    delete this;
+}
+
+bool Client_Read_Finisher::try_complete()
+{
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "try complete onuninlinefinished = " << onuninlinefinished << " iofinished = " << iofinished << dendl;
+
+  if (onuninlinefinished && iofinished) {
+    if (have) {
+      clnt->put_cap_ref(in, CEPH_CAP_FILE_RD);
+    }
+    if (movepos) {
+      clnt->unlock_fh_pos(f);
+    }
+
+    if (onuninlinefinished_r >= 0 || onuninlinefinished_r == -CEPHFS_ECANCELED)
+      onfinish->complete(iofinished_r);
+    else
+      onfinish->complete(onuninlinefinished_r);
+    return true;
+  }
+  return false;
+}
+
+struct CRF_onuninline : public C_SaferCond {
+  Client_Read_Finisher *CRF;
+
+  CRF_onuninline()
+    : CRF(nullptr) {}
+
+  void finish(int r) override {
+    CRF->finish_onuninline(r);
+    complete(r);
+  }
+};
+
+struct CRF_iofinish : public Context {
+  Client_Read_Finisher *CRF;
+
+  CRF_iofinish()
+    : CRF(nullptr) {}
+
+  void finish(int r) override {
+    CRF->finish_io(r);
+  }
+  // For _read_async, we may not finish in one go, so be prepared for multiple
+  // calls to complete. All the handling though is in Client_Read_Finisher.
+  void complete(int r) override {
+    finish(r);
+    if (CRF->iofinished)
+      delete this;
+  }
+};
+
+class Client_Read_Sync_Async : public Context {
+public:
+  Client_Read_Sync_Async(Client *clnt, Context *onfinish, Fh *f, Inode *in,
+                         uint64_t fpos, uint64_t off, uint64_t len,
+                         bufferlist *bl, Filer *filer, int have)
+    : clnt(clnt), onfinish(onfinish), f(f), in(in), off(off), len(len), bl(bl),
+      filer(filer), have(have)
+  {
+    left = len;
+    wanted = len;
+    read = 0;
+    pos = off;
+    fini = false;
+  }
+  void retry();
+
+private:
+  Client *clnt;
+  Context *onfinish;
+  Fh *f;
+  Inode *in;
+  uint64_t off;
+  uint64_t len;
+  int left;
+  int wanted;
+  bufferlist *bl;
+  Filer *filer;
+  int have;
+  int read;
+  uint64_t pos;
+  bool fini;
+
+  void finish(int r) override;
+  void complete(int r) override
+  {
+    finish(r);
+    if (fini)
+      delete this;
+  }
+};
+
+void Client_Read_Sync_Async::retry()
+{
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "Client_Read_Sync_Async::retry" << dendl;
+
+  filer->read_trunc(in->ino, &in->layout, in->snapid, pos, left, bl, 0,
+                    in->truncate_size, in->truncate_seq, this);
+}
+
+void Client_Read_Sync_Async::finish(int r)
+{
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "Client_Read_Sync_Async::finish r = " << r << dendl;
+
+  clnt->client_lock.lock();
+
+  if (r == -CEPHFS_ENOENT) {
+    // if we get ENOENT from OSD, assume 0 bytes returned
+    goto success;
+  } else if (r < 0) {
+    // pass error to caller
+    goto error;
+  }
+
+  if (bl->length()) {
+    r = bl->length();
+
+    read += r;
+    pos += r;
+    left -= r;
+    bl->claim_append(*bl);
+  }
+
+  // short read?
+  if (r >= 0 && r < wanted) {
+    if (pos < in->size) {
+      // zero up to known EOF
+      int64_t some = in->size - pos;
+      if (some > left)
+        some = left;
+      auto z = buffer::ptr_node::create(some);
+      z->zero();
+      bl->push_back(std::move(z));
+      read += some;
+      pos += some;
+      left -= some;
+      if (left == 0)
+        goto success;
+    }
+
+    clnt->put_cap_ref(in, CEPH_CAP_FILE_RD);
+    // reverify size
+    {
+      r = clnt->_getattr(in, CEPH_STAT_CAP_SIZE, f->actor_perms);
+      if (r < 0)
+        goto error;
+    }
+
+    // eof?  short read.
+    if ((uint64_t)pos >= in->size)
+      goto success;
+
+    {
+      int have2 = 0;
+      r = clnt->get_caps(f, CEPH_CAP_FILE_RD, have, &have2, -1);
+      if (r < 0) {
+        goto error;
+      }
+    }
+
+    wanted = left;
+    retry();
+    clnt->client_lock.unlock();
+    return;
+  }
+
+success:
+
+  r = read;
+
+error:
+
+  onfinish->complete(r);
+  fini = true;
+
+  clnt->client_lock.unlock();
+}
+
+int64_t Client::_read(Fh *f, int64_t offset, uint64_t size, bufferlist *bl,
+                      Context *onfinish)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   int want, have = 0;
   bool movepos = false;
-  std::unique_ptr<C_SaferCond> onuninline;
+  std::unique_ptr<Context> onuninline;
+  std::unique_ptr<Context> iofinish = nullptr;
+  std::unique_ptr<Client_Read_Finisher> crf = nullptr;
   int64_t rc = 0;
   const auto& conf = cct->_conf;
   Inode *in = f->inode.get();
   utime_t lat;
   utime_t start = ceph_clock_now(); 
+  CRF_onuninline *crf_onuninline = NULL;
+  CRF_iofinish *crf_iofinish = NULL;
 
   if ((f->mode & CEPH_FILE_MODE_RD) == 0)
     return -CEPHFS_EBADF;
@@ -9873,7 +10171,11 @@ retry:
 
   if (in->inline_version < CEPH_INLINE_NONE) {
     if (!(have & CEPH_CAP_FILE_CACHE)) {
-      onuninline.reset(new C_SaferCond("Client::_read_uninline_data flock"));
+      if (onfinish) {
+        crf_onuninline = new CRF_onuninline();
+        onuninline.reset(crf_onuninline);
+      } else
+        onuninline.reset(new C_SaferCond("Client::_write_uninline_data flock"));
       uninline_data(in, onuninline.get());
     } else {
       uint32_t len = in->inline_data.length();
@@ -9899,6 +10201,23 @@ retry:
     }
   }
 
+  if (onfinish) {
+     crf_iofinish = new CRF_iofinish();
+     iofinish.reset(crf_iofinish);
+
+     crf.reset(new
+       Client_Read_Finisher(this, onfinish, crf_onuninline, iofinish.get(),
+                            !conf->client_debug_force_sync_read &&
+                              conf->client_oc &&
+                              (have & (CEPH_CAP_FILE_CACHE |
+                                       CEPH_CAP_FILE_LAZYIO)),
+                             have, movepos, start, f, in, f->pos, offset, size));
+
+    if (crf_onuninline != NULL)
+      crf_onuninline->CRF = crf.get();
+    crf_iofinish->CRF = crf.get();
+  }
+
   if (!conf->client_debug_force_sync_read &&
       conf->client_oc &&
       (have & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO))) {
@@ -9906,9 +10225,39 @@ retry:
     if (f->flags & O_RSYNC) {
       _flush_range(in, offset, size);
     }
-    rc = _read_async(f, offset, size, bl);
+    rc = _read_async(f, offset, size, bl, iofinish.get());
+
+    if (onfinish) {
+      // handle async caller (onfinish != nullptr), we can now safely release
+      // all the managed pointers, but we might need to do something with
+      // iofinisher.
+      Context *iof = iofinish.release();
+      onuninline.release();
+      crf.release();
+
+      if (rc < 0)
+        iof->complete(rc);
+
+      // allow caller to wait on onfinish...
+      return 0;
+    }
+
     if (rc < 0)
       goto done;
+  } else if (onfinish) {
+    // handle _sync_read asynchronously...
+    Client_Read_Sync_Async *crsa =
+      new Client_Read_Sync_Async(this, iofinish.release(), f, in, f->pos,
+                                 offset, size, bl, filer.get(), have);
+      onuninline.release();
+      crf.release();
+
+      // Now make first attempt at performing _read_sync
+      crsa->retry();
+
+      // Now the Client_Read_Sync_Async is going to handle EVERYTHING else
+      // Allow caller to wait on onfinish...
+      return 0;
   } else {
     if (f->flags & O_DIRECT)
       _flush_range(in, offset, size);
@@ -9953,9 +10302,9 @@ success:
 done:
   // done!
   
-  if (onuninline) {
+  if (onuninline.get()) {
     client_lock.unlock();
-    int ret = onuninline->wait();
+    int ret = crf_onuninline->wait();
     client_lock.lock();
     if (ret >= 0 || ret == -CEPHFS_ECANCELED) {
       in->inline_data.clear();
@@ -9993,7 +10342,60 @@ void Client::C_Readahead::finish(int r) {
   }
 }
 
-int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
+void Client::do_readahead(Fh *f, Inode *in, uint64_t off, uint64_t len)
+{
+  if(f->readahead.get_min_readahead_size() > 0) {
+    pair<uint64_t, uint64_t> readahead_extent = f->readahead.update(off, len, in->size);
+    if (readahead_extent.second > 0) {
+      ldout(cct, 20) << "readahead " << readahead_extent.first << "~" << readahead_extent.second
+		     << " (caller wants " << off << "~" << len << ")" << dendl;
+      Context *onfinish2 = new C_Readahead(this, f);
+      int r2 = objectcacher->file_read(&in->oset, &in->layout, in->snapid,
+				       readahead_extent.first, readahead_extent.second,
+				       NULL, 0, onfinish2);
+      if (r2 == 0) {
+	ldout(cct, 20) << "readahead initiated, c " << onfinish2 << dendl;
+	get_cap_ref(in, CEPH_CAP_FILE_RD | CEPH_CAP_FILE_CACHE);
+      } else {
+	ldout(cct, 20) << "readahead was no-op, already cached" << dendl;
+	delete onfinish2;
+      }
+    }
+  }
+}
+
+class Client_Read_Async_Finisher : public Context {
+public:
+  Client_Read_Async_Finisher(Client *clnt, Context *onfinish, Fh *f, Inode *in,
+                             uint64_t fpos, uint64_t off, uint64_t len)
+    : clnt(clnt), onfinish(onfinish), f(f), in(in), off(off), len(len) {}
+
+private:
+  Client *clnt;
+  Context *onfinish;
+  Fh *f;
+  Inode *in;
+  uint64_t off;
+  uint64_t len;
+
+  void finish(int r) override;
+};
+
+void Client_Read_Async_Finisher::finish(int r)
+{
+  clnt->client_lock.lock();
+
+  clnt->put_cap_ref(in, CEPH_CAP_FILE_CACHE);
+
+  clnt->do_readahead(f, in, off, len);
+
+  onfinish->complete(r);
+
+  clnt->client_lock.unlock();
+}
+
+int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
+			Context *onfinish)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
@@ -10017,36 +10419,46 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
 
   // read (and possibly block)
   int r = 0;
-  C_SaferCond onfinish("Client::_read_async flock");
+  std::unique_ptr<Context> io_finish = nullptr;
+  C_SaferCond *io_finish_cond = nullptr;
+  if (onfinish == nullptr) {
+    io_finish_cond = new C_SaferCond("Client::_read_async flock");
+    io_finish.reset(io_finish_cond);
+  } else {
+    io_finish.reset(new Client_Read_Async_Finisher(this, onfinish, f, in,
+                                                   f->pos, off, len));
+  }
+
   r = objectcacher->file_read(&in->oset, &in->layout, in->snapid,
-			      off, len, bl, 0, &onfinish);
+			      off, len, bl, 0, io_finish.get());
+
+  if (onfinish != nullptr) {
+    // Release Client_Read_Async_Finisher from managed pointer, either
+    // file_read will result in async complete, or we need to complete
+    // immediately. In either case, the Client_Read_Async_Finisher is safely
+    // handled and won't be abandoned.
+    Context *crf = io_finish.release();
+    if (r != 0) {
+      // need to do readahead, so complete the crf
+      client_lock.unlock();
+      crf->complete(r);
+      client_lock.lock();
+    } else {
+      get_cap_ref(in, CEPH_CAP_FILE_CACHE);
+    }
+    return 0;
+  }
+
   if (r == 0) {
     get_cap_ref(in, CEPH_CAP_FILE_CACHE);
     client_lock.unlock();
-    r = onfinish.wait();
+    r = io_finish_cond->wait();
     client_lock.lock();
     put_cap_ref(in, CEPH_CAP_FILE_CACHE);
     update_read_io_size(bl->length());
   }
 
-  if(f->readahead.get_min_readahead_size() > 0) {
-    pair<uint64_t, uint64_t> readahead_extent = f->readahead.update(off, len, in->size);
-    if (readahead_extent.second > 0) {
-      ldout(cct, 20) << "readahead " << readahead_extent.first << "~" << readahead_extent.second
-		     << " (caller wants " << off << "~" << len << ")" << dendl;
-      Context *onfinish2 = new C_Readahead(this, f);
-      int r2 = objectcacher->file_read(&in->oset, &in->layout, in->snapid,
-				       readahead_extent.first, readahead_extent.second,
-				       NULL, 0, onfinish2);
-      if (r2 == 0) {
-	ldout(cct, 20) << "readahead initiated, c " << onfinish2 << dendl;
-	get_cap_ref(in, CEPH_CAP_FILE_RD | CEPH_CAP_FILE_CACHE);
-      } else {
-	ldout(cct, 20) << "readahead was no-op, already cached" << dendl;
-	delete onfinish2;
-      }
-    }
-  }
+  do_readahead(f, in, off, len);
 
   return r;
 }
@@ -10159,7 +10571,8 @@ int Client::pwritev(int fd, const struct iovec *iov, int iovcnt, int64_t offset)
 
 int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
                                        unsigned iovcnt, int64_t offset,
-                                       bool write, bool clamp_to_int)
+                                       bool write, bool clamp_to_int,
+                                       Context *onfinish, bufferlist *blp)
 {
     ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
@@ -10180,35 +10593,37 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
     if (clamp_to_int) {
       totallen = std::min(totallen, (loff_t)INT_MAX);
     }
+
     if (write) {
-        int64_t w = _write(fh, offset, totallen, NULL, iov, iovcnt);
+        ldout(cct, 3) << "calling pwritev(" << fh << ", \"...\", " << totallen << ", " << offset << ")" << dendl;
+        int64_t w = _write(fh, offset, totallen, NULL, iov, iovcnt, onfinish);
         ldout(cct, 3) << "pwritev(" << fh << ", \"...\", " << totallen << ", " << offset << ") = " << w << dendl;
         return w;
     } else {
         bufferlist bl;
-        int64_t r = _read(fh, offset, totallen, &bl);
+        ldout(cct, 3) << "calling preadv(" << fh << ", " <<  offset << ")" << dendl;
+        int64_t r = _read(fh, offset, totallen, blp ? blp : &bl,
+                          onfinish);
         ldout(cct, 3) << "preadv(" << fh << ", " <<  offset << ") = " << r << dendl;
-        if (r <= 0)
+        if (r <= 0) {
+          if (r < 0 && onfinish != nullptr) {
+            client_lock.unlock();
+            onfinish->complete(r);
+            client_lock.lock();
+          }
           return r;
+        }
 
         client_lock.unlock();
-        auto iter = bl.cbegin();
-        for (unsigned j = 0, resid = r; j < iovcnt && resid > 0; j++) {
-               /*
-                * This piece of code aims to handle the case that bufferlist
-                * does not have enough data to fill in the iov
-                */
-               const auto round_size = std::min<unsigned>(resid, iov[j].iov_len);
-               iter.copy(round_size, reinterpret_cast<char*>(iov[j].iov_base));
-               resid -= round_size;
-               /* iter is self-updating */
-        }
+        copy_bufferlist_to_iovec(iov, iovcnt, &bl, r);
         client_lock.lock();
         return r;
     }
 }
 
-int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, int64_t offset, bool write)
+int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt,
+                            int64_t offset, bool write, Context *onfinish,
+                            bufferlist *blp)
 {
     RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
     if (!mref_reader.is_state_satisfied())
@@ -10221,20 +10636,208 @@ int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, in
     Fh *fh = get_filehandle(fd);
     if (!fh)
       return -CEPHFS_EBADF;
-    return _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true);
+    return _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true,
+                                  onfinish, blp);
 }
 
+int64_t Client::_write_success(Fh *f, utime_t start, uint64_t fpos,
+                               int64_t offset, uint64_t size, Inode *in)
+{
+  utime_t lat;
+  uint64_t totalwritten;
+  int64_t r;
+
+  update_write_io_size(size);
+  // time
+  lat = ceph_clock_now();
+  lat -= start;
+  logger->tinc(l_c_wrlat, lat);
+
+  if (fpos) {
+    lock_fh_pos(f);
+    f->pos = fpos;
+    unlock_fh_pos(f);
+  }
+  totalwritten = size;
+  r = (int64_t)totalwritten;
+
+  // extend file?
+  if (totalwritten + offset > in->size) {
+    in->size = totalwritten + offset;
+    in->mark_caps_dirty(CEPH_CAP_FILE_WR);
+
+    if (is_quota_bytes_approaching(in, f->actor_perms)) {
+      check_caps(in, CHECK_CAPS_NODELAY);
+    } else if (is_max_size_approaching(in)) {
+      check_caps(in, 0);
+    }
+
+    ldout(cct, 7) << "wrote to " << totalwritten+offset << ", extending file size" << dendl;
+  } else {
+    ldout(cct, 7) << "wrote to " << totalwritten+offset << ", leaving file size at " << in->size << dendl;
+  }
+
+  // mtime
+  in->mtime = in->ctime = ceph_clock_now();
+  in->change_attr++;
+  in->mark_caps_dirty(CEPH_CAP_FILE_WR);
+
+  return r;
+}
+
+class Client_Write_Finisher : public Context {
+public:
+  void finish_io(int r);
+  void finish_onuninline(int r);
+  void finish_ui(int r);
+  Client_Write_Finisher(Client *clnt, Context *onfinish, Context *onuninline,
+                        Context *iofinish, bool is_file_write,
+                        utime_t start, Fh *f, Inode *in, uint64_t fpos,
+                        int64_t offset, uint64_t size)
+    : clnt(clnt), onfinish(onfinish), onuninline(onuninline),
+      iofinish(iofinish), is_file_write(is_file_write),
+      start(start), f(f), in(in), fpos(fpos), offset(offset), size(size) {
+    iofinished_r = 0;
+    onuninlinefinished_r = 0;
+    iofinished = false;
+    onuninlinefinished = onuninline == nullptr;
+  }
+
+  void finish(int r) override {
+    //
+    delete this;
+  }
+
+private:
+  Client *clnt;
+  Context *onfinish;
+  Context *onuninline;
+  Context *iofinish;
+  bool is_file_write;
+  utime_t start;
+  Fh *f;
+  Inode *in;
+  uint64_t fpos;
+  int64_t offset;
+  uint64_t size;
+  int64_t iofinished_r;
+  int64_t onuninlinefinished_r;
+  bool iofinished;
+  bool onuninlinefinished;
+  bool try_complete();
+};
+
+void Client_Write_Finisher::finish_io(int r)
+{
+  bool fini;
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << " write finish io r = " << r << dendl;
+
+  clnt->client_lock.lock();
+
+  clnt->put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
+
+  if (r >= 0) {
+    if (is_file_write) {
+      if ((f->flags & O_SYNC) || (f->flags & O_DSYNC)) {
+        clnt->_flush_range(in, offset, size);
+      }
+    }
+
+    r = clnt->_write_success(f, start, fpos, offset, size, in);
+  }
+
+  iofinished = true;
+  iofinished_r = r;
+  fini = try_complete();
+
+  clnt->client_lock.unlock();
+
+  if (fini)
+    delete this;
+}
+
+void Client_Write_Finisher::finish_onuninline(int r)
+{
+  bool fini;
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "write finish uninline r = " << r << dendl;
+
+  clnt->client_lock.lock();
+
+  if (r >= 0 || r == -CEPHFS_ECANCELED) {
+    in->inline_data.clear();
+    in->inline_version = CEPH_INLINE_NONE;
+    in->mark_caps_dirty(CEPH_CAP_FILE_WR);
+    clnt->check_caps(in, 0);
+  }
+
+  onuninlinefinished = true;
+  onuninlinefinished_r = r;
+  fini = try_complete();
+
+  clnt->client_lock.unlock();
+
+  if (fini)
+    delete this;
+}
+
+bool Client_Write_Finisher::try_complete()
+{
+  client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
+
+  ldout(clnt->cct, 3) << "Client_Write_Finisher::try_complete" << dendl;
+
+  if (onuninlinefinished && iofinished) {
+    clnt->put_cap_ref(in, CEPH_CAP_FILE_WR);
+
+    if (onuninlinefinished_r >= 0 || onuninlinefinished_r == -CEPHFS_ECANCELED)
+      onfinish->complete(iofinished_r);
+    else
+      onfinish->complete(onuninlinefinished_r);
+    return true;
+  }
+  return false;
+}
+
+struct CWF_onuninline : public C_SaferCond {
+  Client_Write_Finisher *CWF;
+
+  CWF_onuninline()
+    : CWF(nullptr) {}
+
+  void finish(int r) override {
+    CWF->finish_onuninline(r);
+    complete(r);
+  }
+};
+
+struct CWF_iofinish : public C_SaferCond {
+  Client_Write_Finisher *CWF;
+
+  CWF_iofinish()
+    : CWF(nullptr) {}
+
+  void finish(int r) override {
+    CWF->finish_io(r);
+  }
+};
+
 int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
-	                const struct iovec *iov, int iovcnt)
+	                const struct iovec *iov, int iovcnt, Context *onfinish)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
   uint64_t fpos = 0;
+  CWF_onuninline *cwf_onuninline = NULL;
+  CWF_iofinish *cwf_iofinish = NULL;
 
   if ((uint64_t)(offset+size) > mdsmap->get_max_filesize()) //too large!
     return -CEPHFS_EFBIG;
 
-  //ldout(cct, 7) << "write fh " << fh << " size " << size << " offset " << offset << dendl;
+  ldout(cct, 7) << "write fh " << f << " size " << size << " offset " << offset << dendl;
   Inode *in = f->inode.get();
 
   if (objecter->osdmap_pool_full(in->layout.pool_id)) {
@@ -10300,8 +10903,6 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     }
   }
 
-  utime_t lat;
-  uint64_t totalwritten;
   int want, have;
   if (f->mode & CEPH_FILE_MODE_LAZY)
     want = CEPH_CAP_FILE_BUFFER | CEPH_CAP_FILE_LAZYIO;
@@ -10328,13 +10929,19 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
 
   ldout(cct, 10) << " snaprealm " << *in->snaprealm << dendl;
 
-  std::unique_ptr<C_SaferCond> onuninline = nullptr;
+  std::unique_ptr<Context> onuninline = nullptr;
+  std::unique_ptr<Context> iofinish = nullptr;
+  std::unique_ptr<Client_Write_Finisher> cwf = nullptr;
   
   if (in->inline_version < CEPH_INLINE_NONE) {
     if (endoff > cct->_conf->client_max_inline_size ||
         endoff > CEPH_INLINE_MAX_SIZE ||
         !(have & CEPH_CAP_FILE_BUFFER)) {
-      onuninline.reset(new C_SaferCond("Client::_write_uninline_data flock"));
+      if (onfinish) {
+        cwf_onuninline = new CWF_onuninline();
+        onuninline.reset(cwf_onuninline);
+      } else
+        onuninline.reset(new C_SaferCond("Client::_write_uninline_data flock"));
       uninline_data(in, onuninline.get());
     } else {
       get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
@@ -10358,6 +10965,22 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     }
   }
 
+  if (onfinish) {
+     cwf_iofinish = new CWF_iofinish();
+     iofinish.reset(cwf_iofinish);
+
+     cwf.reset(new
+       Client_Write_Finisher(this, onfinish, onuninline.get(), iofinish.get(),
+                             cct->_conf->client_oc &&
+                               (have & (CEPH_CAP_FILE_BUFFER |
+                                      CEPH_CAP_FILE_LAZYIO)),
+                             start, f, in, fpos, offset, size));
+
+    if (cwf_onuninline != NULL)
+      cwf_onuninline->CWF = cwf.get();
+    cwf_iofinish->CWF = cwf.get();
+  }
+
   if (cct->_conf->client_oc &&
       (have & (CEPH_CAP_FILE_BUFFER | CEPH_CAP_FILE_LAZYIO))) {
     // do buffered write
@@ -10370,7 +10993,25 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     r = objectcacher->file_write(&in->oset, &in->layout,
 				 in->snaprealm->get_snap_context(),
 				 offset, size, bl, ceph::real_clock::now(),
-				 0);
+				 0, iofinish.get());
+
+    if (onfinish) {
+      // handle async caller (onfinish != nullptr), we can now safely release
+      // all the managed pointers, but we might need to do something with
+      // iofinisher.
+      Context *iof = iofinish.release();
+      onuninline.release();
+      cwf.release();
+
+      if (r < 0) {
+        // should not get here, but...
+        iof->complete(r);
+      }
+
+      // allow caller to wait on onfinish...
+      return 0;
+    }
+
     put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
     if (r < 0)
@@ -10387,15 +11028,31 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
       _flush_range(in, offset, size);
 
     // simple, non-atomic sync write
-    C_SaferCond onfinish("Client::_write flock");
+    if (onfinish == nullptr) {
+      // We need a safer condition to wait on.
+      iofinish.reset(new C_SaferCond());
+    }
+
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
     filer->write_trunc(in->ino, &in->layout, in->snaprealm->get_snap_context(),
 		       offset, size, bl, ceph::real_clock::now(), 0,
 		       in->truncate_size, in->truncate_seq,
-		       &onfinish);
+		       iofinish.get());
+
+    if (onfinish) {
+      // handle async caller (onfinish != nullptr), we can now safely release
+      // all the managed pointers
+      iofinish.release();
+      onuninline.release();
+      cwf.release();
+
+      // allow caller to wait on onfinish...
+      return 0;
+    }
+
     client_lock.unlock();
-    r = onfinish.wait();
+    r = cwf_iofinish->wait();
     client_lock.lock();
     put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
     if (r < 0)
@@ -10404,46 +11061,17 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
 
   // if we get here, write was successful, update client metadata
 success:
-  update_write_io_size(size);
-  // time
-  lat = ceph_clock_now();
-  lat -= start;
-  logger->tinc(l_c_wrlat, lat);
 
-  if (fpos) {
-    lock_fh_pos(f);
-    f->pos = fpos;
-    unlock_fh_pos(f);
-  }
-  totalwritten = size;
-  r = (int64_t)totalwritten;
-
-  // extend file?
-  if (totalwritten + offset > in->size) {
-    in->size = totalwritten + offset;
-    in->mark_caps_dirty(CEPH_CAP_FILE_WR);
-
-    if (is_quota_bytes_approaching(in, f->actor_perms)) {
-      check_caps(in, CHECK_CAPS_NODELAY);
-    } else if (is_max_size_approaching(in)) {
-      check_caps(in, 0);
-    }
-
-    ldout(cct, 7) << "wrote to " << totalwritten+offset << ", extending file size" << dendl;
-  } else {
-    ldout(cct, 7) << "wrote to " << totalwritten+offset << ", leaving file size at " << in->size << dendl;
-  }
-
-  // mtime
-  in->mtime = in->ctime = ceph_clock_now();
-  in->change_attr++;
-  in->mark_caps_dirty(CEPH_CAP_FILE_WR);
+  // do not get here if async caller (onfinish != nullptr)
+  r = _write_success(f, start, fpos, offset, size, in);
 
 done:
 
+  // can not get here if async caller (onfinish != nullptr)
+
   if (nullptr != onuninline) {
     client_lock.unlock();
-    int uninline_ret = onuninline->wait();
+    int uninline_ret = cwf_onuninline->wait();
     client_lock.lock();
 
     if (uninline_ret >= 0 || uninline_ret == -CEPHFS_ECANCELED) {
@@ -10458,6 +11086,8 @@ done:
   put_cap_ref(in, CEPH_CAP_FILE_WR);
   return r;
 }
+
+// STRIPME: ================================================================
 
 int Client::_flush(Fh *f)
 {
@@ -14397,6 +15027,19 @@ int64_t Client::ll_readv(struct Fh *fh, const struct iovec *iov, int iovcnt, int
   return _preadv_pwritev_locked(fh, iov, iovcnt, off, false, false);
 }
 
+
+int Client::ll_preadv_pwritev(struct Fh *fh, const struct iovec *iov, int iovcnt,
+                              int64_t offset, bool write, Context *onfinish,
+                              bufferlist *bl)
+{
+    RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
+    if (!mref_reader.is_state_satisfied())
+      return -CEPHFS_ENOTCONN;
+
+    std::scoped_lock cl(client_lock);
+    return _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true,
+    				  onfinish, bl);
+}
 int Client::ll_flush(Fh *fh)
 {
   RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
@@ -15554,6 +16197,7 @@ const char** Client::get_tracked_conf_keys() const
     "client_oc_max_dirty",
     "client_oc_target_dirty",
     "client_oc_max_dirty_age",
+    "client_block_writes_upfront",
     NULL
   };
   return keys;
@@ -15586,6 +16230,9 @@ void Client::handle_conf_change(const ConfigProxy& conf,
   }
   if (changed.count("client_oc_max_dirty_age")) {
     objectcacher->set_max_dirty_age(cct->_conf->client_oc_max_dirty_age);
+  }
+  if (changed.count("client_block_writes_upfront")) {
+    objectcacher->set_block_writes_upfront(cct->_conf->client_oc_max_dirty_age);
   }
 }
 
