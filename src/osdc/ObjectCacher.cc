@@ -1722,7 +1722,8 @@ void ObjectCacher::retry_waiting_reads()
 }
 
 int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace,
-			 ZTracer::Trace *parent_trace)
+			 ZTracer::Trace *parent_trace,
+			 bool use_block_writes_upfront)
 {
   ceph_assert(ceph_mutex_is_locked(lock));
   ceph::real_time now = ceph::real_clock::now();
@@ -1813,7 +1814,8 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace,
     }
   }
 
-  int r = _wait_for_write(wr, bytes_written, oset, &trace, onfreespace);
+  int r = _wait_for_write(wr, bytes_written, oset, &trace, onfreespace,
+                          use_block_writes_upfront);
   delete wr;
 
   finish_contexts(cct, wait_for_reads, 0);
@@ -1893,14 +1895,15 @@ void ObjectCacher::_maybe_wait_for_writeback(uint64_t len,
 
 // blocking wait for write.
 int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
-				  ZTracer::Trace *trace, Context *onfreespace)
+				  ZTracer::Trace *trace, Context *onfreespace,
+                                  bool use_block_writes_upfront)
 {
   ceph_assert(ceph_mutex_is_locked(lock));
   ceph_assert(trace != nullptr);
   int ret = 0;
 
   if (max_dirty > 0 && !(wr->fadvise_flags & LIBRADOS_OP_FLAG_FADVISE_FUA)) {
-    if (block_writes_upfront) {
+    if (use_block_writes_upfront && block_writes_upfront) {
       _maybe_wait_for_writeback(len, trace);
       if (onfreespace)
 	onfreespace->complete(0);
@@ -1912,14 +1915,14 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
     // write-thru!  flush what we just wrote.
     ceph::condition_variable cond;
     bool done = false;
-    Context *fin = block_writes_upfront ?
+    Context *fin = use_block_writes_upfront && block_writes_upfront ?
       new C_Cond(cond, &done, &ret) : onfreespace;
     ceph_assert(fin);
     bool flushed = flush_set(oset, wr->extents, trace, fin);
     ceph_assert(!flushed);   // we just dirtied it, and didn't drop our lock!
     ldout(cct, 10) << "wait_for_write waiting on write-thru of " << len
 		   << " bytes" << dendl;
-    if (block_writes_upfront) {
+    if (use_block_writes_upfront && block_writes_upfront) {
       std::unique_lock l{lock, std::adopt_lock};
       cond.wait(l, [&done] { return done; });
       l.release();

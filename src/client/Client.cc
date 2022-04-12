@@ -9955,7 +9955,7 @@ bool Client_Read_Finisher::try_complete()
   return false;
 }
 
-struct CRF_onuninline : public C_SaferCond {
+struct CRF_onuninline : public Context {
   Client_Read_Finisher *CRF;
 
   CRF_onuninline()
@@ -10133,6 +10133,7 @@ int64_t Client::_read(Fh *f, int64_t offset, uint64_t size, bufferlist *bl,
   utime_t start = ceph_clock_now(); 
   CRF_onuninline *crf_onuninline = NULL;
   CRF_iofinish *crf_iofinish = NULL;
+  C_SaferCond *cond_onuninline = NULL;
 
   if ((f->mode & CEPH_FILE_MODE_RD) == 0)
     return -CEPHFS_EBADF;
@@ -10174,8 +10175,10 @@ retry:
       if (onfinish) {
         crf_onuninline = new CRF_onuninline();
         onuninline.reset(crf_onuninline);
-      } else
-        onuninline.reset(new C_SaferCond("Client::_write_uninline_data flock"));
+      } else {
+        cond_onuninline = new C_SaferCond("Client::_write_uninline_data flock"); 
+        onuninline.reset(cond_onuninline);
+      }
       uninline_data(in, onuninline.get());
     } else {
       uint32_t len = in->inline_data.length();
@@ -10302,9 +10305,9 @@ success:
 done:
   // done!
   
-  if (onuninline.get()) {
+  if (cond_onuninline != nullptr) {
     client_lock.unlock();
-    int ret = crf_onuninline->wait();
+    int ret = cond_onuninline->wait();
     client_lock.lock();
     if (ret >= 0 || ret == -CEPHFS_ECANCELED) {
       in->inline_data.clear();
@@ -10734,7 +10737,7 @@ void Client_Write_Finisher::finish_io(int r)
 
   ldout(clnt->cct, 3) << " write finish io r = " << r << dendl;
 
-  clnt->client_lock.lock();
+  //clnt->client_lock.lock();
 
   clnt->put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
@@ -10752,7 +10755,7 @@ void Client_Write_Finisher::finish_io(int r)
   iofinished_r = r;
   fini = try_complete();
 
-  clnt->client_lock.unlock();
+  //clnt->client_lock.unlock();
 
   if (fini)
     delete this;
@@ -10802,7 +10805,7 @@ bool Client_Write_Finisher::try_complete()
   return false;
 }
 
-struct CWF_onuninline : public C_SaferCond {
+struct CWF_onuninline : public Context {
   Client_Write_Finisher *CWF;
 
   CWF_onuninline()
@@ -10810,11 +10813,10 @@ struct CWF_onuninline : public C_SaferCond {
 
   void finish(int r) override {
     CWF->finish_onuninline(r);
-    complete(r);
   }
 };
 
-struct CWF_iofinish : public C_SaferCond {
+struct CWF_iofinish : public Context {
   Client_Write_Finisher *CWF;
 
   CWF_iofinish()
@@ -10833,6 +10835,8 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
   uint64_t fpos = 0;
   CWF_onuninline *cwf_onuninline = NULL;
   CWF_iofinish *cwf_iofinish = NULL;
+  C_SaferCond *cond_onuninline = NULL;
+  C_SaferCond *cond_iofinish = NULL;
 
   if ((uint64_t)(offset+size) > mdsmap->get_max_filesize()) //too large!
     return -CEPHFS_EFBIG;
@@ -10940,8 +10944,10 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
       if (onfinish) {
         cwf_onuninline = new CWF_onuninline();
         onuninline.reset(cwf_onuninline);
-      } else
-        onuninline.reset(new C_SaferCond("Client::_write_uninline_data flock"));
+      } else {
+        cond_onuninline = new C_SaferCond("Client::_write_uninline_data flock");
+        onuninline.reset(cond_onuninline);
+      }
       uninline_data(in, onuninline.get());
     } else {
       get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
@@ -10993,7 +10999,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     r = objectcacher->file_write(&in->oset, &in->layout,
 				 in->snaprealm->get_snap_context(),
 				 offset, size, bl, ceph::real_clock::now(),
-				 0, iofinish.get());
+				 0, iofinish.get(), onfinish == nullptr);
 
     if (onfinish) {
       // handle async caller (onfinish != nullptr), we can now safely release
@@ -11030,7 +11036,8 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     // simple, non-atomic sync write
     if (onfinish == nullptr) {
       // We need a safer condition to wait on.
-      iofinish.reset(new C_SaferCond());
+      cond_iofinish = new C_SaferCond();
+      iofinish.reset(cond_iofinish);
     }
 
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
@@ -11052,7 +11059,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     }
 
     client_lock.unlock();
-    r = cwf_iofinish->wait();
+    r = cond_iofinish->wait();
     client_lock.lock();
     put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
     if (r < 0)
@@ -11069,9 +11076,9 @@ done:
 
   // can not get here if async caller (onfinish != nullptr)
 
-  if (nullptr != onuninline) {
+  if (nullptr != cond_onuninline) {
     client_lock.unlock();
-    int uninline_ret = cwf_onuninline->wait();
+    int uninline_ret = cond_onuninline->wait();
     client_lock.lock();
 
     if (uninline_ret >= 0 || uninline_ret == -CEPHFS_ECANCELED) {

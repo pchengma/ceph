@@ -616,14 +616,16 @@ class ObjectCacher {
   int readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
 	    ZTracer::Trace *parent_trace = nullptr);
   int writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace,
-	     ZTracer::Trace *parent_trace = nullptr);
+	     ZTracer::Trace *parent_trace = nullptr,
+	     bool use_block_writes_upfront = true);
   bool is_cached(ObjectSet *oset, std::vector<ObjectExtent>& extents,
 		 snapid_t snapid);
 
 private:
   // write blocking
   int _wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
-                      ZTracer::Trace *trace, Context *onfreespace);
+                      ZTracer::Trace *trace, Context *onfreespace,
+                      bool use_block_writes_upfront = true);
   void _maybe_wait_for_writeback(uint64_t len, ZTracer::Trace *trace);
   bool _flush_set_finish(C_GatherBuilder *gather, Context *onfinish);
 
@@ -704,11 +706,11 @@ public:
   int file_write(ObjectSet *oset, file_layout_t *layout,
 		 const SnapContext& snapc, loff_t offset, uint64_t len,
 		 ceph::buffer::list& bl, ceph::real_time mtime, int flags,
-		 Context *onfreespace) {
+		 Context *onfreespace, bool use_block_writes_upfront = true) {
     OSDWrite *wr = prepare_write(snapc, bl, mtime, flags, 0);
     Striper::file_to_extents(cct, oset->ino, layout, offset, len,
 			     oset->truncate_size, wr->extents);
-    return writex(wr, oset, onfreespace);
+    return writex(wr, oset, onfreespace, nullptr, use_block_writes_upfront);
   }
 
   bool file_flush(ObjectSet *oset, file_layout_t *layout,
