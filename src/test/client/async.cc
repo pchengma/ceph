@@ -21,6 +21,19 @@
 
 #include "test/client/TestClient.h"
 
+#define dout_subsys ceph_subsys_client
+
+class C_SaferCond_t : public C_SaferCond {
+public:
+  C_SaferCond_t(const std::string &name) :
+    C_SaferCond(name)
+  {}
+  void complete(int r) override {
+  	ldout(g_ceph_context, 0) << "complete " << this << " << rc " << r << dendl;
+  	C_SaferCond::complete(r);
+  }
+};
+
 #if 1
 TEST_F(TestClient, LlreadvLlwritev) {
   int mypid = getpid();
@@ -58,24 +71,43 @@ TEST_F(TestClient, LlreadvLlwritev) {
   };
 
   ssize_t nwritten = iov_out[0].iov_len + iov_out[1].iov_len;
+  int64_t rc;
+  bufferlist bl;
 
+#if 1
   std::unique_ptr<C_SaferCond> writefinish = nullptr;
   std::unique_ptr<C_SaferCond> readfinish = nullptr;
 
-  writefinish.reset(new C_SaferCond("test-async"));
-  readfinish.reset(new C_SaferCond("test-async"));
-
-  int64_t rc;
-  bufferlist bl;
+  writefinish.reset(new C_SaferCond_t("test-async"));
+  readfinish.reset(new C_SaferCond_t("test-async"));
   rc = client->ll_preadv_pwritev(fh, iov_out, 2, 0, true, writefinish.get(), nullptr);
+  ldout(g_ceph_context, 0) << "==================================================================================================================== " << dendl;
+  ldout(g_ceph_context, 0) << "ll_preadv_pwritev for write returned " << rc << dendl;
   ASSERT_EQ(0, rc);
-  rc = writefinish.get()->wait();
+  ldout(g_ceph_context, 0) << "==================================================================================================================== " << dendl;
+  ldout(g_ceph_context, 0) << "wait_for for write " << writefinish.get() << dendl;
+  rc = writefinish.get()->wait_for(100);
+  ldout(g_ceph_context, 0) << "==================================================================================================================== " << dendl;
+  ldout(g_ceph_context, 0) << "wait_for for write returned " << rc << dendl;
   ASSERT_EQ(nwritten, rc);
 
   rc = client->ll_preadv_pwritev(fh, iov_in, 2, 0, false, readfinish.get(), &bl);
+  ldout(g_ceph_context, 0) << "==================================================================================================================== " << dendl;
+  ldout(g_ceph_context, 0) << "ll_preadv_pwritev for read returned " << rc << dendl;
   ASSERT_EQ(0, rc);
-  rc = readfinish.get()->wait();
+  ldout(g_ceph_context, 0) << "==================================================================================================================== " << dendl;
+  ldout(g_ceph_context, 0) << "wait_for for read " << readfinish.get() << dendl;
+  rc = readfinish.get()->wait_for(100);
+  ldout(g_ceph_context, 0) << "==================================================================================================================== " << dendl;
+  ldout(g_ceph_context, 0) << "wait_for for read returned " << rc << dendl;
   ASSERT_EQ(nwritten, rc);
+#else
+  rc = client->ll_preadv_pwritev_t(fh, iov_out, 2, 0, true, nullptr);
+  ASSERT_EQ(nwritten, rc);
+
+  rc = client->ll_preadv_pwritev_t(fh, iov_in, 2, 0, false, &bl);
+  ASSERT_EQ(nwritten, rc);
+#endif
   copy_bufferlist_to_iovec(iov_in, 2, &bl, rc);
 
   ASSERT_EQ(0, strncmp((const char*)iov_in[0].iov_base, (const char*)iov_out[0].iov_base, iov_out[0].iov_len));

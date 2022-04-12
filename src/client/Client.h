@@ -262,6 +262,10 @@ public:
   friend class Client_Read_Async_Finisher;
   friend class Client_Write_Finisher;
   friend class Client_Read_Sync_Async;
+  friend class CRF_onuninline;
+  friend class CRF_iofinish;
+  friend class CWF_onuninline;
+  friend class CWF_iofinish;
   friend void intrusive_ptr_release(Inode *in);
   template <typename T> friend struct RWRefState;
   template <typename T> friend class RWRef;

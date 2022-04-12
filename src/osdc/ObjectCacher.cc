@@ -1689,7 +1689,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
       rd->bl->claim_append(i->second);
       ceph_assert(rd->bl->length() == pos);
     }
-    ldout(cct, 10) << "readx  result is " << rd->bl->length() << dendl;
+    ldout(cct, 10) << "readx  result is " << rd->bl->length() << " pos is " << pos << dendl;
   } else if (!error) {
     ldout(cct, 10) << "readx  no bufferlist ptr (readahead?), done." << dendl;
     map<uint64_t,bufferlist>::reverse_iterator i = stripe_map.rbegin();
@@ -1698,7 +1698,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
 
   // done with read.
   int ret = error ? error : pos;
-  ldout(cct, 20) << "readx done " << rd << " " << ret << dendl;
+  ldout(cct, 10) << "readx done " << rd << " " << ret << dendl;
   ceph_assert(pos <= (uint64_t) INT_MAX);
 
   delete rd;
@@ -1731,6 +1731,8 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace,
   uint64_t bytes_written_in_flush = 0;
   bool dontneed = wr->fadvise_flags & LIBRADOS_OP_FLAG_FADVISE_DONTNEED;
   bool nocache = wr->fadvise_flags & LIBRADOS_OP_FLAG_FADVISE_NOCACHE;
+
+  ldout(cct, 10) << "writex entering" << dendl;
 
   ZTracer::Trace trace;
   if (parent_trace != nullptr) {
@@ -1841,7 +1843,9 @@ private:
 void ObjectCacher::C_WaitForWrite::finish(int r)
 {
   std::lock_guard l(m_oc->lock);
+  ldout(m_oc->cct, 10) << "C_WaitForWrite About to call _maybe_wait_for_writeback" << dendl;
   m_oc->_maybe_wait_for_writeback(m_len, &m_trace);
+  ldout(m_oc->cct, 10) << "C_WaitForWrite Done_maybe_wait_for_writeback" << dendl;
   m_onfinish->complete(r);
 }
 
@@ -1904,11 +1908,17 @@ int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
 
   if (max_dirty > 0 && !(wr->fadvise_flags & LIBRADOS_OP_FLAG_FADVISE_FUA)) {
     if (use_block_writes_upfront && block_writes_upfront) {
+      ldout(cct, 10) << "About to call _maybe_wait_for_writeback" << dendl;
       _maybe_wait_for_writeback(len, trace);
-      if (onfreespace)
+      ldout(cct, 10) << "Done_maybe_wait_for_writeback" << dendl;
+      if (onfreespace) {
+        ldout(cct, 10) << "About to call onfreespace->complete" << dendl;
 	onfreespace->complete(0);
+        ldout(cct, 10) << "Done onfreespace->complete" << dendl;
+      }
     } else {
       ceph_assert(onfreespace);
+      ldout(cct, 10) << "About to call finisher.queue" << dendl;
       finisher.queue(new C_WaitForWrite(this, len, *trace, onfreespace));
     }
   } else {

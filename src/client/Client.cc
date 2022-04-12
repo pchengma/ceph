@@ -9849,7 +9849,7 @@ public:
     delete this;
   }
 
-private:
+//private:
   Client *clnt;
   Context *onfinish;
   Context *onuninline;
@@ -9962,6 +9962,9 @@ struct CRF_onuninline : public Context {
     : CRF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CRF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CRF->clnt->cct, 3) << "CRF_onuninline::finish r = " << r << dendl;
     CRF->finish_onuninline(r);
     complete(r);
   }
@@ -9974,6 +9977,9 @@ struct CRF_iofinish : public Context {
     : CRF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CRF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CRF->clnt->cct, 3) << "CRF_iofinish::finish r = " << r << dendl;
     CRF->finish_io(r);
   }
   // For _read_async, we may not finish in one go, so be prepared for multiple
@@ -10228,6 +10234,7 @@ retry:
     if (f->flags & O_RSYNC) {
       _flush_range(in, offset, size);
     }
+    ldout(cct, 3) << "calling _read_async" << dendl;
     rc = _read_async(f, offset, size, bl, iofinish.get());
 
     if (onfinish) {
@@ -10443,6 +10450,7 @@ int Client::_read_async(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
     Context *crf = io_finish.release();
     if (r != 0) {
       // need to do readahead, so complete the crf
+      ldout(cct, 10) << "calling crf->complete(r) r = " << r << dendl;
       client_lock.unlock();
       crf->complete(r);
       client_lock.lock();
@@ -10604,10 +10612,10 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
         return w;
     } else {
         bufferlist bl;
-        ldout(cct, 3) << "calling preadv(" << fh << ", " <<  offset << ")" << dendl;
+        ldout(cct, 3) << "calling _read(" << fh << ", " <<  offset << ")" << dendl;
         int64_t r = _read(fh, offset, totallen, blp ? blp : &bl,
                           onfinish);
-        ldout(cct, 3) << "preadv(" << fh << ", " <<  offset << ") = " << r << dendl;
+        ldout(cct, 3) << "_read(" << fh << ", " <<  offset << ") = " << r << dendl;
         if (r <= 0) {
           if (r < 0 && onfinish != nullptr) {
             client_lock.unlock();
@@ -10711,7 +10719,7 @@ public:
     delete this;
   }
 
-private:
+//private:
   Client *clnt;
   Context *onfinish;
   Context *onuninline;
@@ -10791,7 +10799,12 @@ bool Client_Write_Finisher::try_complete()
 {
   client_t const whoami = clnt->whoami;  // For the benefit of ldout prefix
 
-  ldout(clnt->cct, 3) << "Client_Write_Finisher::try_complete" << dendl;
+  ldout(clnt->cct, 3) << "Client_Write_Finisher::try_complete"
+        << " onuninlinefinished=" << onuninlinefinished
+        << " onuninlinefinished_r=" << onuninlinefinished_r
+        << " iofinished=" << iofinished
+        << " iofinished_r=" << iofinished_r
+        << dendl;
 
   if (onuninlinefinished && iofinished) {
     clnt->put_cap_ref(in, CEPH_CAP_FILE_WR);
@@ -10812,6 +10825,9 @@ struct CWF_onuninline : public Context {
     : CWF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CWF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CWF->clnt->cct, 3) << "CWF_onuninline::finish" << dendl;
     CWF->finish_onuninline(r);
   }
 };
@@ -10823,6 +10839,9 @@ struct CWF_iofinish : public Context {
     : CWF(nullptr) {}
 
   void finish(int r) override {
+    client_t const whoami = CWF->clnt->whoami;  // For the benefit of ldout prefix
+
+    ldout(CWF->clnt->cct, 3) << "CWF_iofinish::finish" << dendl;
     CWF->finish_io(r);
   }
 };
@@ -10996,6 +11015,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
 
     // async, caching, non-blocking.
+    ldout(cct, 3) << "calling file_write" << dendl;
     r = objectcacher->file_write(&in->oset, &in->layout,
 				 in->snaprealm->get_snap_context(),
 				 offset, size, bl, ceph::real_clock::now(),
@@ -15044,6 +15064,7 @@ int Client::ll_preadv_pwritev(struct Fh *fh, const struct iovec *iov, int iovcnt
       return -CEPHFS_ENOTCONN;
 
     std::scoped_lock cl(client_lock);
+    ldout(cct, 3) << "calling _preadv_pwritev_locked write? " << write << dendl;
     return _preadv_pwritev_locked(fh, iov, iovcnt, offset, write, true,
     				  onfinish, bl);
 }
