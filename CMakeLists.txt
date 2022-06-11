@@ -185,7 +185,7 @@ endif()
 
 option(WITH_FUSE "Fuse is here" ON)
 if(WITH_FUSE)
-  find_package(FUSE)
+  find_package(FUSE REQUIRED)
   set(HAVE_LIBFUSE ${FUSE_FOUND})
 endif()
 
@@ -341,9 +341,11 @@ and then jemalloc. If neither of then is found. use the one in libc.")
 if(ALLOCATOR)
   if(${ALLOCATOR} MATCHES "tcmalloc(_minimal)?")
     find_package(gperftools 2.6.2 REQUIRED)
+    set(ALLOC_LIBS gperftools::${ALLOCATOR})
     set(HAVE_LIBTCMALLOC ON)
   elseif(${ALLOCATOR} STREQUAL "jemalloc")
     find_package(JeMalloc REQUIRED)
+    set(ALLOC_LIBS JeMalloc::JeMalloc)
     set(HAVE_JEMALLOC 1)
   elseif(NOT ALLOCATOR STREQUAL "libc")
     message(FATAL_ERROR "Unsupported allocator selected: ${ALLOCATOR}")
@@ -356,8 +358,10 @@ else(ALLOCATOR)
   endif()
   if(gperftools_FOUND)
     set(ALLOCATOR tcmalloc)
+    set(ALLOC_LIBS gperftools::tcmalloc)
   elseif(JeMalloc_FOUND)
     set(ALLOCATOR jemalloc)
+    set(ALLOC_LIBS JeMalloc::JeMalloc)
   else()
     if(NOT FREEBSD)
       # FreeBSD already has jemalloc as its default allocator
@@ -366,6 +370,13 @@ else(ALLOCATOR)
     set(ALLOCATOR "libc")
   endif(gperftools_FOUND)
 endif(ALLOCATOR)
+if(NOT ALLOCATOR STREQUAL "libc")
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-builtin-malloc>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-builtin-calloc>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-builtin-realloc>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-builtin-free>)
+endif()
 
 # Mingw generates incorrect entry points when using "-pie".
 if(WIN32 OR (HAVE_LIBTCMALLOC AND WITH_STATIC_LIBSTDCXX))

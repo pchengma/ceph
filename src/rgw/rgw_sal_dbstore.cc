@@ -156,7 +156,7 @@ namespace rgw::sal {
   int DBUser::read_attrs(const DoutPrefixProvider* dpp, optional_yield y)
   {
     int ret;
-    ret = store->getDB()->get_user(dpp, string("user_id"), "", info, &attrs,
+    ret = store->getDB()->get_user(dpp, string("user_id"), get_id().id, info, &attrs,
         &objv_tracker);
     return ret;
   }
@@ -196,7 +196,7 @@ namespace rgw::sal {
   {
     int ret = 0;
 
-    ret = store->getDB()->get_user(dpp, string("user_id"), "", info, &attrs,
+    ret = store->getDB()->get_user(dpp, string("user_id"), get_id().id, info, &attrs,
         &objv_tracker);
 
     return ret;
@@ -345,7 +345,7 @@ namespace rgw::sal {
     return 0;
   }
 
-  int DBBucket::check_quota(const DoutPrefixProvider *dpp, RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota, uint64_t obj_size,
+  int DBBucket::check_quota(const DoutPrefixProvider *dpp, RGWQuota& quota, uint64_t obj_size,
       optional_yield y, bool check_size_only)
   {
     /* Not Handled in the first pass as stats are also needed */
@@ -1660,7 +1660,7 @@ namespace rgw::sal {
   int DBStore::get_user_by_swift(const DoutPrefixProvider *dpp, const std::string& user_str, optional_yield y, std::unique_ptr<User>* user)
   {
     /* Swift keys and subusers are not supported for now */
-    return 0;
+    return -ENOTSUP;
   }
 
   std::string DBStore::get_cluster_id(const DoutPrefixProvider* dpp,  optional_yield y)
@@ -1834,7 +1834,7 @@ namespace rgw::sal {
     return;
   }
 
-  void DBStore::get_quota(RGWQuotaInfo& bucket_quota, RGWQuotaInfo& user_quota)
+  void DBStore::get_quota(RGWQuota& quota)
   {
     // XXX: Not handled for the first pass 
     return;
@@ -1908,7 +1908,7 @@ namespace rgw::sal {
 
   int DBStore::get_config_key_val(string name, bufferlist *bl)
   {
-    return 0;
+    return -ENOTSUP;
   }
 
   int DBStore::meta_list_keys_init(const DoutPrefixProvider *dpp, const string& section, const string& marker, void** phandle)

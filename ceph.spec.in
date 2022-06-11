@@ -36,7 +36,11 @@
 %bcond_with rbd_rwl_cache
 %endif
 %if 0%{?fedora} || 0%{?rhel}
+%if 0%{?rhel} < 9
 %bcond_with system_pmdk
+%else
+%bcond_without system_pmdk
+%endif
 %bcond_without selinux
 %if 0%{?rhel} >= 8
 %bcond_with cephfs_java
@@ -141,6 +145,13 @@
 %endif
 %endif
 
+%if 0%{with seastar}
+# disable -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1, as gcc-toolset-{9,10}-annobin
+# do not provide gcc-annobin.so anymore, despite that they provide annobin.so. but
+# redhat-rpm-config still passes -fplugin=gcc-annobin to the compiler.
+%undefine _annotated_build
+%endif
+
 #################################################################################
 # main package definition
 #################################################################################
@@ -188,7 +199,11 @@ BuildRequires:	fuse-devel
 %if 0%{with seastar} && 0%{?rhel}
 BuildRequires:	gcc-toolset-10-gcc-c++ >= 10.3.1-1.2
 %else
+%if 0%{?suse_version}
+BuildRequires:	gcc11-c++
+%else
 BuildRequires:	gcc-c++
+%endif
 %endif
 %if 0%{with tcmalloc}
 # libprofiler did not build on ppc64le until 2.7.90
@@ -251,7 +266,6 @@ BuildRequires:  hostname
 BuildRequires:  jq
 BuildRequires:	libuuid-devel
 BuildRequires:	python%{python3_pkgversion}-bcrypt
-BuildRequires:	python%{python3_pkgversion}-nose
 BuildRequires:	python%{python3_pkgversion}-pecan
 BuildRequires:	python%{python3_pkgversion}-requests
 BuildRequires:	python%{python3_pkgversion}-dateutil
@@ -1274,6 +1288,10 @@ env | sort
 mkdir -p %{_vpath_builddir}
 pushd %{_vpath_builddir}
 cmake .. \
+%if 0%{?suse_version}
+    -DCMAKE_C_COMPILER=gcc-11 \
+    -DCMAKE_CXX_COMPILER=g++-11 \
+%endif
     -DCMAKE_INSTALL_PREFIX=%{_prefix} \
     -DCMAKE_INSTALL_LIBDIR:PATH=%{_libdir} \
     -DCMAKE_INSTALL_LIBEXECDIR:PATH=%{_libexecdir} \
@@ -1286,6 +1304,9 @@ cmake .. \
     -DWITH_MANPAGE:BOOL=ON \
     -DWITH_PYTHON3:STRING=%{python3_version} \
     -DWITH_MGR_DASHBOARD_FRONTEND:BOOL=OFF \
+%if 0%{?suse_version}
+    -DWITH_RADOSGW_SELECT_PARQUET:BOOL=OFF \
+%endif
 %if 0%{without ceph_test_package}
     -DWITH_TESTS:BOOL=OFF \
 %endif
@@ -1724,6 +1745,7 @@ fi
 %dir %{_datadir}/ceph/mgr
 %{_datadir}/ceph/mgr/mgr_module.*
 %{_datadir}/ceph/mgr/mgr_util.*
+%{_datadir}/ceph/mgr/object_format.*
 %{_unitdir}/ceph-mgr@.service
 %{_unitdir}/ceph-mgr.target
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/mgr
