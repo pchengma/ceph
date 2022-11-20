@@ -6,7 +6,6 @@
 #include <memory>
 #include <optional>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
-#include <boost/smart_ptr/local_shared_ptr.hpp>
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_future.hh>
 
@@ -26,6 +25,8 @@
 #include "crimson/osd/pg_interval_interrupt_condition.h"
 #include "crimson/osd/ops_executer.h"
 #include "crimson/osd/osd_operations/client_request.h"
+#include "crimson/osd/osd_operations/logmissing_request.h"
+#include "crimson/osd/osd_operations/logmissing_request_reply.h"
 #include "crimson/osd/osd_operations/peering_event.h"
 #include "crimson/osd/osd_operations/replicated_request.h"
 #include "crimson/osd/osd_operations/background_recovery.h"
@@ -65,7 +66,7 @@ class PG : public boost::intrusive_ref_counter<
   DoutPrefixProvider
 {
   using ec_profile_t = std::map<std::string,std::string>;
-  using cached_map_t = boost::local_shared_ptr<const OSDMap>;
+  using cached_map_t = OSDMapService::cached_map_t;
 
   ClientRequest::PGPipeline client_request_pg_pipeline;
   PGPeeringPipeline peering_request_pg_pipeline;
@@ -201,7 +202,6 @@ public:
   void start_peering_event_operation(T &&evt, float delay = 0) {
     (void) shard_services.start_operation<LocalPeeringEvent>(
       this,
-      shard_services,
       pg_whoami,
       pgid,
       delay,
@@ -220,7 +220,9 @@ public:
     unsigned priority,
     PGPeeringEventURef on_grant,
     PGPeeringEventURef on_preempt) final {
-    shard_services.local_reserver.request_reservation(
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore = shard_services.local_request_reservation(
       pgid,
       on_grant ? make_lambda_context([this, on_grant=std::move(on_grant)] (int) {
 	start_peering_event_operation(std::move(*on_grant));
@@ -234,13 +236,17 @@ public:
 
   void update_local_background_io_priority(
     unsigned priority) final {
-    shard_services.local_reserver.update_priority(
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore = shard_services.local_update_priority(
       pgid,
       priority);
   }
 
   void cancel_local_background_io_reservation() final {
-    shard_services.local_reserver.cancel_reservation(
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore = shard_services.local_cancel_reservation(
       pgid);
   }
 
@@ -248,7 +254,9 @@ public:
     unsigned priority,
     PGPeeringEventURef on_grant,
     PGPeeringEventURef on_preempt) final {
-    shard_services.remote_reserver.request_reservation(
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore = shard_services.remote_request_reservation(
       pgid,
       on_grant ? make_lambda_context([this, on_grant=std::move(on_grant)] (int) {
 	start_peering_event_operation(std::move(*on_grant));
@@ -261,7 +269,9 @@ public:
   }
 
   void cancel_remote_recovery_reservation() final {
-    shard_services.remote_reserver.cancel_reservation(
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore =  shard_services.remote_cancel_reservation(
       pgid);
   }
 
@@ -285,10 +295,14 @@ public:
     // Not needed yet
   }
   void queue_want_pg_temp(const std::vector<int> &wanted) final {
-    shard_services.queue_want_pg_temp(pgid.pgid, wanted);
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore = shard_services.queue_want_pg_temp(pgid.pgid, wanted);
   }
   void clear_want_pg_temp() final {
-    shard_services.remove_want_pg_temp(pgid.pgid);
+    // TODO -- we probably want to add a mechanism for blocking on this
+    // after handling the peering event
+    std::ignore = shard_services.remove_want_pg_temp(pgid.pgid);
   }
   void check_recovery_sources(const OSDMapRef& newmap) final {
     // Not needed yet
@@ -431,7 +445,7 @@ public:
     return OstreamTemp(CLOG_ERROR, nullptr);
   }
 
-  ceph::signedspan get_mnow() final;
+  ceph::signedspan get_mnow() const final;
   HeartbeatStampsRef get_hb_stamps(int peer) final;
   void schedule_renew_lease(epoch_t plr, ceph::timespan delay) final;
 
@@ -496,6 +510,7 @@ public:
     const hobject_t &oid);
 
   using load_obc_ertr = crimson::errorator<
+    crimson::ct_error::enoent,
     crimson::ct_error::object_corrupted>;
   using load_obc_iertr =
     ::crimson::interruptible::interruptible_errorator<
@@ -503,17 +518,14 @@ public:
       load_obc_ertr>;
   using interruptor = ::crimson::interruptible::interruptor<
     ::crimson::osd::IOInterruptCondition>;
-  load_obc_iertr::future<
-    std::pair<crimson::osd::ObjectContextRef, bool>>
-  get_or_load_clone_obc(
-    hobject_t oid, crimson::osd::ObjectContextRef head_obc);
 
-  load_obc_iertr::future<
-    std::pair<crimson::osd::ObjectContextRef, bool>>
-  get_or_load_head_obc(hobject_t oid);
+  template<RWState::State State>
+  load_obc_iertr::future<crimson::osd::ObjectContextRef>
+  get_or_load_obc(
+    crimson::osd::ObjectContextRef head_obc, bool existed);
 
   load_obc_iertr::future<crimson::osd::ObjectContextRef>
-  load_head_obc(ObjectContextRef obc);
+  load_obc(ObjectContextRef obc);
 
   load_obc_iertr::future<>
   reload_obc(crimson::osd::ObjectContext& obc) const;
@@ -540,11 +552,21 @@ public:
     with_obc_func_t&& f);
 
   interruptible_future<> handle_rep_op(Ref<MOSDRepOp> m);
-  void handle_rep_op_reply(crimson::net::ConnectionRef conn,
-			   const MOSDRepOpReply& m);
+  void handle_rep_op_reply(const MOSDRepOpReply& m);
+  interruptible_future<> do_update_log_missing(Ref<MOSDPGUpdateLogMissing> m);
+  interruptible_future<> do_update_log_missing_reply(
+                         Ref<MOSDPGUpdateLogMissingReply> m);
+
 
   void print(std::ostream& os) const;
   void dump_primary(Formatter*);
+  seastar::future<> submit_error_log(
+    Ref<MOSDOp> m,
+    const OpInfo &op_info,
+    ObjectContextRef obc,
+    const std::error_code e,
+    ceph_tid_t rep_tid,
+    eversion_t &version);
 
 private:
   template<RWState::State State>
@@ -699,7 +721,14 @@ public:
 	return &it->second;
     }
   }
-  interruptible_future<std::tuple<bool, int>> already_complete(const osd_reqid_t& reqid);
+
+  struct complete_op_t {
+    const version_t user_version;
+    const eversion_t version;
+    const int err;
+  };
+  interruptible_future<std::optional<complete_op_t>>
+  already_complete(const osd_reqid_t& reqid);
   int get_recovery_op_priority() const {
     int64_t pri = 0;
     get_pgpool().info.opts.get(pool_opts_t::RECOVERY_OP_PRIORITY, &pri);
@@ -732,6 +761,8 @@ private:
   template <class T>
   friend class PeeringEvent;
   friend class RepRequest;
+  friend class LogMissingRequest;
+  friend class LogMissingRequestReply;
   friend class BackfillRecovery;
   friend struct PGFacade;
   friend class InternalClientRequest;
@@ -761,11 +792,16 @@ private:
   BackfillRecovery::BackfillRecoveryPipeline backfill_pipeline;
 
   friend class IOInterruptCondition;
+  struct log_update_t {
+    std::set<pg_shard_t> waiting_on;
+    seastar::shared_promise<> all_committed;
+  };
+  std::map<ceph_tid_t, log_update_t> log_entry_update_waiting_on;
 };
 
 struct PG::do_osd_ops_params_t {
-  crimson::net::ConnectionRef get_connection() const {
-    return nullptr;
+  crimson::net::ConnectionFRef &get_connection() const {
+    return conn;
   }
   osd_reqid_t get_reqid() const {
     return reqid;
@@ -786,7 +822,7 @@ struct PG::do_osd_ops_params_t {
   bool has_flag(uint32_t flag) const {
     return false;
  }
-  crimson::net::ConnectionRef conn;
+  crimson::net::ConnectionFRef &conn;
   osd_reqid_t reqid;
   utime_t mtime;
   epoch_t map_epoch;

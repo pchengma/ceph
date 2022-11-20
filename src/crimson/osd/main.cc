@@ -5,15 +5,16 @@
 #include <unistd.h>
 
 #include <iostream>
+#include <fstream>
 #include <random>
 
-#include <seastar/apps/lib/stop_signal.hh>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/print.hh>
 #include <seastar/core/prometheus.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/http/httpd.hh>
 #include <seastar/net/inet_address.hh>
+#include <seastar/util/closeable.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/std-compat.hh>
 
@@ -25,6 +26,7 @@
 #include "crimson/common/fatal_signal.h"
 #include "crimson/mon/MonClient.h"
 #include "crimson/net/Messenger.h"
+#include "crimson/osd/stop_signal.h"
 #include "global/pidfile.h"
 #include "osd.h"
 
@@ -107,16 +109,6 @@ static uint64_t get_nonce()
   }
 }
 
-static void configure_crc_handling(crimson::net::Messenger& msgr)
-{
-  if (local_conf()->ms_crc_data) {
-    msgr.set_crc_data();
-  }
-  if (local_conf()->ms_crc_header) {
-    msgr.set_crc_header();
-  }
-}
-
 seastar::future<> fetch_config()
 {
   // i don't have any client before joining the cluster, so no need to have
@@ -132,7 +124,6 @@ seastar::future<> fetch_config()
     auto msgr = crimson::net::Messenger::create(entity_name_t::CLIENT(),
                                                 "temp_mon_client",
                                                 get_nonce());
-    configure_crc_handling(*msgr);
     crimson::mon::Client monc{*msgr, *auth_handler};
     msgr->set_auth_client(&monc);
     msgr->start({&monc}).get();
@@ -173,6 +164,21 @@ static void override_seastar_opts(std::vector<const char*>& args)
   }
 }
 
+static std::ofstream maybe_set_logger()
+{
+  std::ofstream log_file_stream;
+  if (auto log_file = local_conf()->log_file; !log_file.empty()) {
+    log_file_stream.open(log_file, std::ios::app | std::ios::out);
+    try {
+      seastar::throw_system_error_on(log_file_stream.fail());
+    } catch (const std::system_error& e) {
+      ceph_abort_msg(fmt::format("unable to open log file: {}", e.what()));
+    }
+    logger().set_ostream(log_file_stream);
+  }
+  return log_file_stream;
+}
+
 int main(int argc, const char* argv[])
 {
   seastar::app_template::config app_cfg;
@@ -185,7 +191,8 @@ int main(int argc, const char* argv[])
     ("mkfs", "create a [new] data directory")
     ("debug", "enable debug output on all loggers")
     ("trace", "enable trace output on all loggers")
-    ("no-mon-config", "do not retrieve configuration from monitors on boot")
+    ("osdspec-affinity", bpo::value<std::string>()->default_value(std::string{}),
+     "set affinity to an osdspec")
     ("prometheus_port", bpo::value<uint16_t>()->default_value(0),
      "Prometheus port. Set to zero to disable")
     ("prometheus_address", bpo::value<std::string>()->default_value("0.0.0.0"),
@@ -206,7 +213,6 @@ int main(int argc, const char* argv[])
                                               CEPH_ENTITY_TYPE_OSD,
                                               &cluster_name,
                                               &conf_file_list);
-  seastar::sharded<crimson::osd::OSD> osd;
   using crimson::common::sharded_conf;
   using crimson::common::sharded_perf_coll;
   try {
@@ -222,22 +228,23 @@ int main(int argc, const char* argv[])
               seastar::log_level::debug
             );
           }
-	  if (config.count("trace")) {
-	    seastar::global_logger_registry().set_all_loggers_level(
+          if (config.count("trace")) {
+            seastar::global_logger_registry().set_all_loggers_level(
               seastar::log_level::trace
             );
-	  }
+          }
           sharded_conf().start(init_params.name, cluster_name).get();
-          auto stop_conf = seastar::defer([] {
-            sharded_conf().stop().get();
-          });
+          local_conf().start().get();
+          auto stop_conf = seastar::deferred_stop(sharded_conf());
           sharded_perf_coll().start().get();
-          auto stop_perf_coll = seastar::defer([] {
-            sharded_perf_coll().stop().get();
-          });
+          auto stop_perf_coll = seastar::deferred_stop(sharded_perf_coll());
           local_conf().parse_config_files(conf_file_list).get();
           local_conf().parse_env().get();
           local_conf().parse_argv(config_proxy_args).get();
+          auto log_file_stream = maybe_set_logger();
+          auto reset_logger = seastar::defer([] {
+            logger().set_ostream(std::cerr);
+          });
           if (const auto ret = pidfile_write(local_conf()->pid_file);
               ret == -EACCES || ret == -EAGAIN) {
             ceph_abort_msg(
@@ -256,9 +263,7 @@ int main(int argc, const char* argv[])
           if (uint16_t prom_port = config["prometheus_port"].as<uint16_t>();
               prom_port != 0) {
             prom_server.start("prometheus").get();
-            stop_prometheus = seastar::make_shared(seastar::defer([&] {
-              prom_server.stop().get();
-            }));
+            stop_prometheus = seastar::make_shared(seastar::deferred_stop(prom_server));
 
             seastar::prometheus::config prom_config;
             prom_config.prefix = config["prometheus_prefix"].as<std::string>();
@@ -283,24 +288,23 @@ int main(int argc, const char* argv[])
             msgr = crimson::net::Messenger::create(entity_name_t::OSD(whoami),
                                                    name,
                                                    nonce);
-            configure_crc_handling(*msgr);
           }
           auto store = crimson::os::FuturizedStore::create(
             local_conf().get_val<std::string>("osd_objectstore"),
             local_conf().get_val<std::string>("osd_data"),
             local_conf().get_config_values()).get();
 
-          osd.start_single(whoami, nonce,
-                           std::ref(*store),
-                           cluster_msgr, client_msgr,
-                           hb_front_msgr, hb_back_msgr).get();
-          auto stop_osd = seastar::defer([&] {
-            osd.stop().get();
-          });
+          crimson::osd::OSD osd(
+            whoami, nonce, std::ref(should_stop.abort_source()),
+            std::ref(*store), cluster_msgr, client_msgr,
+	    hb_front_msgr, hb_back_msgr);
+
           if (config.count("mkkey")) {
             make_keyring().get();
           }
-          if (config.count("no-mon-config") == 0) {
+          if (local_conf()->no_mon_config) {
+            logger().info("bypassing the config fetch due to --no-mon-config");
+          } else {
             fetch_config().get();
           }
           if (config.count("mkfs")) {
@@ -309,20 +313,22 @@ int main(int argc, const char* argv[])
               // use a random osd uuid if not specified
               osd_uuid.generate_random();
             }
-            osd.invoke_on(
-              0,
-              &crimson::osd::OSD::mkfs,
+            osd.mkfs(
+	      *store,
+	      whoami,
               osd_uuid,
-              local_conf().get_val<uuid_d>("fsid")).get();
+              local_conf().get_val<uuid_d>("fsid"),
+              config["osdspec-affinity"].as<std::string>()).get();
           }
           if (config.count("mkkey") || config.count("mkfs")) {
             return EXIT_SUCCESS;
           } else {
-            osd.invoke_on(0, &crimson::osd::OSD::start).get();
+            osd.start().get();
           }
           logger().info("crimson startup completed");
           should_stop.wait().get();
           logger().info("crimson shutting down");
+          osd.stop().get();
           // stop()s registered using defer() are called here
         } catch (...) {
           logger().error("startup failed: {}", std::current_exception());

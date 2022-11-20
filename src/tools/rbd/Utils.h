@@ -4,6 +4,7 @@
 #ifndef CEPH_RBD_UTILS_H
 #define CEPH_RBD_UTILS_H
 
+#include "include/compat.h"
 #include "include/int_types.h"
 #include "include/rados/librados.hpp"
 #include "include/rbd/librbd.hpp"
@@ -84,6 +85,18 @@ struct ProgressContext : public librbd::ProgressContext {
 
 int get_percentage(uint64_t part, uint64_t whole);
 
+struct EncryptionOptions {
+    std::vector<librbd::encryption_spec_t> specs;
+    std::vector<librbd::encryption_luks_format_options_t> luks_opts;
+
+    ~EncryptionOptions() {
+      for (auto& opts : luks_opts) {
+        auto& passphrase = opts.passphrase;
+        ceph_memzero_s(&passphrase[0], passphrase.size(), passphrase.size());
+      }
+    }
+};
+
 template <typename T, void(T::*MF)(int)>
 librbd::RBD::AioCompletion *create_aio_completion(T *t) {
   return new librbd::RBD::AioCompletion(
@@ -104,9 +117,14 @@ std::string get_positional_argument(
 void normalize_pool_name(std::string* pool_name);
 std::string get_default_pool_name();
 
+int get_image_or_snap_spec(const boost::program_options::variables_map &vm,
+                           std::string *spec);
+
+void append_options_as_args(const std::vector<std::string> &options,
+                            std::vector<std::string> *args);
+
 int get_pool_and_namespace_names(
-    const boost::program_options::variables_map &vm,
-    bool default_empty_pool_name, bool validate_pool_name,
+    const boost::program_options::variables_map &vm, bool validate_pool_name,
     std::string* pool_name, std::string* namespace_name, size_t *arg_index);
 
 int get_pool_image_snapshot_names(
@@ -156,6 +174,9 @@ int get_formatter(const boost::program_options::variables_map &vm,
 
 int get_snap_create_flags(const boost::program_options::variables_map &vm,
                           uint32_t *flags);
+
+int get_encryption_options(const boost::program_options::variables_map &vm,
+                           EncryptionOptions* opts);
 
 void init_context();
 

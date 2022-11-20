@@ -1,3 +1,5 @@
+.. _cephadm_deploying_new_cluster:
+
 ============================
 Deploying a new Ceph cluster
 ============================
@@ -7,7 +9,6 @@ host, expanding the cluster to encompass any additional hosts, and
 then deploying the needed services.
 
 .. highlight:: console
-
 
 .. _cephadm-host-requirements:
 
@@ -35,16 +36,11 @@ Ceph.
 Install cephadm
 ===============
 
-The ``cephadm`` command can 
-
-#. bootstrap a new cluster
-#. launch a containerized shell with a working Ceph CLI
-#. aid in debugging containerized Ceph daemons
-
 There are two ways to install ``cephadm``:
 
 #. a :ref:`curl-based installation<cephadm_install_curl>` method
 #. :ref:`distribution-specific installation methods<cephadm_install_distros>`
+
 
 .. _cephadm_install_curl:
 
@@ -216,8 +212,8 @@ available options.
       EOF
       $ ./cephadm bootstrap --config initial-ceph.conf ...
 
-* The ``--ssh-user *<user>*`` option makes it possible to choose which ssh
-  user cephadm will use to connect to hosts. The associated ssh key will be
+* The ``--ssh-user *<user>*`` option makes it possible to choose which SSH 
+  user cephadm will use to connect to hosts. The associated SSH key will be
   added to ``/home/*<user>*/.ssh/authorized_keys``. The user that you 
   designate with this option must have passwordless sudo access.
 

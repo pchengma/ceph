@@ -163,13 +163,13 @@ int RGWShardCollectCR::operate(const DoutPrefixProvider *dpp) {
     while (spawn_next()) {
       current_running++;
 
-      while (current_running >= max_concurrent) {
+      if (current_running >= max_concurrent) {
         int child_ret;
         yield wait_for_child();
         if (collect_next(&child_ret)) {
           current_running--;
-          if (child_ret < 0 && child_ret != -ENOENT) {
-            ldout(cct, 10) << __func__ << ": failed to fetch log status, ret=" << child_ret << dendl;
+          child_ret = handle_result(child_ret);
+          if (child_ret < 0) {
             status = child_ret;
           }
         }
@@ -180,8 +180,8 @@ int RGWShardCollectCR::operate(const DoutPrefixProvider *dpp) {
       yield wait_for_child();
       if (collect_next(&child_ret)) {
         current_running--;
-        if (child_ret < 0 && child_ret != -ENOENT) {
-          ldout(cct, 10) << __func__ << ": failed to fetch log status, ret=" << child_ret << dendl;
+        child_ret = handle_result(child_ret);
+        if (child_ret < 0) {
           status = child_ret;
         }
       }
@@ -204,6 +204,15 @@ class RGWReadRemoteMDLogInfoCR : public RGWShardCollectCR {
   int shard_id;
 #define READ_MDLOG_MAX_CONCURRENT 10
 
+  int handle_result(int r) override {
+    if (r == -ENOENT) { // ENOENT is not a fatal error
+      return 0;
+    }
+    if (r < 0) {
+      ldout(cct, 4) << "failed to fetch mdlog status: " << cpp_strerror(r) << dendl;
+    }
+    return r;
+  }
 public:
   RGWReadRemoteMDLogInfoCR(RGWMetaSyncEnv *_sync_env,
                      const std::string& period, int _num_shards,
@@ -225,6 +234,15 @@ class RGWListRemoteMDLogCR : public RGWShardCollectCR {
   map<int, string>::iterator iter;
 #define READ_MDLOG_MAX_CONCURRENT 10
 
+  int handle_result(int r) override {
+    if (r == -ENOENT) { // ENOENT is not a fatal error
+      return 0;
+    }
+    if (r < 0) {
+      ldout(cct, 4) << "failed to list remote mdlog shard: " << cpp_strerror(r) << dendl;
+    }
+    return r;
+  }
 public:
   RGWListRemoteMDLogCR(RGWMetaSyncEnv *_sync_env,
                      const std::string& period, map<int, string>& _shards,
@@ -661,7 +679,7 @@ public:
       }
       while (!lease_cr->is_locked()) {
         if (lease_cr->is_done()) {
-          ldpp_dout(dpp, 5) << "lease cr failed, done early " << dendl;
+          ldpp_dout(dpp, 5) << "failed to take lease" << dendl;
           set_status("lease lock failed, early abort");
           return set_cr_error(lease_cr->get_ret_status());
         }
@@ -739,6 +757,16 @@ class RGWReadSyncStatusMarkersCR : public RGWShardCollectCR {
   int shard_id{0};
   map<uint32_t, rgw_meta_sync_marker>& markers;
 
+  int handle_result(int r) override {
+    if (r == -ENOENT) { // ENOENT is not a fatal error
+      return 0;
+    }
+    if (r < 0) {
+      ldout(cct, 4) << "failed to read metadata sync markers: "
+          << cpp_strerror(r) << dendl;
+    }
+    return r;
+  }
  public:
   RGWReadSyncStatusMarkersCR(RGWMetaSyncEnv *env, int num_shards,
                              map<uint32_t, rgw_meta_sync_marker>& markers)
@@ -876,6 +904,7 @@ public:
     append_section_from_set(all_sections, "user");
     append_section_from_set(all_sections, "bucket.instance");
     append_section_from_set(all_sections, "bucket");
+    append_section_from_set(all_sections, "roles");
 
     std::move(all_sections.begin(), all_sections.end(),
               std::back_inserter(sections));
@@ -897,8 +926,8 @@ public:
       }
       while (!lease_cr->is_locked()) {
         if (lease_cr->is_done()) {
-          ldpp_dout(dpp, 5) << "lease cr failed, done early " << dendl;
-          set_status("failed acquiring lock");
+          ldpp_dout(dpp, 5) << "failed to take lease" << dendl;
+          set_status("lease lock failed, early abort");
           return set_cr_error(lease_cr->get_ret_status());
         }
         set_sleeping(true);
@@ -948,6 +977,7 @@ public:
           for (; iter != result.keys.end(); ++iter) {
             if (!lease_cr->is_locked()) {
               lost_lock = true;
+              tn->log(1, "lease is lost, abort");
               break;
             }
             yield; // allow entries_index consumer to make progress
@@ -1293,13 +1323,12 @@ int RGWMetaSyncSingleEntryCR::operate(const DoutPrefixProvider *dpp) {
       sync_status = retcode;
 
       if (sync_status == -ENOENT) {
-        /* FIXME: do we need to remove the entry from the local zone? */
         break;
       }
 
       if (sync_status < 0) {
         if (tries < NUM_TRANSIENT_ERROR_RETRIES - 1) {
-          ldpp_dout(dpp, 20) << *this << ": failed to fetch remote metadata: " << section << ":" << key << ", will retry" << dendl;
+          ldpp_dout(dpp, 20) << *this << ": failed to fetch remote metadata entry: " << section << ":" << key << ", will retry" << dendl;
           continue;
         }
 
@@ -1316,14 +1345,18 @@ int RGWMetaSyncSingleEntryCR::operate(const DoutPrefixProvider *dpp) {
     retcode = 0;
     for (tries = 0; tries < NUM_TRANSIENT_ERROR_RETRIES; tries++) {
       if (sync_status != -ENOENT) {
-        tn->log(10, SSTR("storing local metadata entry"));
+        tn->log(10, SSTR("storing local metadata entry: " << section << ":" << key));
         yield call(new RGWMetaStoreEntryCR(sync_env, raw_key, md_bl));
       } else {
-        tn->log(10, SSTR("removing local metadata entry"));
+        tn->log(10, SSTR("removing local metadata entry:" << section << ":" << key));
         yield call(new RGWMetaRemoveEntryCR(sync_env, raw_key));
+        if (retcode == -ENOENT) {
+          retcode = 0;
+          break;
+        }
       }
       if ((retcode < 0) && (tries < NUM_TRANSIENT_ERROR_RETRIES - 1)) {
-        ldpp_dout(dpp, 20) << *this << ": failed to store metadata: " << section << ":" << key << ", got retcode=" << retcode << dendl;
+        ldpp_dout(dpp, 20) << *this << ": failed to store metadata entry: " << section << ":" << key << ", got retcode=" << retcode << ", will retry" << dendl;
         continue;
       }
       break;
@@ -1589,7 +1622,7 @@ public:
       /* sync! */
       do {
         if (!lease_cr->is_locked()) {
-          tn->log(10, "lost lease");
+          tn->log(1, "lease is lost, abort");
           lost_lock = true;
           break;
         }
@@ -1624,7 +1657,7 @@ public:
               pos_to_prev[marker] = marker;
             }
             // limit spawn window
-            while (num_spawned() > cct->_conf->rgw_meta_sync_spawn_window) {
+            while (num_spawned() > static_cast<size_t>(cct->_conf->rgw_meta_sync_spawn_window)) {
               yield wait_for_child();
               collect_children();
             }
@@ -1722,7 +1755,7 @@ public:
         while (!lease_cr->is_locked()) {
           if (lease_cr->is_done()) {
             drain_all();
-            tn->log(10, "failed to take lease");
+            tn->log(5, "failed to take lease");
             return lease_cr->get_ret_status();
           }
           set_sleeping(true);
@@ -1755,7 +1788,7 @@ public:
       do {
         if (!lease_cr->is_locked()) {
           lost_lock = true;
-          tn->log(10, "lost lease");
+          tn->log(1, "lease is lost, abort");
           break;
         }
 #define INCREMENTAL_MAX_ENTRIES 100
@@ -1823,7 +1856,7 @@ public:
                 pos_to_prev[log_iter->id] = marker;
               }
               // limit spawn window
-              while (num_spawned() > cct->_conf->rgw_meta_sync_spawn_window) {
+              while (num_spawned() > static_cast<size_t>(cct->_conf->rgw_meta_sync_spawn_window)) {
                 yield wait_for_child();
                 collect_children();
               }

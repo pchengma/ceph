@@ -8,7 +8,6 @@
 #include <utility>
 #include <boost/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
-#include <boost/smart_ptr/local_shared_ptr.hpp>
 #include <seastar/core/chunked_fifo.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_future.hh>
@@ -43,6 +42,7 @@ class OpsExecuter : public seastar::enable_lw_shared_from_this<OpsExecuter> {
     crimson::ct_error::eexist,
     crimson::ct_error::enospc,
     crimson::ct_error::edquot,
+    crimson::ct_error::cmp_fail,
     crimson::ct_error::eagain,
     crimson::ct_error::invarg,
     crimson::ct_error::erange,
@@ -94,7 +94,7 @@ public:
   // with other message types than just the `MOSDOp`. The type erasure
   // happens in the ctor of `OpsExecuter`.
   struct ExecutableMessage {
-    virtual crimson::net::ConnectionRef get_connection() const = 0;
+    virtual const crimson::net::ConnectionFRef &get_connection() const = 0;
     virtual osd_reqid_t get_reqid() const = 0;
     virtual utime_t get_mtime() const = 0;
     virtual epoch_t get_map_epoch() const = 0;
@@ -109,7 +109,7 @@ public:
   public:
     ExecutableMessagePimpl(const ImplT* pimpl) : pimpl(pimpl) {
     }
-    crimson::net::ConnectionRef get_connection() const final {
+    const crimson::net::ConnectionFRef &get_connection() const final {
       return pimpl->get_connection();
     }
     osd_reqid_t get_reqid() const final {
@@ -166,6 +166,8 @@ private:
 
   Ref<PG> pg; // for the sake of object class
   ObjectContextRef obc;
+  ObjectContextRef clone_obc; // if we create a clone
+  ObjectState head_os;
   const OpInfo& op_info;
   ceph::static_ptr<ExecutableMessage,
                    sizeof(ExecutableMessagePimpl<void>)> msg;
@@ -175,6 +177,8 @@ private:
 
   size_t num_read = 0;    ///< count read ops
   size_t num_write = 0;   ///< count update ops
+
+  SnapContext snapc; // writer snap context
 
   // this gizmo could be wrapped in std::optional for the sake of lazy
   // initialization. we don't need it for ops that doesn't have effect
@@ -221,6 +225,16 @@ private:
     OSDOp& osd_op,
     const ObjectState& os);
 
+  using list_snaps_ertr = read_errorator::extend<
+    crimson::ct_error::invarg>;
+  using list_snaps_iertr = ::crimson::interruptible::interruptible_errorator<
+    ::crimson::osd::IOInterruptCondition,
+    list_snaps_ertr>;
+  list_snaps_iertr::future<> do_list_snaps(
+    OSDOp& osd_op,
+    const ObjectState& os,
+    const SnapSet& ss);
+
   template <class Func>
   auto do_const_op(Func&& f);
 
@@ -232,7 +246,21 @@ private:
   }
 
   template <class Func>
-  auto do_write_op(Func&& f, bool um);
+  auto do_snapset_op(Func&& f) {
+    ++num_read;
+    return std::invoke(
+      std::forward<Func>(f),
+      std::as_const(obc->obs),
+      std::as_const(obc->ssc->snapset));
+  }
+
+  enum class modified_by {
+    user,
+    sys,
+  };
+
+  template <class Func>
+  auto do_write_op(Func&& f, modified_by m = modified_by::user);
 
   decltype(auto) dont_do_legacy_op() {
     return crimson::ct_error::operation_not_supported::make();
@@ -246,11 +274,13 @@ public:
   OpsExecuter(Ref<PG> pg,
               ObjectContextRef obc,
               const OpInfo& op_info,
-              const MsgT& msg)
+              const MsgT& msg,
+              const SnapContext& snapc)
     : pg(std::move(pg)),
       obc(std::move(obc)),
       op_info(op_info),
-      msg(std::in_place_type_t<ExecutableMessagePimpl<MsgT>>{}, &msg) {
+      msg(std::in_place_type_t<ExecutableMessagePimpl<MsgT>>{}, &msg),
+      snapc(snapc) {
   }
 
   template <class Func>
@@ -272,6 +302,10 @@ public:
   std::vector<pg_log_entry_t> prepare_transaction(
     const std::vector<OSDOp>& ops);
   void fill_op_params_bump_pg_version();
+
+  ObjectContextRef get_obc() const {
+    return obc;
+  }
 
   const object_info_t &get_object_info() const {
     return obc->obs.oi;
@@ -299,6 +333,17 @@ public:
   }
 
   version_t get_last_user_version() const;
+
+  const SnapContext& get_snapc() const {
+    return snapc;
+  }
+
+  void make_writeable(std::vector<pg_log_entry_t>& log_entries);
+
+  const object_info_t prepare_clone(
+    const hobject_t& coid);
+
+  void apply_stats();
 };
 
 template <class Context, class MainFunc, class EffectFunc>
@@ -355,6 +400,8 @@ OpsExecuter::flush_changes_n_do_ops_effects(
   if (want_mutate) {
     fill_op_params_bump_pg_version();
     auto log_entries = prepare_transaction(ops);
+    make_writeable(log_entries);
+    apply_stats();
     auto [submitted, all_completed] = std::forward<MutFunc>(mut_func)(std::move(txn),
                                                     std::move(obc),
                                                     std::move(*osd_op_params),

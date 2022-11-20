@@ -17,6 +17,7 @@
 #include "common/Formatter.h"
 #include "rgw_formats.h"
 #include "rgw_metadata.h"
+#include "rgw_sal_fwd.h"
 
 #define RGW_USER_ANON_ID "anonymous"
 
@@ -31,9 +32,6 @@ class RGWBucketCtl;
 class RGWUserBuckets;
 
 class RGWGetUserStats_CB;
-namespace rgw { namespace sal {
-class Store;
-} }
 
 /**
  * A string wrapper that includes encode/decode functions
@@ -862,14 +860,6 @@ public:
                   const RGWUserInfo& info, optional_yield y,
                   const RemoveParams& params = {});
 
-  int add_bucket(const DoutPrefixProvider *dpp, 
-                 const rgw_user& user,
-                 const rgw_bucket& bucket,
-                 ceph::real_time creation_time,
-		 optional_yield y);
-  int remove_bucket(const DoutPrefixProvider *dpp, 
-                    const rgw_user& user,
-                    const rgw_bucket& bucket, optional_yield y);
   int list_buckets(const DoutPrefixProvider *dpp, 
                    const rgw_user& user,
                    const std::string& marker,
@@ -881,18 +871,11 @@ public:
 		   optional_yield y,
                    uint64_t default_max = 1000);
 
-  int flush_bucket_stats(const DoutPrefixProvider *dpp, 
-                         const rgw_user& user,
-                         const RGWBucketEnt& ent,
-			 optional_yield y);
-  int complete_flush_stats(const DoutPrefixProvider *dpp, const rgw_user& user, optional_yield y);
-  int reset_stats(const DoutPrefixProvider *dpp, const rgw_user& user, optional_yield y);
   int read_stats(const DoutPrefixProvider *dpp, 
                  const rgw_user& user, RGWStorageStats *stats,
 		 optional_yield y,
 		 ceph::real_time *last_stats_sync = nullptr,     /* last time a full stats sync completed */
 		 ceph::real_time *last_stats_update = nullptr);   /* last time a stats update was done */
-  int read_stats_async(const DoutPrefixProvider *dpp, const rgw_user& user, RGWGetUserStats_CB *ctx);
 };
 
 class RGWUserMetaHandlerAllocator {

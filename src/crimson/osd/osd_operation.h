@@ -43,6 +43,9 @@ enum class OperationTypeCode {
   background_recovery,
   background_recovery_sub,
   internal_client_request,
+  historic_client_request,
+  logmissing_request,
+  logmissing_request_reply,
   last_op
 };
 
@@ -56,6 +59,9 @@ static constexpr const char* const OP_NAMES[] = {
   "background_recovery",
   "background_recovery_sub",
   "internal_client_request",
+  "historic_client_request",
+  "logmissing_request",
+  "logmissing_request_reply",
 };
 
 // prevent the addition of OperationTypeCode-s with no matching OP_NAMES entry:
@@ -77,6 +83,7 @@ template <typename T>
 struct OperationT : InterruptibleOperation {
   static constexpr const char *type_name = OP_NAMES[static_cast<int>(T::type)];
   using IRef = boost::intrusive_ptr<T>;
+  using ICRef = boost::intrusive_ptr<const T>;
 
   unsigned get_type() const final {
     return static_cast<unsigned>(T::type);
@@ -101,6 +108,7 @@ class TrackableOperationT : public OperationT<T> {
     return static_cast<const T*>(this);
   }
 
+protected:
   template<class EventT>
   decltype(auto) get_event() {
     // all out derivates are supposed to define the list of tracking
@@ -109,7 +117,11 @@ class TrackableOperationT : public OperationT<T> {
     return std::get<EventT>(that()->tracking_events);
   }
 
-protected:
+  template<class EventT>
+  decltype(auto) get_event() const {
+    return std::get<EventT>(that()->tracking_events);
+  }
+
   using OperationT<T>::OperationT;
 
   struct StartEvent : TimeEvent<StartEvent> {};
@@ -139,6 +151,14 @@ protected:
 template <class T>
 class PhasedOperationT : public TrackableOperationT<T> {
   using base_t = TrackableOperationT<T>;
+
+  T* that() {
+    return static_cast<T*>(this);
+  }
+  const T* that() const {
+    return static_cast<const T*>(this);
+  }
+
 protected:
   using TrackableOperationT<T>::TrackableOperationT;
 
@@ -147,18 +167,19 @@ protected:
     return this->template with_blocking_event<typename StageT::BlockingEvent,
 	                                      InterruptorT>(
       [&stage, this] (auto&& trigger) {
-        return handle.enter<T>(stage, std::move(trigger));
+        // delegated storing the pipeline handle to let childs to match
+        // the lifetime of pipeline with e.g. ConnectedSocket (important
+        // for ConnectionPipeline).
+        return that()->get_handle().template enter<T>(stage, std::move(trigger));
     });
   }
-
-  PipelineHandle handle;
 
   template <class OpT>
   friend class crimson::os::seastore::OperationProxyT;
 
-  // OSD::start_pg_operation needs access to enter_stage, we can make this
+  // PGShardManager::start_pg_operation needs access to enter_stage, we can make this
   // more sophisticated later on
-  friend class OSD;
+  friend class PGShardManager;
 };
 
 /**
@@ -167,7 +188,19 @@ protected:
 struct OSDOperationRegistry : OperationRegistryT<
   static_cast<size_t>(OperationTypeCode::last_op)
 > {
-  size_t dump_client_requests(ceph::Formatter* f) const;
+  OSDOperationRegistry();
+
+  void do_stop() override;
+
+  void put_historic(const class ClientRequest& op);
+
+  size_t dump_historic_client_requests(ceph::Formatter* f) const;
+  size_t dump_slowest_historic_client_requests(ceph::Formatter* f) const;
+
+private:
+  op_list::const_iterator last_of_recents;
+  size_t num_recent_ops = 0;
+  size_t num_slow_ops = 0;
 };
 /**
  * Throttles set of currently running operations

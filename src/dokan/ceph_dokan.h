@@ -11,12 +11,11 @@
 #pragma once
 
 #define CEPH_DOKAN_IO_DEFAULT_TIMEOUT 60 * 5 // Seconds
-#define CEPH_DOKAN_DEFAULT_THREAD_COUNT 10
 
-typedef DWORD NTSTATUS;
 // Avoid conflicting COM types, exposed when using C++.
 #define _OLE2_H_
 
+#include <bcrypt.h>  // for typedef of NTSTATUS
 #include <dokan.h>
 
 struct Config {
@@ -28,7 +27,6 @@ struct Config {
   bool dokan_stderr = false;
 
   int operation_timeout = CEPH_DOKAN_IO_DEFAULT_TIMEOUT;
-  int thread_count = CEPH_DOKAN_DEFAULT_THREAD_COUNT;
 
   std::wstring mountpoint = L"";
   std::string root_path = "/";

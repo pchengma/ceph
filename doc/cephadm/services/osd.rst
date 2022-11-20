@@ -144,6 +144,18 @@ There are a few ways to create new OSDs:
 
     ceph orch daemon add osd host1:data_devices=/dev/sda,/dev/sdb,db_devices=/dev/sdc,osds_per_device=2
 
+* Create an OSD on a specific LVM logical volume on a specific host:
+
+  .. prompt:: bash #
+
+    ceph orch daemon add osd *<host>*:*<lvm-path>*
+
+  For example:
+
+  .. prompt:: bash #
+
+    ceph orch daemon add osd host1:/dev/vg_osd/lvm_osd1701
+
 * You can use :ref:`drivegroups` to categorize device(s) based on their
   properties. This might be useful in forming a clearer picture of which
   devices are available to consume. Properties include device type (SSD or
@@ -196,9 +208,6 @@ After running the above command:
 * If you remove an OSD and clean the LVM physical volume, a new OSD will be
   created automatically.
 
-To disable the automatic creation of OSD on available devices, use the
-``unmanaged`` parameter:
-
 If you want to avoid this behavior (disable automatic creation of OSD on available devices), use the ``unmanaged`` parameter:
 
 .. prompt:: bash #
@@ -244,6 +253,18 @@ Expected output::
    Scheduled OSD(s) for removal
 
 OSDs that are not safe to destroy will be rejected.
+
+.. note::
+    After removing OSDs, if the drives the OSDs were deployed on once again
+    become available, cephadm may automatically try to deploy more OSDs
+    on these drives if they match an existing drivegroup spec. If you deployed
+    the OSDs you are removing with a spec and don't want any new OSDs deployed on
+    the drives after removal, it's best to modify the drivegroup spec before removal.
+    Either set ``unmanaged: true`` to stop it from picking up new drives at all,
+    or modify it in some way that it no longer matches the drives used for the
+    OSDs you wish to remove. Then re-apply the spec. For more info on drivegroup
+    specs see :ref:`drivegroups`. For more info on the declarative nature of
+    cephadm in reference to deploying OSDs, see :ref:`cephadm-osd-declarative`
 
 Monitoring OSD State
 --------------------
@@ -565,7 +586,7 @@ To include disks equal to or greater than 40G in size:
 
 Sizes don't have to be specified exclusively in Gigabytes(G).
 
-Other units of size are supported: Megabyte(M), Gigabyte(G) and Terrabyte(T).
+Other units of size are supported: Megabyte(M), Gigabyte(G) and Terabyte(T).
 Appending the (B) for byte is also supported: ``MB``, ``GB``, ``TB``.
 
 
@@ -642,6 +663,7 @@ See a full list in the DriveGroupSpecs
 .. autoclass:: DriveGroupSpec
    :members:
    :exclude-members: from_json
+
 
 Examples
 ========
@@ -746,7 +768,7 @@ This can be described with two layouts.
       host_pattern: '*'
     spec:
       data_devices:
-        rotational: 0
+        rotational: 1
       db_devices:
         model: MC-55-44-XZ
         limit: 2 # db_slots is actually to be favoured here, but it's not implemented yet
@@ -762,7 +784,7 @@ This can be described with two layouts.
         vendor: VendorC
 
 This would create the desired layout by using all HDDs as data_devices with two SSD assigned as dedicated db/wal devices.
-The remaining SSDs(8) will be data_devices that have the 'VendorC' NVMEs assigned as dedicated db/wal devices.
+The remaining SSDs(10) will be data_devices that have the 'VendorC' NVMEs assigned as dedicated db/wal devices.
 
 Multiple hosts with the same disk layout
 ----------------------------------------
@@ -782,11 +804,11 @@ Node1-5
 .. code-block:: none
 
     20 HDDs
-    Vendor: Intel
+    Vendor: VendorA
     Model: SSD-123-foo
     Size: 4TB
     2 SSDs
-    Vendor: VendorA
+    Vendor: VendorB
     Model: MC-55-44-ZX
     Size: 512GB
 
@@ -795,11 +817,11 @@ Node6-10
 .. code-block:: none
 
     5 NVMEs
-    Vendor: Intel
+    Vendor: VendorA
     Model: SSD-123-foo
     Size: 4TB
     20 SSDs
-    Vendor: VendorA
+    Vendor: VendorB
     Model: MC-55-44-ZX
     Size: 512GB
 
@@ -826,6 +848,7 @@ You can use the 'placement' key in the layout to target certain nodes.
         model: MC-55-44-XZ
       db_devices:
         model: SSD-123-foo
+
 
 This applies different OSD specs to different hosts depending on the `placement` key.
 See :ref:`orchestrator-cli-placement-spec`

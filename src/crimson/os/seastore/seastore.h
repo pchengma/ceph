@@ -41,6 +41,20 @@ public:
   seastar::shared_mutex ordering_lock;
 };
 
+/**
+ * col_obj_ranges_t
+ *
+ * Represents the two ghobject_t ranges spanned by a PG collection.
+ * Temp objects will be within [temp_begin, temp_end) and normal objects
+ * will be in [obj_begin, obj_end).
+ */
+struct col_obj_ranges_t {
+  ghobject_t temp_begin;
+  ghobject_t temp_end;
+  ghobject_t obj_begin;
+  ghobject_t obj_end;
+};
+
 class SeaStore final : public FuturizedStore {
 public:
   class MDStore {
@@ -68,15 +82,7 @@ public:
     const std::string& root,
     MDStoreRef mdstore,
     DeviceRef device,
-    TransactionManagerRef tm,
-    CollectionManagerRef cm,
-    OnodeManagerRef om);
-  SeaStore(
-    const std::string& root,
-    DeviceRef device,
-    TransactionManagerRef tm,
-    CollectionManagerRef cm,
-    OnodeManagerRef om);
+    bool is_test);
   ~SeaStore();
     
   seastar::future<> stop() final;
@@ -128,6 +134,9 @@ public:
     CollectionRef c,
     const ghobject_t& oid) final;
 
+  static col_obj_ranges_t
+  get_objs_range(CollectionRef ch, unsigned bits);
+
   seastar::future<std::tuple<std::vector<ghobject_t>, ghobject_t>> list_objects(
     CollectionRef c,
     const ghobject_t& start,
@@ -138,7 +147,7 @@ public:
   seastar::future<CollectionRef> open_collection(const coll_t& cid) final;
   seastar::future<std::vector<coll_t>> list_collections() final;
 
-  seastar::future<> do_transaction(
+  seastar::future<> do_transaction_no_callbacks(
     CollectionRef ch,
     ceph::os::Transaction&& txn) final;
 
@@ -146,9 +155,6 @@ public:
    * stages and locks as do_transaction. */
   seastar::future<> flush(CollectionRef ch) final;
 
-  seastar::future<OmapIteratorRef> get_omap_iterator(
-    CollectionRef ch,
-    const ghobject_t& oid) final;
   read_errorator::future<std::map<uint64_t, uint64_t>> fiemap(
     CollectionRef ch,
     const ghobject_t& oid,
@@ -198,6 +204,9 @@ private:
       iter = ext_transaction.begin();
     }
   };
+
+  TransactionManager::read_extent_iertr::future<std::optional<unsigned>>
+  get_coll_bits(CollectionRef ch, Transaction &t) const;
 
   static void on_error(ceph::os::Transaction &t);
 
@@ -311,14 +320,18 @@ private:
     const std::optional<std::string> &_start,
     OMapManager::omap_list_config_t config);
 
+  void init_managers();
+
   std::string root;
   MDStoreRef mdstore;
   DeviceRef device;
+  const uint32_t max_object_size = 0;
+  bool is_test;
+
   std::vector<DeviceRef> secondaries;
   TransactionManagerRef transaction_manager;
   CollectionManagerRef collection_manager;
   OnodeManagerRef onode_manager;
-  const uint32_t max_object_size = 0;
 
   using tm_iertr = TransactionManager::base_iertr;
   using tm_ret = tm_iertr::future<>;
@@ -326,6 +339,7 @@ private:
     internal_context_t &ctx,
     CollectionRef &col,
     std::vector<OnodeRef> &onodes,
+    std::vector<OnodeRef> &d_onodes,
     ceph::os::Transaction::iterator &i);
 
   tm_ret _remove(
@@ -426,4 +440,8 @@ private:
 seastar::future<std::unique_ptr<SeaStore>> make_seastore(
   const std::string &device,
   const ConfigValues &config);
+
+std::unique_ptr<SeaStore> make_test_seastore(
+  DeviceRef device,
+  SeaStore::MDStoreRef mdstore);
 }

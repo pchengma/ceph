@@ -22,7 +22,7 @@ options:
 - name: crimson_alien_thread_cpu_cores
   type: str
   level: advanced
-  desc: CPU cores on which alienstore threads will run
+  desc: CPU cores on which alienstore threads will run in cpuset(7) format
 - name: seastore_segment_size
   type: size
   desc: Segment size to use for SegmentManager
@@ -75,3 +75,8 @@ options:
   level: advanced
   desc: Size in bytes of extents to keep in cache.
   default: 64_M
+- name: seastore_obj_data_write_amplification
+  type: float
+  level: advanced
+  desc: split extent if ratio of total extent size to write size exceeds this value
+  default: 1.25

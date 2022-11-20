@@ -473,6 +473,7 @@ options:
     to the log.  For example, debug_osd=1/5 will write everything <= 1 to the log
     unconditionally but keep entries at levels 2-5 in memory.  If there is a seg fault
     or assertion failure, all entries will be dumped to the log.
+  min: 1
   default: 500
   daemon_default: 10000
   # default changed by common_preinit()
@@ -1958,19 +1959,19 @@ options:
   see_also:
   - mon_debug_dump_transactions
   with_legacy: true
-- name: mon_debug_no_require_pacific
+- name: mon_debug_no_require_quincy
   type: bool
   level: dev
-  desc: do not set pacific feature for new mon clusters
+  desc: do not set quincy feature for new mon clusters
   default: false
   services:
   - mon
   flags:
   - cluster_create
-- name: mon_debug_no_require_quincy
+- name: mon_debug_no_require_reef
   type: bool
   level: dev
-  desc: do not set quincy feature for new mon clusters
+  desc: do not set reef feature for new mon clusters
   default: false
   services:
   - mon
@@ -4993,6 +4994,14 @@ options:
   desc: Remove allocation info from RocksDB and store the info in a new allocation file
   default: true
   with_legacy: true
+- name: bluestore_debug_inject_allocation_from_file_failure
+  type: float
+  level: dev
+  desc: Enables random error injections when restoring allocation map from file.
+  long_desc: Specifies error injection probability for restoring allocation map from file
+    hence causing full recovery. Intended primarily for testing.
+  default: 0
+  with_legacy: true
 - name: bluestore_fsck_on_umount_deep
   type: bool
   level: dev
@@ -5434,6 +5443,17 @@ options:
   level: dev
   desc: fail/crash on EIO
   long_desc: whether bluestore osd fails on eio
+  default: false
+  flags:
+  - runtime
+  with_legacy: true
+- name: bluestore_zero_block_detection
+  type: bool
+  level: dev
+  desc: punch holes instead of writing zeros
+  long_desc: Intended for large-scale synthetic testing. Currently this is implemented
+    with punch hole semantics, affecting the logical extent map of the object. This does
+    not interact well with some RBD and CephFS features.
   default: false
   flags:
   - runtime

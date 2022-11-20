@@ -16,7 +16,7 @@ except ImportError:
 
 from ceph.deployment.inventory import Device
 from ceph.deployment.drive_group import DriveGroupSpec, DeviceSelection, OSDMethod
-from ceph.deployment.service_spec import PlacementSpec, ServiceSpec, service_spec_allow_invalid_from_json
+from ceph.deployment.service_spec import PlacementSpec, ServiceSpec, service_spec_allow_invalid_from_json, TracingSpec
 from ceph.deployment.hostspec import SpecValidationError
 from ceph.utils import datetime_now
 
@@ -29,7 +29,7 @@ from ._interface import OrchestratorClientMixin, DeviceLightLoc, _cli_read_comma
     NoOrchestrator, OrchestratorValidationError, NFSServiceSpec, \
     RGWSpec, InventoryFilter, InventoryHost, HostSpec, CLICommandMeta, \
     ServiceDescription, DaemonDescription, IscsiServiceSpec, json_to_generic_spec, \
-    GenericSpec, DaemonDescriptionStatus, SNMPGatewaySpec, MDSSpec
+    GenericSpec, DaemonDescriptionStatus, SNMPGatewaySpec, MDSSpec, TunedProfileSpec
 
 
 def nice_delta(now: datetime.datetime, t: Optional[datetime.datetime], suffix: str = '') -> str:
@@ -62,6 +62,10 @@ class ServiceType(enum.Enum):
     nfs = 'nfs'
     iscsi = 'iscsi'
     snmp_gateway = 'snmp-gateway'
+    elasticsearch = 'elasticsearch'
+    jaeger_agent = 'jaeger-agent'
+    jaeger_collector = 'jaeger-collector'
+    jaeger_query = 'jaeger-query'
 
 
 class ServiceAction(enum.Enum):
@@ -70,6 +74,7 @@ class ServiceAction(enum.Enum):
     restart = 'restart'
     redeploy = 'redeploy'
     reconfig = 'reconfig'
+    rotate_key = 'rotate-key'
 
 
 class DaemonAction(enum.Enum):
@@ -77,6 +82,7 @@ class DaemonAction(enum.Enum):
     stop = 'stop'
     restart = 'restart'
     reconfig = 'reconfig'
+    rotate_key = 'rotate-key'
 
 
 def to_format(what: Any, format: Format, many: bool, cls: Any) -> Any:
@@ -209,7 +215,13 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             desc='Orchestrator backend',
             enum_allowed=['cephadm', 'rook', 'test_orchestrator'],
             runtime=True,
-        )
+        ),
+        Option(
+            'fail_fs',
+            type='bool',
+            default=False,
+            desc='Fail filesystem for rapid multi-rank mds upgrade'
+        ),
     ]
     NATIVE_OPTIONS = []  # type: List[dict]
 
@@ -335,6 +347,9 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _select_orchestrator(self) -> str:
         return cast(str, self.get_module_option("orchestrator"))
 
+    def _get_fail_fs_value(self) -> bool:
+        return bool(self.get_module_option("fail_fs"))
+
     @_cli_write_command('orch host add')
     def _add_host(self,
                   hostname: str,
@@ -453,6 +468,16 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
         return HandleCommandResult(stdout=completion.result_str())
 
+    @_cli_write_command('orch host rescan')
+    def _host_rescan(self, hostname: str, with_summary: bool = False) -> HandleCommandResult:
+        """Perform a disk rescan on a host"""
+        completion = self.rescan_host(hostname)
+        raise_if_exception(completion)
+
+        if with_summary:
+            return HandleCommandResult(stdout=completion.result_str())
+        return HandleCommandResult(stdout=completion.result_str().split('.')[0])
+
     @_cli_read_command('orch device ls')
     def _list_devices(self,
                       hostname: Optional[List[str]] = None,
@@ -556,6 +581,15 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         if not force:
             raise OrchestratorError('must pass --force to PERMANENTLY ERASE DEVICE DATA')
         completion = self.zap_device(hostname, path)
+        raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
+    @_cli_write_command('orch sd dump cert')
+    def _service_discovery_dump_cert(self) -> HandleCommandResult:
+        """
+        Returns service discovery server root certificate
+        """
+        completion = self.service_discovery_dump_cert()
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -985,7 +1019,7 @@ Usage:
 
     @_cli_write_command('orch daemon')
     def _daemon_action(self, action: DaemonAction, name: str) -> HandleCommandResult:
-        """Start, stop, restart, (redeploy,) or reconfig a specific daemon"""
+        """Start, stop, restart, redeploy, reconfig, or rotate-key for a specific daemon"""
         if '.' not in name:
             raise OrchestratorError('%s is not a valid daemon name' % name)
         completion = self.daemon_action(action.value, name)
@@ -996,7 +1030,7 @@ Usage:
     def _daemon_action_redeploy(self,
                                 name: str,
                                 image: Optional[str] = None) -> HandleCommandResult:
-        """Redeploy a daemon (with a specifc image)"""
+        """Redeploy a daemon (with a specific image)"""
         if '.' not in name:
             raise OrchestratorError('%s is not a valid daemon name' % name)
         completion = self.daemon_action("redeploy", name, image=image)
@@ -1065,6 +1099,10 @@ Usage:
 
                 if dry_run and not isinstance(spec, HostSpec):
                     spec.preview_only = dry_run
+
+                if isinstance(spec, TracingSpec) and spec.service_type == 'jaeger-tracing':
+                    specs.extend(spec.get_tracing_specs())
+                    continue
                 specs.append(spec)
         else:
             placementspec = PlacementSpec.from_string(placement)
@@ -1252,6 +1290,28 @@ Usage:
 
         return self._apply_misc([spec], dry_run, format, no_overwrite)
 
+    @_cli_write_command('orch apply jaeger')
+    def _apply_jaeger(self,
+                      es_nodes: Optional[str] = None,
+                      without_query: bool = False,
+                      placement: Optional[str] = None,
+                      unmanaged: bool = False,
+                      dry_run: bool = False,
+                      format: Format = Format.plain,
+                      no_overwrite: bool = False,
+                      inbuf: Optional[str] = None) -> HandleCommandResult:
+        """Apply jaeger tracing services"""
+        if inbuf:
+            raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
+
+        spec = TracingSpec(service_type='jaeger-tracing',
+                           es_nodes=es_nodes,
+                           without_query=without_query,
+                           placement=PlacementSpec.from_string(placement),
+                           unmanaged=unmanaged)
+        specs: List[ServiceSpec] = spec.get_tracing_specs()
+        return self._apply_misc(specs, dry_run, format, no_overwrite)
+
     @_cli_write_command('orch set backend')
     def _set_backend(self, module_name: Optional[str] = None) -> HandleCommandResult:
         """
@@ -1352,11 +1412,95 @@ Usage:
                 output += f"\nHost Parallelism: {result['workers']}"
         return HandleCommandResult(stdout=output)
 
+    @_cli_write_command('orch tuned-profile apply')
+    def _apply_tuned_profiles(self,
+                              profile_name: Optional[str] = None,
+                              placement: Optional[str] = None,
+                              settings: Optional[str] = None,
+                              no_overwrite: bool = False,
+                              inbuf: Optional[str] = None) -> HandleCommandResult:
+        """Add or update a tuned profile"""
+        usage = """Usage:
+  ceph orch tuned-profile apply -i <yaml spec>
+  ceph orch tuned-profile apply <profile_name> [--placement=<placement_string>] [--settings='option=value,option2=value2']
+        """
+        if inbuf:
+            if profile_name or placement or settings:
+                raise OrchestratorValidationError(usage)
+            yaml_objs: Iterator = yaml.safe_load_all(inbuf)
+            specs: List[TunedProfileSpec] = []
+            # YAML '---' document separator with no content generates
+            # None entries in the output. Let's skip them silently.
+            content = [o for o in yaml_objs if o is not None]
+            for spec in content:
+                specs.append(TunedProfileSpec.from_json(spec))
+        else:
+            if not profile_name:
+                raise OrchestratorValidationError(usage)
+            placement_spec = PlacementSpec.from_string(
+                placement) if placement else PlacementSpec(host_pattern='*')
+            settings_dict = {}
+            if settings:
+                settings_list = settings.split(',')
+                for setting in settings_list:
+                    if '=' not in setting:
+                        raise SpecValidationError('settings defined on cli for tuned profile must '
+                                                  + 'be of format "setting_name=value,setting_name2=value2" etc.')
+                    name, value = setting.split('=', 1)
+                    settings_dict[name.strip()] = value.strip()
+            tuned_profile_spec = TunedProfileSpec(
+                profile_name=profile_name, placement=placement_spec, settings=settings_dict)
+            specs = [tuned_profile_spec]
+        completion = self.apply_tuned_profiles(specs, no_overwrite)
+        res = raise_if_exception(completion)
+        return HandleCommandResult(stdout=res)
+
+    @_cli_write_command('orch tuned-profile rm')
+    def _rm_tuned_profiles(self, profile_name: str) -> HandleCommandResult:
+        completion = self.rm_tuned_profile(profile_name)
+        res = raise_if_exception(completion)
+        return HandleCommandResult(stdout=res)
+
+    @_cli_read_command('orch tuned-profile ls')
+    def _tuned_profile_ls(self, format: Format = Format.plain) -> HandleCommandResult:
+        completion = self.tuned_profile_ls()
+        profiles: List[TunedProfileSpec] = raise_if_exception(completion)
+        if format != Format.plain:
+            return HandleCommandResult(stdout=to_format(profiles, format, many=True, cls=TunedProfileSpec))
+        else:
+            out = ''
+            for profile in profiles:
+                out += f'profile_name: {profile.profile_name}\n'
+                out += f'placement: {profile.placement.pretty_str()}\n'
+                out += 'settings:\n'
+                for k, v in profile.settings.items():
+                    out += f'  {k}: {v}\n'
+                out += '---\n'
+            return HandleCommandResult(stdout=out)
+
+    @_cli_write_command('orch tuned-profile add-setting')
+    def _tuned_profile_add_setting(self, profile_name: str, setting: str, value: str) -> HandleCommandResult:
+        completion = self.tuned_profile_add_setting(profile_name, setting, value)
+        res = raise_if_exception(completion)
+        return HandleCommandResult(stdout=res)
+
+    @_cli_write_command('orch tuned-profile rm-setting')
+    def _tuned_profile_rm_setting(self, profile_name: str, setting: str) -> HandleCommandResult:
+        completion = self.tuned_profile_rm_setting(profile_name, setting)
+        res = raise_if_exception(completion)
+        return HandleCommandResult(stdout=res)
+
     def self_test(self) -> None:
         old_orch = self._select_orchestrator()
         self._set_backend('')
         assert self._select_orchestrator() is None
         self._set_backend(old_orch)
+        old_fs_fail_value = self._get_fail_fs_value()
+        self.set_module_option("fail_fs", True)
+        assert self._get_fail_fs_value() is True
+        self.set_module_option("fail_fs", False)
+        assert self._get_fail_fs_value() is False
+        self.set_module_option("fail_fs", old_fs_fail_value)
 
         e1 = self.remote('selftest', 'remote_from_orchestrator_cli_self_test', "ZeroDivisionError")
         try:
@@ -1421,6 +1565,7 @@ Usage:
             'services_complete': status.services_complete,
             'progress': status.progress,
             'message': status.message,
+            'is_paused': status.is_paused,
         }
         out = json.dumps(r, indent=4)
         return HandleCommandResult(stdout=out)

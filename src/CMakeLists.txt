@@ -115,6 +115,16 @@ if(COMPILER_SUPPORTS_REDUNDANT_MOVE)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wredundant-move>)
 endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
+  if(WIN32)
+    # require >= gcc-10 for compiling the windows port
+    set(minimum_gcc_version 10)
+  else()
+    # require >= gcc-11 for compiling the whole tree
+    set(minimum_gcc_version 11)
+  endif()
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS minimum_gcc_version)
+    message(FATAL_ERROR "C++20 support requires a minimum GCC version of ${minimum_gcc_version}.")
+  endif()
   if(MINGW)
     # The MINGW headers are missing some "const" qualifiers.
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fpermissive>)
@@ -124,7 +134,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
   string(PREPEND CMAKE_CXX_FLAGS_DEBUG "-Og ")
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wstrict-null-sentinel>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>)
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-new-ttp-matching>)
   # cmake does not add '-pie' for executables even if
   # CMAKE_POSITION_INDEPENDENT_CODE is TRUE.
   if(EXE_LINKER_USE_PIE)
@@ -133,6 +142,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
     endif()
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12) # require >= clang-12
+    message(FATAL_ERROR "C++20 support requires a minimum Clang version of 12.")
+  endif()
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_EXPORTS_C_FLAG}")
   string(APPEND CMAKE_LINKER_FLAGS " -rdynamic -export-dynamic ${CMAKE_EXE_EXPORTS_C_FLAG}")
   string(PREPEND CMAKE_CXX_FLAGS_DEBUG "-g ")
@@ -172,12 +184,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
         -D_FORTIFY_SOURCE=2)
     endif()
   endif()
-  if(NOT WIN32)
     CHECK_C_COMPILER_FLAG(-fstack-protector-strong HAS_STACK_PROTECT)
     if (HAS_STACK_PROTECT)
       add_compile_options(-fstack-protector-strong)
+      if(WIN32)
+        add_link_options(-fstack-protector-strong)
+      endif(WIN32)
     endif()
-  endif(NOT WIN32)
 endif(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
 
 CHECK_C_COMPILER_FLAG("-D_GLIBCXX_ASSERTIONS" HAS_GLIBCXX_ASSERTIONS)
@@ -205,8 +218,8 @@ if(HAVE_INTEL)
   endif()
 endif()
 
-# require c++17
-set(CMAKE_CXX_STANDARD 17)
+# require c++20
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
@@ -235,6 +248,12 @@ if(COMPILER_SUPPORTS_DIAGNOSTICS_COLOR)
   add_compile_options(
     "$<$<COMPILE_LANGUAGE:C>:-fdiagnostics-color=${DIAGNOSTICS_COLOR}>"
     "$<$<COMPILE_LANGUAGE:CXX>:-fdiagnostics-color=${DIAGNOSTICS_COLOR}>")
+endif()
+
+if(MINGW)
+  # Fedora and RHEL set CMAKE_DL_LIBS on MINGW, which we must un-set here.
+  # Details at https://bugzilla.redhat.com/show_bug.cgi?id=2127529
+  set(CMAKE_DL_LIBS "")
 endif()
 
 set(EXTRALIBS ${CMAKE_DL_LIBS})
@@ -296,7 +315,7 @@ include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/xxHash")
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/rapidjson/include")
 
 option(WITH_FMT_HEADER_ONLY "use header-only version of fmt library" OFF)
-find_package(fmt 6.0.0 QUIET)
+find_package(fmt 7.0.0 QUIET)
 if(fmt_FOUND)
   include_directories(SYSTEM "${fmt_INCLUDE_DIR}")
 else()
@@ -306,6 +325,8 @@ else()
   add_subdirectory(fmt)
   set(BUILD_SHARED_LIBS ${old_BUILD_SHARED_LIBS})
   unset(old_BUILD_SHARED_LIBS)
+  target_compile_definitions(fmt PUBLIC
+    $<$<BOOL:${WIN32}>:FMT_USE_TZSET=0>)
   include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/fmt/include")
 endif()
 
@@ -406,9 +427,11 @@ if(WITH_JAEGER)
   find_package(thrift 0.13.0 REQUIRED)
   include(BuildOpentelemetry)
   build_opentelemetry()
-  set(jaeger_base opentelemetry::libopentelemetry thrift::libthrift)
-  add_dependencies(common-objs ${jaeger_base})
-  target_link_libraries(common-objs ${jaeger_base})
+  add_library(jaeger_base INTERFACE)
+  target_link_libraries(jaeger_base INTERFACE opentelemetry::libopentelemetry
+    thrift::libthrift)
+  add_dependencies(common-objs jaeger_base)
+  target_link_libraries(common-objs jaeger_base)
 endif()
 
 CHECK_C_COMPILER_FLAG("-fvar-tracking-assignments" HAS_VTA)
@@ -417,6 +440,7 @@ add_subdirectory(common)
 add_subdirectory(crush)
 add_subdirectory(msg)
 add_subdirectory(arch)
+add_subdirectory(extblkdev)
 
 set(ceph_common_objs
   $<TARGET_OBJECTS:common-auth-objs>
@@ -430,7 +454,7 @@ set(ceph_common_objs
   $<TARGET_OBJECTS:common_mountcephfs_objs>
   $<TARGET_OBJECTS:crush_objs>)
 set(ceph_common_deps
-  json_spirit erasure_code arch crc32
+  json_spirit erasure_code extblkdev arch crc32
   ${LIB_RESOLV}
   Boost::thread
   Boost::system
@@ -472,7 +496,7 @@ if(WITH_DPDK)
 endif()
 
 if(WITH_JAEGER)
-  list(APPEND ceph_common_deps ${jaeger_base})
+  list(APPEND ceph_common_deps jaeger_base)
 endif()
 
 if(WIN32)
@@ -482,23 +506,33 @@ endif()
 
 if(WITH_BLUESTORE_PMEM OR WITH_RBD_RWL)
   if(WITH_SYSTEM_PMDK)
-    set(pmem_COMPONENTS)
+    set(pmdk_COMPONENTS)
     if(WITH_BLUESTORE_PMEM)
-      list(APPEND pmem_COMPONENTS pmem)
+      list(APPEND pmdk_COMPONENTS pmem)
     endif()
     if(WITH_RBD_RWL)
-      list(APPEND pmem_COMPONENTS pmemobj)
+      list(APPEND pmdk_COMPONENTS pmemobj)
     endif()
-    find_package(pmem 1.10 REQUIRED COMPONENTS ${pmem_COMPONENTS})
+    find_package(pmdk 1.8 REQUIRED COMPONENTS ${pmdk_COMPONENTS})
   else()
-    include(Buildpmem)
-    build_pmem()
+    include(Buildpmdk)
+    if(WITH_BLUESTORE_PMEM)
+      set(enable_ndctl ON)
+      find_package(ndctl 63 REQUIRED)
+      find_package(daxctl 63 REQUIRED)
+    else()
+      set(enable_ndctl OFF)
+    endif()
+    build_pmdk(${enable_ndctl})
   endif()
 endif()
 
 add_library(common STATIC ${ceph_common_objs})
 target_link_libraries(common ${ceph_common_deps})
-add_dependencies(common legacy-option-headers ${jaeger_base})
+add_dependencies(common legacy-option-headers)
+if(WITH_JAEGER)
+add_dependencies(common jaeger_base)
+endif()
 
 if (WIN32)
   # Statically building ceph-common on Windows fails. We're temporarily
@@ -512,7 +546,13 @@ target_link_libraries(ceph-common ${ceph_common_deps})
 if(ENABLE_COVERAGE)
   target_link_libraries(ceph-common gcov)
 endif(ENABLE_COVERAGE)
-add_dependencies(ceph-common legacy-option-headers ${jaeger_base})
+
+add_dependencies(ceph-common legacy-option-headers)
+
+if(WITH_JAEGER)
+add_dependencies(ceph-common jaeger_base)
+endif()
+
 # appease dpkg-shlibdeps
 set_target_properties(ceph-common PROPERTIES
   SOVERSION 2
@@ -586,6 +626,7 @@ endif(NOT WITH_SYSTEM_ROCKSDB)
 
 if(WITH_MGR)
   add_subdirectory(mgr)
+  add_subdirectory(exporter)
 endif()
 
 set(librados_config_srcs
@@ -645,7 +686,7 @@ set(ceph_osd_srcs
   ceph_osd.cc)
 
 add_executable(ceph-osd ${ceph_osd_srcs})
-add_dependencies(ceph-osd erasure_code_plugins)
+add_dependencies(ceph-osd erasure_code_plugins extblkdev_plugins)
 target_link_libraries(ceph-osd osd os global-static common
   ${ALLOC_LIBS}
   ${BLKID_LIBRARIES})
@@ -895,6 +936,7 @@ endif()
 
 if (WITH_MGR)
   add_dependencies(vstart-base ceph-mgr)
+  add_dependencies(vstart-base ceph-exporter)
 endif()
 
 add_custom_target(vstart DEPENDS vstart-base)
@@ -905,7 +947,7 @@ if (WITH_CEPHFS)
   add_dependencies(vstart ceph-mds cephfs cython_cephfs)
 endif()
 if(WITH_RADOSGW)
-  add_dependencies(vstart radosgwd radosgw-admin)
+  add_dependencies(vstart radosgw radosgw-admin)
 endif()
 
 if(WITH_LTTNG)
@@ -918,6 +960,10 @@ endif()
 
 if(WITH_MGR)
   add_dependencies(vstart ceph-volume-venv-setup)
+endif()
+
+if(WITH_MGR)
+  add_dependencies(vstart cephadm)
 endif()
 
 # Everything you need to run CephFS tests

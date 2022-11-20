@@ -718,12 +718,14 @@ static int check_index(cls_method_context_t hctx,
         CLS_LOG(1, "ERROR: rgw_bucket_list(): failed to decode entry, key=%s", kiter->first.c_str());
         return -EIO;
       }
-      rgw_bucket_category_stats& stats = calc_header->stats[entry.meta.category];
-      stats.num_entries++;
-      stats.total_size += entry.meta.accounted_size;
-      stats.total_size_rounded += cls_rgw_get_rounded_size(entry.meta.accounted_size);
-      stats.actual_size += entry.meta.size;
-
+      if (entry.exists) {
+        rgw_bucket_category_stats& stats = calc_header->stats[entry.meta.category];
+        stats.num_entries++;
+        stats.total_size += entry.meta.accounted_size;
+        stats.total_size_rounded += cls_rgw_get_rounded_size(entry.meta.accounted_size);
+        stats.actual_size += entry.meta.size;
+      }
+      
       start_obj = kiter->first;
     }
   } while (keys.size() == CHECK_CHUNK_SIZE && !done);
@@ -1146,7 +1148,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
 		   __func__, op.tag.c_str());
       return -EINVAL;
     }
-    CLS_LOG_BITX(bitx_inst, 1,
+    CLS_LOG_BITX(bitx_inst, 20,
 		 "INFO: %s: removing tag %s from pending map",
 		   __func__, op.tag.c_str());
     entry.pending_map.erase(pinter);
@@ -1287,7 +1289,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     }
   } // remove loop
 
-  CLS_LOG_BITX(bitx_inst, 0,
+  CLS_LOG_BITX(bitx_inst, 20,
 	       "INFO: %s: writing bucket header", __func__);
   rc = write_bucket_header(hctx, &header);
   if (rc < 0) {
@@ -4474,7 +4476,7 @@ static int rgw_set_bucket_resharding(cls_method_context_t hctx, bufferlist *in, 
     return rc;
   }
 
-  header.new_instance.set_status(op.entry.new_bucket_instance_id, op.entry.num_shards, op.entry.reshard_status);
+  header.new_instance.set_status(op.entry.reshard_status);
 
   return write_bucket_header(hctx, &header);
 }

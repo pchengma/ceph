@@ -48,6 +48,31 @@ The automated upgrade process follows Ceph best practices.  For example:
 Starting the upgrade
 ====================
 
+.. note::
+   .. note::
+      `Staggered Upgrade`_ of the mons/mgrs may be necessary to have access
+      to this new feature.
+
+   Cephadm by default reduces `max_mds` to `1`. This can be disruptive for large
+   scale CephFS deployments because the cluster cannot quickly reduce active MDS(s)
+   to `1` and a single active MDS cannot easily handle the load of all clients
+   even for a short time. Therefore, to upgrade MDS(s) without reducing `max_mds`,
+   the `fail_fs` option can to be set to `true` (default value is `false`) prior
+   to initiating the upgrade:
+
+   .. prompt:: bash #
+
+      ceph config set mgr mgr/orchestrator/fail_fs true
+
+   This would:
+               #. Fail CephFS filesystems, bringing active MDS daemon(s) to
+                  `up:standby` state.
+
+               #. Upgrade MDS daemons safely.
+
+               #. Bring CephFS filesystems back up, bringing the state of active
+                  MDS daemon(s) from `up:standby` to `up:active`.
+
 Before you use cephadm to upgrade Ceph, verify that all hosts are currently online and that your cluster is healthy by running the following command:
 
 .. prompt:: bash #
@@ -119,6 +144,12 @@ You can stop the upgrade process at any time by running the following command:
 
   ceph orch upgrade stop
 
+Post upgrade actions
+====================
+
+In case the new version is based on ``cephadm``, once done with the upgrade the user
+has to update the ``cephadm`` package (or ceph-common package in case the user
+doesn't use ``cephadm shell``) to a version compatible with the new version.
 
 Potential problems
 ==================
@@ -193,7 +224,7 @@ Staggered Upgrade
 =================
 
 Some users may prefer to upgrade components in phases rather than all at once.
-The upgrade command, starting in 16.2.10 and 17.2.1 allows parameters
+The upgrade command, starting in 16.2.11 and 17.2.1 allows parameters
 to limit which daemons are upgraded by a single upgrade command. The options in
 include ``daemon_types``, ``services``, ``hosts`` and ``limit``. ``daemon_types``
 takes a comma-separated list of daemon types and will only upgrade daemons of those

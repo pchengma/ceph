@@ -7,17 +7,14 @@
 #include "common/ceph_json.h"
 #include "common/RefCountedObj.h"
 #include "include/common_fwd.h"
+#include "rgw_sal_fwd.h"
 
 #include <atomic>
 
-namespace rgw { namespace sal {
-  class Store;
-} }
-
 class RGWSI_Zone;
 
-template <class T>
-static int parse_decode_json(T& t, bufferlist& bl)
+template<class T>
+inline int parse_decode_json(T& t, bufferlist& bl)
 {
   JSONParser p;
   if (!p.parse(bl.c_str(), bl.length())) {
@@ -129,6 +126,9 @@ public:
 
   /* sync request */
   int forward(const DoutPrefixProvider *dpp, const rgw_user& uid, req_info& info, obj_version *objv, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y);
+
+  /* sync request */
+  int forward_iam_request(const DoutPrefixProvider *dpp, const RGWAccessKey& key, req_info& info, obj_version *objv, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y);
 
 
   /* async requests */

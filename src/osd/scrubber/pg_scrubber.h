@@ -102,10 +102,8 @@ struct BuildMap;
  * std::vector: no need to pre-reserve.
  */
 class ReplicaReservations {
-  using OrigSet = decltype(std::declval<PG>().get_actingset());
-
   PG* m_pg;
-  OrigSet m_acting_set;
+  std::set<pg_shard_t> m_acting_set;
   OSDService* m_osds;
   std::vector<pg_shard_t> m_waited_for_peers;
   std::vector<pg_shard_t> m_reserved_peers;
@@ -273,7 +271,6 @@ ostream& operator<<(ostream& out, const scrub_flags_t& sf);
  */
 class PgScrubber : public ScrubPgIF,
                    public ScrubMachineListener,
-                   public SnapMapperAccessor,
                    public ScrubBeListener {
  public:
   explicit PgScrubber(PG* pg);
@@ -359,9 +356,8 @@ class PgScrubber : public ScrubPgIF,
 
   void rm_from_osd_scrubbing() final;
 
-  void on_primary_change(const requested_scrub_t& request_flags) final;
-
-  void on_maybe_registration_change(
+  void on_primary_change(
+    std::string_view caller,
     const requested_scrub_t& request_flags) final;
 
   void scrub_requested(scrub_level_t scrub_level,
@@ -431,7 +427,7 @@ class PgScrubber : public ScrubPgIF,
    * flag-set; PG_STATE_SCRUBBING, and possibly PG_STATE_DEEP_SCRUB &
    * PG_STATE_REPAIR are set.
    */
-  void set_op_parameters(requested_scrub_t& request) final;
+  void set_op_parameters(const requested_scrub_t& request) final;
 
   void cleanup_store(ObjectStore::Transaction* t) final;
 
@@ -440,6 +436,8 @@ class PgScrubber : public ScrubPgIF,
   {
     return false;
   }
+
+  void update_scrub_stats(ceph::coarse_real_clock::time_point now_is) final;
 
   int asok_debug(std::string_view cmd,
 		 std::string param,
@@ -456,9 +454,17 @@ class PgScrubber : public ScrubPgIF,
     return m_pg->recovery_state.is_primary();
   }
 
+  void set_state_name(const char* name) final
+  {
+    m_fsm_state_name = name;
+  }
+
   void select_range_n_notify() final;
 
   Scrub::BlockedRangeWarning acquire_blocked_alarm() final;
+  void set_scrub_blocked(utime_t since) final;
+  void clear_scrub_blocked() final;
+
 
   /// walk the log to find the latest update that affects our chunk
   eversion_t search_log_for_updates() const final;
@@ -524,6 +530,7 @@ class PgScrubber : public ScrubPgIF,
   [[nodiscard]] bool was_epoch_changed() const final;
 
   void set_queued_or_active() final;
+  /// Clears `m_queued_or_active` and restarts snaptrimming
   void clear_queued_or_active() final;
 
   void mark_local_map_ready() final;
@@ -539,11 +546,10 @@ class PgScrubber : public ScrubPgIF,
   utime_t scrub_begin_stamp;
   std::ostream& gen_prefix(std::ostream& out) const final;
 
-  //  fetching the snap-set for a given object (used by the scrub-backend)
-  int get_snaps(const hobject_t& hoid,
-		std::set<snapid_t>* snaps_set) const final
+  /// facilitate scrub-backend access to SnapMapper mappings
+  Scrub::SnapMapReaderI& get_snap_mapper_accessor()
   {
-    return m_pg->snap_mapper.get_snaps(hoid, snaps_set);
+    return m_pg->snap_mapper;
   }
 
   void log_cluster_warning(const std::string& warning) const final;
@@ -710,6 +716,8 @@ class PgScrubber : public ScrubPgIF,
 			    bool deep);
 
   std::unique_ptr<Scrub::ScrubMachine> m_fsm;
+  /// the FSM state, as a string for logging
+  const char* m_fsm_state_name{nullptr};
   const spg_t m_pg_id;	///< a local copy of m_pg->pg_id
   OSDService* const m_osds;
   const pg_shard_t m_pg_whoami;	 ///< a local copy of m_pg->pg_whoami;
@@ -869,7 +877,12 @@ class PgScrubber : public ScrubPgIF,
   Scrub::MapsCollectionStatus m_maps_status;
 
   void persist_scrub_results(inconsistent_objs_t&& all_errors);
-  void apply_snap_mapper_fixes(const std::vector<snap_mapper_fix_t>& fix_list);
+  void apply_snap_mapper_fixes(
+    const std::vector<Scrub::snap_mapper_fix_t>& fix_list);
+
+  // our latest periodic 'publish_stats_to_osd()'. Required frequency depends on
+  // scrub state.
+  ceph::coarse_real_clock::time_point m_last_stat_upd{};
 
   // ------------ members used if we are a replica
 

@@ -104,7 +104,7 @@ class SSHManager:
         except OSError as e:
             self.mgr.offline_hosts.add(host)
             log_content = log_string.getvalue()
-            msg = f"Can't communicate with remote host `{addr}`, possibly because python3 is not installed there. {str(e)}"
+            msg = f"Can't communicate with remote host `{addr}`, possibly because python3 is not installed there or you are missing NOPASSWD in sudoers. {str(e)}"
             logger.exception(msg)
             raise OrchestratorError(msg)
         except asyncssh.Error as e:
@@ -140,7 +140,7 @@ class SSHManager:
         cmd = sudo_prefix + " ".join(quote(x) for x in cmd)
         logger.debug(f'Running command: {cmd}')
         try:
-            r = await conn.run('sudo true', check=True, timeout=5)
+            r = await conn.run(f'{sudo_prefix}true', check=True, timeout=5)
             r = await conn.run(cmd, input=stdin)
         # handle these Exceptions otherwise you might get a weird error like TypeError: __init__() missing 1 required positional argument: 'reason' (due to the asyncssh error interacting with raise_if_exception)
         except (asyncssh.ChannelOpenError, asyncssh.ProcessError, Exception) as e:

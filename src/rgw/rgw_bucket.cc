@@ -578,6 +578,7 @@ int RGWBucket::check_object_index(const DoutPrefixProvider *dpp,
 
   Formatter *formatter = flusher.get_formatter();
   formatter->open_object_section("objects");
+
   while (results.is_truncated) {
     rgw::sal::Bucket::ListParams params;
     params.marker = results.next_marker;
@@ -642,35 +643,12 @@ int RGWBucket::sync(RGWBucketAdminOpState& op_state, const DoutPrefixProvider *d
     bucket->get_info().flags |= BUCKET_DATASYNC_DISABLED;
   }
 
+  // when writing this metadata, RGWSI_BucketIndex_RADOS::handle_overwrite()
+  // will write the corresponding datalog and bilog entries
   int r = bucket->put_info(dpp, false, real_time());
   if (r < 0) {
     set_err_msg(err_msg, "ERROR: failed writing bucket instance info:" + cpp_strerror(-r));
     return r;
-  }
-
-  int shards_num = bucket->get_info().layout.current_index.layout.normal.num_shards? bucket->get_info().layout.current_index.layout.normal.num_shards : 1;
-  int shard_id = bucket->get_info().layout.current_index.layout.normal.num_shards? 0 : -1;
-
-  if (!sync) {
-    r = static_cast<rgw::sal::RadosStore*>(store)->svc()->bilog_rados->log_stop(dpp, bucket->get_info(), -1);
-    if (r < 0) {
-      set_err_msg(err_msg, "ERROR: failed writing stop bilog:" + cpp_strerror(-r));
-      return r;
-    }
-  } else {
-    r = static_cast<rgw::sal::RadosStore*>(store)->svc()->bilog_rados->log_start(dpp, bucket->get_info(), -1);
-    if (r < 0) {
-      set_err_msg(err_msg, "ERROR: failed writing resync bilog:" + cpp_strerror(-r));
-      return r;
-    }
-  }
-
-  for (int i = 0; i < shards_num; ++i, ++shard_id) {
-    r = static_cast<rgw::sal::RadosStore*>(store)->svc()->datalog_rados->add_entry(dpp, bucket->get_info(), shard_id);
-    if (r < 0) {
-      set_err_msg(err_msg, "ERROR: failed writing data log:" + cpp_strerror(-r));
-      return r;
-    }
   }
 
   return 0;
@@ -1039,9 +1017,16 @@ static int bucket_stats(rgw::sal::Store* store,
     return ret;
   }
 
-  string bucket_ver, master_ver;
-  string max_marker;
-  ret = bucket->read_stats(dpp, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, &max_marker);
+  const auto& index = bucket->get_info().get_current_index();
+  if (is_layout_indexless(index)) {
+    cerr << "error, indexless buckets do not maintain stats; bucket=" <<
+      bucket->get_name() << std::endl;
+    return -EINVAL;
+  }
+
+  std::string bucket_ver, master_ver;
+  std::string max_marker;
+  ret = bucket->read_stats(dpp, index, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, &max_marker);
   if (ret < 0) {
     cerr << "error getting bucket stats bucket=" << bucket->get_name() << " ret=" << ret << std::endl;
     return ret;
@@ -1134,7 +1119,6 @@ int RGWBucketAdminOp::limit_check(rgw::sal::Store* store,
 
       for (const auto& iter : m_buckets) {
 	auto& bucket = iter.second;
-	uint32_t num_shards = 1;
 	uint64_t num_objects = 0;
 
 	marker = bucket->get_name(); /* Casey's location for marker update,
@@ -1145,10 +1129,15 @@ int RGWBucketAdminOp::limit_check(rgw::sal::Store* store,
 	if (ret < 0)
 	  continue;
 
+	const auto& index = bucket->get_info().get_current_index();
+	if (is_layout_indexless(index)) {
+	  continue; // indexless buckets don't have stats
+	}
+
 	/* need stats for num_entries */
 	string bucket_ver, master_ver;
 	std::map<RGWObjCategory, RGWStorageStats> stats;
-	ret = bucket->read_stats(dpp, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, nullptr);
+	ret = bucket->read_stats(dpp, index, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, nullptr);
 
 	if (ret < 0)
 	  continue;
@@ -1157,7 +1146,7 @@ int RGWBucketAdminOp::limit_check(rgw::sal::Store* store,
 	  num_objects += s.second.num_objects;
 	}
 
-	num_shards = bucket->get_info().layout.current_index.layout.normal.num_shards;
+	const uint32_t num_shards = rgw::num_shards(index.layout.normal);
 	uint64_t objs_per_shard =
 	  (num_shards) ? num_objects/num_shards : num_objects;
 	{
@@ -1311,16 +1300,6 @@ int RGWBucketAdminOp::set_quota(rgw::sal::Store* store, RGWBucketAdminOpState& o
   if (ret < 0)
     return ret;
   return bucket.set_quota(op_state, dpp);
-}
-
-static int purge_bucket_instance(rgw::sal::Store* store, const RGWBucketInfo& bucket_info, const DoutPrefixProvider *dpp)
-{
-  std::unique_ptr<rgw::sal::Bucket> bucket;
-  int ret = store->get_bucket(nullptr, bucket_info, &bucket);
-  if (ret < 0)
-    return ret;
-
-  return bucket->purge_instance(dpp);
 }
 
 inline auto split_tenant(const std::string& bucket_name){
@@ -1500,7 +1479,9 @@ int RGWBucketAdminOp::clear_stale_instances(rgw::sal::Store* store,
                       Formatter *formatter,
                       rgw::sal::Store* store){
                      for (const auto &binfo: lst) {
-                       int ret = purge_bucket_instance(store, binfo, dpp);
+		       std::unique_ptr<rgw::sal::Bucket> bucket;
+		       store->get_bucket(nullptr, binfo, &bucket);
+		       int ret = bucket->purge_instance(dpp);
                        if (ret == 0){
                          auto md_key = "bucket.instance:" + binfo.bucket.get_key();
                          ret = store->meta_remove(dpp, md_key, null_yield);
@@ -2138,7 +2119,10 @@ public:
     RGWSI_BucketIndex *bi{nullptr};
   } svc;
 
-  RGWBucketInstanceMetadataHandler() {}
+  rgw::sal::Store* store;
+
+  RGWBucketInstanceMetadataHandler(rgw::sal::Store* store)
+    : store(store) {}
 
   void init(RGWSI_Zone *zone_svc,
 	    RGWSI_Bucket *bucket_svc,
@@ -2274,9 +2258,7 @@ void init_default_bucket_layout(CephContext *cct, rgw::BucketLayout& layout,
   }
 
   if (layout.current_index.layout.type == rgw::BucketIndexType::Normal) {
-    layout.logs.push_back(log_layout_from_index(
-			    layout.current_index.gen,
-			    layout.current_index.layout.normal));
+    layout.logs.push_back(log_layout_from_index(0, layout.current_index));
   }
 }
 
@@ -2295,12 +2277,11 @@ int RGWMetadataHandlerPut_BucketInstance::put_check(const DoutPrefixProvider *dp
   if (from_remote_zone) {
     // don't sync bucket layout changes
     if (!exists) {
-      auto& bci_index = bci.info.layout.current_index.layout;
-      auto index_type = bci_index.type;
-      auto num_shards = bci_index.normal.num_shards;
+      // replace peer's layout with default-constructed, then apply our defaults
+      bci.info.layout = rgw::BucketLayout{};
       init_default_bucket_layout(cct, bci.info.layout,
 				 bihandler->svc.zone->get_zone(),
-				 num_shards, index_type);
+				 std::nullopt, std::nullopt);
     } else {
       bci.info.layout = old_bci->info.layout;
     }
@@ -2368,17 +2349,56 @@ int RGWMetadataHandlerPut_BucketInstance::put_post(const DoutPrefixProvider *dpp
 
   objv_tracker = bci.info.objv_tracker;
 
-  int ret = bihandler->svc.bi->init_index(dpp, bci.info);
+  int ret = bihandler->svc.bi->init_index(dpp, bci.info, bci.info.layout.current_index);
   if (ret < 0) {
     return ret;
   }
+
+  /* update lifecyle policy */
+  {
+    std::unique_ptr<rgw::sal::Bucket> bucket;
+    ret = bihandler->store->get_bucket(nullptr, bci.info, &bucket);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << __func__ << " failed to get_bucket(...) for "
+			<< bci.info.bucket.name
+			<< dendl;
+      return ret;
+    }
+
+    auto lc = bihandler->store->get_rgwlc();
+
+    auto lc_it = bci.attrs.find(RGW_ATTR_LC);
+    if (lc_it != bci.attrs.end()) {
+      ldpp_dout(dpp, 20) << "set lc config for " << bci.info.bucket.name << dendl;
+      ret = lc->set_bucket_config(bucket.get(), bci.attrs, nullptr);
+      if (ret < 0) {
+	      ldpp_dout(dpp, 0) << __func__ << " failed to set lc config for "
+			<< bci.info.bucket.name
+			<< dendl;
+	      return ret;
+      }
+
+    } else {
+      ldpp_dout(dpp, 20) << "remove lc config for " << bci.info.bucket.name << dendl;
+      ret = lc->remove_bucket_config(bucket.get(), bci.attrs, false /* cannot merge attrs */);
+      if (ret < 0) {
+	      ldpp_dout(dpp, 0) << __func__ << " failed to remove lc config for "
+			<< bci.info.bucket.name
+			<< dendl;
+	      return ret;
+      }
+    }
+  } /* update lc */
 
   return STATUS_APPLIED;
 }
 
 class RGWArchiveBucketInstanceMetadataHandler : public RGWBucketInstanceMetadataHandler {
 public:
-  RGWArchiveBucketInstanceMetadataHandler() {}
+  RGWArchiveBucketInstanceMetadataHandler(rgw::sal::Store* store)
+    : RGWBucketInstanceMetadataHandler(store) {}
+
+  // N.B. replication of lifecycle policy relies on logic in RGWBucketInstanceMetadataHandler::do_put(...), override with caution
 
   int do_remove(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWObjVersionTracker& objv_tracker, optional_yield y, const DoutPrefixProvider *dpp) override {
     ldpp_dout(dpp, 0) << "SKIP: bucket instance removal is not allowed on archive zone: bucket.instance:" << entry << dendl;
@@ -2389,12 +2409,15 @@ public:
 RGWBucketCtl::RGWBucketCtl(RGWSI_Zone *zone_svc,
                            RGWSI_Bucket *bucket_svc,
                            RGWSI_Bucket_Sync *bucket_sync_svc,
-                           RGWSI_BucketIndex *bi_svc) : cct(zone_svc->ctx())
+                           RGWSI_BucketIndex *bi_svc,
+                           RGWSI_User* user_svc)
+  : cct(zone_svc->ctx())
 {
   svc.zone = zone_svc;
   svc.bucket = bucket_svc;
   svc.bucket_sync = bucket_sync_svc;
   svc.bi = bi_svc;
+  svc.user = user_svc;
 }
 
 void RGWBucketCtl::init(RGWUserCtl *user_ctl,
@@ -2779,7 +2802,7 @@ int RGWBucketCtl::do_link_bucket(RGWSI_Bucket_EP_Ctx& ctx,
     }
   }
 
-  ret = ctl.user->add_bucket(dpp, user_id, bucket, creation_time, y);
+  ret = svc.user->add_bucket(dpp, user_id, bucket, creation_time, y);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: error adding bucket to user directory:"
 		  << " user=" << user_id
@@ -2825,7 +2848,7 @@ int RGWBucketCtl::do_unlink_bucket(RGWSI_Bucket_EP_Ctx& ctx,
 				   optional_yield y,
                                    const DoutPrefixProvider *dpp)
 {
-  int ret = ctl.user->remove_bucket(dpp, user_id, bucket, y);
+  int ret = svc.user->remove_bucket(dpp, user_id, bucket, y);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: error removing bucket from directory: "
         << cpp_strerror(-ret)<< dendl;
@@ -2981,7 +3004,7 @@ int RGWBucketCtl::sync_user_stats(const DoutPrefixProvider *dpp,
     return r;
   }
 
-  return ctl.user->flush_bucket_stats(dpp, user_id, *pent, y);
+  return svc.user->flush_bucket_stats(dpp, user_id, *pent, y);
 }
 
 int RGWBucketCtl::get_sync_policy_handler(std::optional<rgw_zone_id> zone,
@@ -3029,24 +3052,24 @@ int RGWBucketCtl::bucket_imports_data(const rgw_bucket& bucket,
   return handler->bucket_imports_data();
 }
 
-RGWBucketMetadataHandlerBase *RGWBucketMetaHandlerAllocator::alloc()
+RGWBucketMetadataHandlerBase* RGWBucketMetaHandlerAllocator::alloc()
 {
   return new RGWBucketMetadataHandler();
 }
 
-RGWBucketInstanceMetadataHandlerBase *RGWBucketInstanceMetaHandlerAllocator::alloc()
+RGWBucketInstanceMetadataHandlerBase* RGWBucketInstanceMetaHandlerAllocator::alloc(rgw::sal::Store* store)
 {
-  return new RGWBucketInstanceMetadataHandler();
+  return new RGWBucketInstanceMetadataHandler(store);
 }
 
-RGWBucketMetadataHandlerBase *RGWArchiveBucketMetaHandlerAllocator::alloc()
+RGWBucketMetadataHandlerBase* RGWArchiveBucketMetaHandlerAllocator::alloc()
 {
   return new RGWArchiveBucketMetadataHandler();
 }
 
-RGWBucketInstanceMetadataHandlerBase *RGWArchiveBucketInstanceMetaHandlerAllocator::alloc()
+RGWBucketInstanceMetadataHandlerBase* RGWArchiveBucketInstanceMetaHandlerAllocator::alloc(rgw::sal::Store* store)
 {
-  return new RGWArchiveBucketInstanceMetadataHandler();
+  return new RGWArchiveBucketInstanceMetadataHandler(store);
 }
 
 

@@ -16,6 +16,10 @@ if(WITH_RADOSGW_LUA_PACKAGES)
   list(APPEND rgw_libs Boost::filesystem)
 endif()
 
+if(WITH_JAEGER)
+  list(APPEND rgw_libs ${jaeger_base})
+endif()
+
 #unittest_rgw_bencode
 add_executable(unittest_rgw_bencode test_rgw_bencode.cc)
 add_ceph_unittest(unittest_rgw_bencode)
@@ -189,6 +193,14 @@ add_executable(unittest_rgw_xml test_rgw_xml.cc)
 add_ceph_unittest(unittest_rgw_xml)
 
 target_link_libraries(unittest_rgw_xml ${rgw_libs} ${EXPAT_LIBRARIES})
+
+# unittest_rgw_lc
+add_executable(unittest_rgw_lc test_rgw_lc.cc)
+add_ceph_unittest(unittest_rgw_lc)
+target_include_directories(unittest_rgw_lc SYSTEM PRIVATE
+  "${CMAKE_SOURCE_DIR}/src/rgw")
+target_link_libraries(unittest_rgw_lc
+  rgw_common ${rgw_libs} ${EXPAT_LIBRARIES})
 
 # unittest_rgw_arn
 add_executable(unittest_rgw_arn test_rgw_arn.cc)

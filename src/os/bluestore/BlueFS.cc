@@ -107,6 +107,7 @@ private:
   SocketHook(BlueFS* bluefs) :
     bluefs(bluefs) {}
   int call(std::string_view command, const cmdmap_t& cmdmap,
+	   const bufferlist&,
 	   Formatter *f,
 	   std::ostream& errss,
 	   bufferlist& out) override {
@@ -3060,6 +3061,11 @@ int BlueFS::_signal_dirty_to_log_D(FileWriter *h)
 {
   ceph_assert(ceph_mutex_is_locked(h->lock));
   std::lock_guard dl(dirty.lock);
+  if (h->file->deleted) {
+    dout(10) << __func__ << "  deleted, no-op" << dendl;
+    return 0;
+  }
+
   h->file->fnode.mtime = ceph_clock_now();
   ceph_assert(h->file->fnode.ino >= 1);
   if (h->file->dirty_seq <= dirty.seq_stable) {
@@ -3397,6 +3403,7 @@ int BlueFS::truncate(FileWriter *h, uint64_t offset)/*_WF_L*/
   std::lock_guard ll(log.lock);
   vselector->sub_usage(h->file->vselector_hint, h->file->fnode.size);
   h->file->fnode.size = offset;
+  h->file->is_dirty = true;
   vselector->add_usage(h->file->vselector_hint, h->file->fnode.size);
   log.t.op_file_update_inc(h->file->fnode);
   return 0;
@@ -3408,7 +3415,8 @@ int BlueFS::fsync(FileWriter *h)/*_WF_WD_WLD_WLNF_WNF*/
   std::unique_lock hl(h->lock);
   uint64_t old_dirty_seq = 0;
   {
-    dout(10) << __func__ << " " << h << " " << h->file->fnode << dendl;
+    dout(10) << __func__ << " " << h << " " << h->file->fnode
+             << " dirty " << h->file->is_dirty << dendl;
     int r = _flush_F(h, true);
     if (r < 0)
       return r;

@@ -5,7 +5,6 @@
 
 #include "crimson/os/seastore/cache.h"
 #include "crimson/os/seastore/cached_extent.h"
-#include "crimson/os/seastore/segment_manager_group.h"
 #include "crimson/os/seastore/transaction.h"
 
 namespace crimson::os::seastore {
@@ -83,32 +82,36 @@ public:
     Transaction &t,
     CachedExtentRef e) = 0;
 
-  /**
-   * insert new paddr_t -> laddr_t mappings in batches
-   */
-  using batch_insert_iertr = base_iertr;
-  using batch_insert_ret = batch_insert_iertr::future<journal_seq_t>;
-  virtual batch_insert_ret batch_insert(
-    Transaction &t,			///< Transaction that commits the updates
-    backref_buffer_ref &bbr,		///< the set of backref mappings to be inserted
-    const journal_seq_t &limit,		///< the journal seq upper bound that the insertion
-					//   shouldn't cross
-    const uint64_t max			///< maximum fresh backref extents that can be
-					//   created by this insertion
-  ) = 0;
+  virtual Cache::backref_entry_query_mset_t
+  get_cached_backref_entries_in_range(
+    paddr_t start,
+    paddr_t end) = 0;
+
+  using retrieve_backref_extents_in_range_iertr = base_iertr;
+  using retrieve_backref_extents_in_range_ret =
+    retrieve_backref_extents_in_range_iertr::future<std::vector<CachedExtentRef>>;
+  virtual retrieve_backref_extents_in_range_ret
+  retrieve_backref_extents_in_range(
+    Transaction &t,
+    paddr_t start,
+    paddr_t end) = 0;
+
+  virtual void cache_new_backref_extent(paddr_t paddr, extent_types_t type) = 0;
 
   /**
-   * insert new mappings directly from Cache
+   * merge in-cache paddr_t -> laddr_t mappings to the on-disk backref tree
    */
-  virtual batch_insert_ret batch_insert_from_cache(
+  using merge_cached_backrefs_iertr = base_iertr;
+  using merge_cached_backrefs_ret = merge_cached_backrefs_iertr::future<journal_seq_t>;
+  virtual merge_cached_backrefs_ret merge_cached_backrefs(
     Transaction &t,
     const journal_seq_t &limit,
     const uint64_t max) = 0;
 
   struct remove_mapping_result_t {
-    paddr_t offset;
-    extent_len_t len;
-    laddr_t laddr;
+    paddr_t offset = P_ADDR_NULL;
+    extent_len_t len = 0;
+    laddr_t laddr = L_ADDR_NULL;
   };
 
   /**
@@ -122,14 +125,14 @@ public:
     paddr_t offset) = 0;
 
   /**
-   * scan all extents, including backref extents, logical extents and lba extents,
+   * scan all extents in both tree and cache,
+   * including backref extents, logical extents and lba extents,
    * visit them with scan_mapped_space_func_t
    */
-  using scan_mapped_space_iertr = base_iertr::extend_ertr<
-    SegmentManager::read_ertr>;
+  using scan_mapped_space_iertr = base_iertr;
   using scan_mapped_space_ret = scan_mapped_space_iertr::future<>;
   using scan_mapped_space_func_t = std::function<
-    void(paddr_t, extent_len_t, depth_t)>;
+    void(paddr_t, extent_len_t, extent_types_t, laddr_t)>;
   virtual scan_mapped_space_ret scan_mapped_space(
     Transaction &t,
     scan_mapped_space_func_t &&f) = 0;
@@ -152,7 +155,6 @@ using BackrefManagerRef =
   std::unique_ptr<BackrefManager>;
 
 BackrefManagerRef create_backref_manager(
-  SegmentManagerGroup &sm_group,
   Cache &cache);
 
 } // namespace crimson::os::seastore::backref

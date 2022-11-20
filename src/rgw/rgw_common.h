@@ -41,16 +41,18 @@
 #include "include/rados/librados.hpp"
 #include "rgw_public_access.h"
 #include "common/tracer.h"
+#include "rgw_sal_fwd.h"
 
 namespace ceph {
   class Formatter;
 }
 
 namespace rgw::sal {
-  class User;
-  class Bucket;
-  class Object;
   using Attrs = std::map<std::string, ceph::buffer::list>;
+}
+
+namespace rgw::lua {
+  class Background;
 }
 
 using ceph::crypto::MD5;
@@ -153,10 +155,33 @@ using ceph::crypto::MD5;
 
 #define RGW_ATTR_TRACE RGW_ATTR_PREFIX "trace"
 
-#define RGW_FORMAT_PLAIN        0
-#define RGW_FORMAT_XML          1
-#define RGW_FORMAT_JSON         2
-#define RGW_FORMAT_HTML         3
+enum class RGWFormat : int8_t {
+  BAD_FORMAT = -1,
+  PLAIN = 0,
+  XML,
+  JSON,
+  HTML,
+};
+
+static inline const char* to_mime_type(const RGWFormat f)
+{
+  switch (f) {
+  case RGWFormat::XML:
+    return "application/xml";
+    break;
+  case RGWFormat::JSON:
+    return "application/json";
+    break;
+  case RGWFormat::HTML:
+    return "text/html";
+    break;
+  case RGWFormat::PLAIN:
+    return "text/plain";
+    break;
+  default:
+    return "invalid format";
+  }
+}
 
 #define RGW_CAP_READ            0x1
 #define RGW_CAP_WRITE           0x2
@@ -279,8 +304,6 @@ using ceph::crypto::MD5;
 #define UINT32_MAX (0xffffffffu)
 #endif
 
-struct req_state;
-
 typedef void *RGWAccessHandle;
 
 enum RGWIntentEvent {
@@ -348,6 +371,7 @@ class RGWHTTPArgs {
   /** parse the received arguments */
   int parse(const DoutPrefixProvider *dpp);
   void append(const std::string& name, const std::string& val);
+  void remove(const std::string& name);
   /** Get the value for a specific argument parameter */
   const std::string& get(const std::string& name, bool *exists = NULL) const;
   boost::optional<const std::string&>
@@ -999,39 +1023,130 @@ struct rgw_bucket_placement {
   void dump(Formatter *f) const;
 };
 
+/// `RGWObjVersionTracker`
+/// ======================
+///
+/// What and why is this?
+/// ---------------------
+///
+/// This is a wrapper around `cls_version` functionality. If two RGWs
+/// (or two non-synchronized threads in the same RGW) are accessing
+/// the same object, they may race and overwrite each other's work.
+///
+/// This class solves this issue by tracking and recording an object's
+/// version in the extended attributes. Operations are failed with
+/// ECANCELED if the version is not what we expect.
+///
+/// How to Use It
+/// -------------
+///
+/// When preparing a read operation, call `prepare_op_for_read`.
+/// For a write, call `prepare_op_for_write` when preparing the
+/// operation, and `apply_write` after it succeeds.
+///
+/// Adhere to the following guidelines:
+///
+/// - Each RGWObjVersionTracker should be used with only one object.
+///
+/// - If you receive `ECANCELED`, throw away whatever you were doing
+///   based on the content of the versioned object, re-read, and
+///   restart as appropriate.
+///
+/// - If one code path uses RGWObjVersionTracker, then they all
+///   should. In a situation where a writer should unconditionally
+///   overwrite an object, call `generate_new_write_ver` on a default
+///   constructed `RGWObjVersionTracker`.
+///
+/// - If we have a version from a previous read, we will check against
+///   it and fail the read if it doesn't match. Thus, if we want to
+///   re-read a new version of the object, call `clear()` on the
+///   `RGWObjVersionTracker`.
+///
+/// - This type is not thread-safe. Every thread must have its own
+///   instance.
+///
 struct RGWObjVersionTracker {
-  obj_version read_version;
-  obj_version write_version;
+  obj_version read_version; //< The version read from an object. If
+			    //  set, this value is used to check the
+			    //  stored version.
+  obj_version write_version; //< Set the object to this version on
+			     //  write, if set.
 
-  obj_version *version_for_read() {
+  /// Pointer to the read version.
+  obj_version* version_for_read() {
     return &read_version;
   }
 
-  obj_version *version_for_write() {
+  /// If we have a write version, return a pointer to it. Otherwise
+  /// return null. This is used in `prepare_op_for_write` to treat the
+  /// `write_version` as effectively an `option` type.
+  obj_version* version_for_write() {
     if (write_version.ver == 0)
-      return NULL;
+      return nullptr;
 
     return &write_version;
   }
 
-  obj_version *version_for_check() {
+  /// If read_version is non-empty, return a pointer to it, otherwise
+  /// null. This is used internally by `prepare_op_for_read` and
+  /// `prepare_op_for_write` to treat the `read_version` as
+  /// effectively an `option` type.
+  obj_version* version_for_check() {
     if (read_version.ver == 0)
-      return NULL;
+      return nullptr;
 
     return &read_version;
   }
 
-  void prepare_op_for_read(librados::ObjectReadOperation *op);
-  void prepare_op_for_write(librados::ObjectWriteOperation *op);
+  /// This function is to be called on any read operation. If we have
+  /// a non-empty `read_version`, assert on the OSD that the object
+  /// has the same version. Also reads the version into `read_version`.
+  ///
+  /// This function is defined in `rgw_rados.cc` rather than `rgw_common.cc`.
+  void prepare_op_for_read(librados::ObjectReadOperation* op);
 
+  /// This function is to be called on any write operation. If we have
+  /// a non-empty read operation, assert on the OSD that the object
+  /// has the same version. If we have a non-empty `write_version`,
+  /// set the object to it. Otherwise increment the version on the OSD.
+  ///
+  /// This function is defined in `rgw_rados.cc` rather than
+  /// `rgw_common.cc`.
+  void prepare_op_for_write(librados::ObjectWriteOperation* op);
+
+  /// This function is to be called after the completion of any write
+  /// operation on which `prepare_op_for_write` was called. If we did
+  /// not set the write version explicitly, it increments
+  /// `read_version`. If we did, it sets `read_version` to
+  /// `write_version`. In either case, it clears `write_version`.
+  ///
+  /// RADOS write operations, at least those not using the relatively
+  /// new RETURNVEC flag, cannot return more information than an error
+  /// code. Thus, write operations can't simply fill in the read
+  /// version the way read operations can, so prepare_op_for_write`
+  /// instructs the OSD to increment the object as stored in RADOS and
+  /// `apply_write` increments our `read_version` in RAM.
+  ///
+  /// This function is defined in `rgw_rados.cc` rather than
+  /// `rgw_common.cc`.
   void apply_write();
 
+  /// Clear `read_version` and `write_version`, making the instance
+  /// identical to a default-constructed instance.
   void clear() {
     read_version = obj_version();
     write_version = obj_version();
   }
 
-  void generate_new_write_ver(CephContext *cct);
+  /// Set `write_version` to a new, unique version.
+  ///
+  /// An `obj_version` contains an opaque, random tag and a
+  /// sequence. If the tags of two `obj_version`s don't match, the
+  /// versions are unordered and unequal. This function creates a
+  /// version with a new tag, ensuring that any other process
+  /// operating on the object will receive `ECANCELED` and will know
+  /// to re-read the object and restart whatever it was doing.
+  void generate_new_write_ver(CephContext* cct);
 };
 
 inline std::ostream& operator<<(std::ostream& out, const obj_version &v)
@@ -1070,11 +1185,6 @@ struct RGWBucketInfo {
 
   // layout of bucket index objects
   rgw::BucketLayout layout;
-
-  // Represents the number of bucket index object shards:
-  //   - value of 0 indicates there is no sharding (this is by default
-  //     before this feature is implemented).
-  //   - value of UINT32_T::MAX indicates this is a blind bucket.
 
   // Represents the shard number for blind bucket.
   const static uint32_t NUM_SHARDS_BLIND_BUCKET;
@@ -1120,6 +1230,16 @@ struct RGWBucketInfo {
   void set_sync_policy(rgw_sync_policy_info&& policy);
 
   bool empty_sync_policy() const;
+
+  bool is_indexless() const {
+    return rgw::is_layout_indexless(layout.current_index);
+  }
+  const rgw::bucket_index_layout_generation& get_current_index() const {
+    return layout.current_index;
+  }
+  rgw::bucket_index_layout_generation& get_current_index() {
+    return layout.current_index;
+  }
 
   RGWBucketInfo();
   ~RGWBucketInfo();
@@ -1543,7 +1663,6 @@ struct req_init_state {
 #include "rgw_auth.h"
 
 class RGWObjectCtx;
-class RGWSysObjectCtx;
 
 /** Store all the state necessary to complete and respond to an HTTP request*/
 struct req_state : DoutPrefixProvider {
@@ -1557,7 +1676,7 @@ struct req_state : DoutPrefixProvider {
   std::string ratelimit_bucket_marker;
   std::string ratelimit_user_name;
   bool content_started{false};
-  int format{0};
+  RGWFormat format{RGWFormat::PLAIN};
   ceph::Formatter *formatter{nullptr};
   std::string decoded_uri;
   std::string relative_uri;
@@ -1695,6 +1814,9 @@ struct req_state : DoutPrefixProvider {
   //Principal tags that come in as part of AssumeRoleWithWebIdentity
   std::vector<std::pair<std::string, std::string>> principal_tags;
 
+  rgw::lua::Background* lua_background = nullptr;
+  rgw::sal::LuaManager* lua_manager = nullptr;
+
   req_state(CephContext* _cct, RGWEnv* e, uint64_t id);
   ~req_state();
 
@@ -1708,10 +1830,10 @@ struct req_state : DoutPrefixProvider {
   unsigned get_subsys() const override { return ceph_subsys_rgw; }
 };
 
-void set_req_state_err(struct req_state*, int);
-void set_req_state_err(struct req_state*, int, const std::string&);
+void set_req_state_err(req_state*, int);
+void set_req_state_err(req_state*, int, const std::string&);
 void set_req_state_err(struct rgw_err&, int, const int);
-void dump(struct req_state*);
+void dump(req_state*);
 
 /** Store basic data on bucket */
 struct RGWBucketEnt {
@@ -2179,31 +2301,32 @@ bool verify_object_permission_no_policy(const DoutPrefixProvider* dpp,
 
 /** Check if the req_state's user has the necessary permissions
  * to do the requested action */
-rgw::IAM::Effect eval_identity_or_session_policies(const std::vector<rgw::IAM::Policy>& user_policies,
+rgw::IAM::Effect eval_identity_or_session_policies(const DoutPrefixProvider* dpp,
+			  const std::vector<rgw::IAM::Policy>& user_policies,
                           const rgw::IAM::Environment& env,
                           const uint64_t op,
                           const rgw::ARN& arn);
 bool verify_user_permission(const DoutPrefixProvider* dpp,
-                            struct req_state * const s,
+                            req_state * const s,
                             RGWAccessControlPolicy * const user_acl,
                             const std::vector<rgw::IAM::Policy>& user_policies,
                             const std::vector<rgw::IAM::Policy>& session_policies,
                             const rgw::ARN& res,
                             const uint64_t op);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
-                                      struct req_state * const s,
+                                      req_state * const s,
                                       RGWAccessControlPolicy * const user_acl,
                                       const int perm);
 bool verify_user_permission(const DoutPrefixProvider* dpp,
-                            struct req_state * const s,
+                            req_state * const s,
                             const rgw::ARN& res,
                             const uint64_t op);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
-                                      struct req_state * const s,
+                                      req_state * const s,
                                       int perm);
 bool verify_bucket_permission(
   const DoutPrefixProvider* dpp,
-  struct req_state * const s,
+  req_state * const s,
   const rgw_bucket& bucket,
   RGWAccessControlPolicy * const user_acl,
   RGWAccessControlPolicy * const bucket_acl,
@@ -2211,21 +2334,21 @@ bool verify_bucket_permission(
   const std::vector<rgw::IAM::Policy>& identity_policies,
   const std::vector<rgw::IAM::Policy>& session_policies,
   const uint64_t op);
-bool verify_bucket_permission(const DoutPrefixProvider* dpp, struct req_state * const s, const uint64_t op);
+bool verify_bucket_permission(const DoutPrefixProvider* dpp, req_state * const s, const uint64_t op);
 bool verify_bucket_permission_no_policy(
   const DoutPrefixProvider* dpp,
-  struct req_state * const s,
+  req_state * const s,
   RGWAccessControlPolicy * const user_acl,
   RGWAccessControlPolicy * const bucket_acl,
   const int perm);
 bool verify_bucket_permission_no_policy(const DoutPrefixProvider* dpp,
-                                        struct req_state * const s,
+                                        req_state * const s,
 					const int perm);
-int verify_bucket_owner_or_policy(struct req_state* const s,
+int verify_bucket_owner_or_policy(req_state* const s,
 				  const uint64_t op);
 extern bool verify_object_permission(
   const DoutPrefixProvider* dpp,
-  struct req_state * const s,
+  req_state * const s,
   const rgw_obj& obj,
   RGWAccessControlPolicy * const user_acl,
   RGWAccessControlPolicy * const bucket_acl,
@@ -2234,15 +2357,15 @@ extern bool verify_object_permission(
   const std::vector<rgw::IAM::Policy>& identity_policies,
   const std::vector<rgw::IAM::Policy>& session_policies,
   const uint64_t op);
-extern bool verify_object_permission(const DoutPrefixProvider* dpp, struct req_state *s, uint64_t op);
+extern bool verify_object_permission(const DoutPrefixProvider* dpp, req_state *s, uint64_t op);
 extern bool verify_object_permission_no_policy(
   const DoutPrefixProvider* dpp,
-  struct req_state * const s,
+  req_state * const s,
   RGWAccessControlPolicy * const user_acl,
   RGWAccessControlPolicy * const bucket_acl,
   RGWAccessControlPolicy * const object_acl,
   int perm);
-extern bool verify_object_permission_no_policy(const DoutPrefixProvider* dpp, struct req_state *s,
+extern bool verify_object_permission_no_policy(const DoutPrefixProvider* dpp, req_state *s,
 					       int perm);
 extern int verify_object_lock(
   const DoutPrefixProvider* dpp,

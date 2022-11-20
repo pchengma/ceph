@@ -308,7 +308,6 @@ Commands
 :command:`encryption format` *image-spec* *format* *passphrase-file* [--cipher-alg *alg*]
   Formats image to an encrypted format.
   All data previously written to the image will become unreadable.
-  A cloned image cannot be formatted, although encrypted images can be cloned.
   Supported formats: *luks1*, *luks2*.
   Supported cipher algorithms: *aes-128*, *aes-256* (default).
 
@@ -333,7 +332,7 @@ Commands
   Enable the specified feature on the specified image. Multiple features can
   be specified.
 
-:command:`flatten` *image-spec*
+:command:`flatten` [--encryption-format *encryption-format* --encryption-passphrase-file *passphrase-file*]... *image-spec*
   If image is a clone, copy all shared blocks from the parent snapshot and
   make the child independent of the parent, severing the link between
   parent snap and child.  The parent snapshot can be unprotected and
@@ -830,7 +829,8 @@ Per mapping (block device) `rbd device map` options:
 * alloc_size - Minimum allocation unit of the underlying OSD object store
   backend (since 5.1, default is 64K bytes).  This is used to round off and
   drop discards that are too small.  For bluestore, the recommended setting is
-  bluestore_min_alloc_size (typically 64K for hard disk drives and 16K for
+  bluestore_min_alloc_size (currently set to 4K for all types of drives,
+  previously used to be set to 64K for hard disk drives and 16K for
   solid-state drives).  For filestore with filestore_punch_hole = false, the
   recommended setting is image object size (typically 4M).
 

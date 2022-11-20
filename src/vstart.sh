@@ -36,13 +36,14 @@ if [ -n "$VSTART_DEST" ]; then
     SRC_PATH=`(cd $SRC_PATH; pwd)`
 
     CEPH_DIR=$SRC_PATH
-    CEPH_BIN=${PWD}/bin
-    CEPH_LIB=${PWD}/lib
+    CEPH_BIN=${CEPH_BIN:-${PWD}/bin}
+    CEPH_LIB=${CEPH_LIB:-${PWD}/lib}
 
     CEPH_CONF_PATH=$VSTART_DEST
     CEPH_DEV_DIR=$VSTART_DEST/dev
     CEPH_OUT_DIR=$VSTART_DEST/out
     CEPH_ASOK_DIR=$VSTART_DEST/asok
+    CEPH_OUT_CLIENT_DIR=${CEPH_OUT_CLIENT_DIR:-$CEPH_OUT_DIR}
 fi
 
 get_cmake_variable() {
@@ -131,6 +132,7 @@ fi
 [ -z "$CEPH_ASOK_DIR" ] && CEPH_ASOK_DIR="$CEPH_DIR/asok"
 [ -z "$CEPH_RGW_PORT" ] && CEPH_RGW_PORT=8000
 [ -z "$CEPH_CONF_PATH" ] && CEPH_CONF_PATH=$CEPH_DIR
+CEPH_OUT_CLIENT_DIR=${CEPH_OUT_CLIENT_DIR:-$CEPH_OUT_DIR}
 
 if [ $CEPH_NUM_OSD -gt 3 ]; then
     OSD_POOL_DEFAULT_SIZE=3
@@ -252,6 +254,7 @@ options:
 	--jaeger: use jaegertracing for tracing
 	--seastore-devs: comma-separated list of blockdevs to use for seastore
 	--seastore-secondary-des: comma-separated list of secondary blockdevs to use for seastore
+	--crimson-smp: number of cores to use for crimson
 \n
 EOF
 
@@ -290,6 +293,7 @@ parse_secondary_devs() {
     done
 }
 
+crimson_smp=1
 while [ $# -ge 1 ]; do
 case $1 in
     -d | --debug)
@@ -503,6 +507,10 @@ case $1 in
         ;;
     --seastore-secondary-devs)
         parse_secondary_devs --seastore-devs "$2"
+        shift
+        ;;
+    --crimson-smp)
+        crimson_smp=$2
         shift
         ;;
     --bluestore-spdk)
@@ -767,7 +775,7 @@ EOF
     wconf <<EOF
 [client]
         keyring = $keyring_fn
-        log file = $CEPH_OUT_DIR/\$name.\$pid.log
+        log file = $CEPH_OUT_CLIENT_DIR/\$name.\$pid.log
         admin socket = $CEPH_ASOK_DIR/\$name.\$pid.asok
 
         ; needed for s3tests
@@ -791,7 +799,7 @@ $DAEMONOPTS
         mgr disabled modules = rook
         mgr data = $CEPH_DEV_DIR/mgr.\$id
         mgr module path = $MGR_PYTHON_PATH
-        cephadm path = $CEPH_ROOT/src/cephadm/cephadm
+        cephadm path = $CEPH_BIN/cephadm
 $DAEMONOPTS
         $(format_conf "${extra_conf}")
 [osd]
@@ -960,8 +968,10 @@ start_osd() {
     do
 	local extra_seastar_args
 	if [ "$ceph_osd" == "crimson-osd" ]; then
-	    # designate a single CPU node $osd for osd.$osd
-	    extra_seastar_args="--smp 1 --cpuset $osd"
+        bottom_cpu=$(( osd * crimson_smp ))
+        top_cpu=$(( bottom_cpu + crimson_smp - 1 ))
+	    # set a single CPU nodes for each osd
+	    extra_seastar_args="--smp $crimson_smp --cpuset $bottom_cpu-$top_cpu"
 	    if [ "$debug" -ne 0 ]; then
 		extra_seastar_args+=" --debug"
 	    fi
@@ -1025,6 +1035,9 @@ EOF
         fi
         echo start osd.$osd
         local osd_pid
+        echo 'osd' $osd $SUDO $CEPH_BIN/$ceph_osd \
+            $extra_seastar_args $extra_osd_args \
+            -i $osd $ARGS $COSD_ARGS
         run 'osd' $osd $SUDO $CEPH_BIN/$ceph_osd \
             $extra_seastar_args $extra_osd_args \
             -i $osd $ARGS $COSD_ARGS &
@@ -1359,6 +1372,7 @@ fi
 [ -d $CEPH_ASOK_DIR ] || mkdir -p $CEPH_ASOK_DIR
 [ -d $CEPH_OUT_DIR  ] || mkdir -p $CEPH_OUT_DIR
 [ -d $CEPH_DEV_DIR  ] || mkdir -p $CEPH_DEV_DIR
+[ -d $CEPH_OUT_CLIENT_DIR ] || mkdir -p $CEPH_OUT_CLIENT_DIR
 if [ $inc_osd_num -eq 0 ]; then
     $SUDO find "$CEPH_OUT_DIR" -type f -delete
 fi
@@ -1596,7 +1610,7 @@ do_rgw_create_users()
         --access-key ABCDEFGHIJKLMNOPQRST \
         --secret abcdefghijklmnopqrstuvwxyzabcdefghijklmn \
         --display-name youruseridhere \
-        --email s3@example.com -c $conf_fn > /dev/null
+        --email s3@example.com --caps="user-policy=*" -c $conf_fn > /dev/null
     $CEPH_BIN/radosgw-admin user create \
         --uid 56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234 \
         --access-key NOPQRSTUVWXYZABCDEFG \

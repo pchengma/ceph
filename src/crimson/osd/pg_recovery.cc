@@ -59,7 +59,7 @@ PGRecovery::start_recovery_ops(
   }
   using interruptor =
     crimson::interruptible::interruptor<crimson::osd::IOInterruptCondition>;
-  return interruptor::parallel_for_each(std::move(started),
+  return interruptor::parallel_for_each(started,
 					[] (auto&& ifut) {
     return std::move(ifut);
   }).then_interruptible([this] {
@@ -73,7 +73,6 @@ PGRecovery::start_recovery_ops(
                       pg->get_pgid());
         (void) pg->get_shard_services().start_operation<LocalPeeringEvent>(
           static_cast<crimson::osd::PG*>(pg),
-          pg->get_shard_services(),
           pg->get_pg_whoami(),
           pg->get_pgid(),
           pg->get_osdmap_epoch(),
@@ -84,7 +83,6 @@ PGRecovery::start_recovery_ops(
                       pg->get_pgid());
         (void) pg->get_shard_services().start_operation<LocalPeeringEvent>(
           static_cast<crimson::osd::PG*>(pg),
-          pg->get_shard_services(),
           pg->get_pg_whoami(),
           pg->get_pgid(),
           pg->get_osdmap_epoch(),
@@ -276,7 +274,7 @@ PGRecovery::recover_missing(
       trigger,
       pg->get_recovery_backend()->recover_object(soid, need)
       .handle_exception_interruptible(
-	[=, soid = std::move(soid)] (auto e) {
+	[=, this, soid = std::move(soid)] (auto e) {
 	on_failed_recover({ pg->get_pg_whoami() }, soid, need);
 	return seastar::make_ready_future<>();
       })
@@ -292,7 +290,7 @@ RecoveryBackend::interruptible_future<> PGRecovery::prep_object_replica_deletes(
   return pg->get_recovery_backend()->add_recovering(soid).wait_track_blocking(
     trigger,
     pg->get_recovery_backend()->push_delete(soid, need).then_interruptible(
-      [=] {
+      [=, this] {
       object_stat_sum_t stat_diff;
       stat_diff.num_objects_recovered = 1;
       on_global_recover(soid, stat_diff, true);
@@ -310,7 +308,7 @@ RecoveryBackend::interruptible_future<> PGRecovery::prep_object_replica_pushes(
     trigger,
     pg->get_recovery_backend()->recover_object(soid, need)
     .handle_exception_interruptible(
-      [=, soid = std::move(soid)] (auto e) {
+      [=, this, soid = std::move(soid)] (auto e) {
       on_failed_recover({ pg->get_pg_whoami() }, soid, need);
       return seastar::make_ready_future<>();
     })
@@ -534,7 +532,6 @@ void PGRecovery::backfilled()
   using LocalPeeringEvent = crimson::osd::LocalPeeringEvent;
   std::ignore = pg->get_shard_services().start_operation<LocalPeeringEvent>(
     static_cast<crimson::osd::PG*>(pg),
-    pg->get_shard_services(),
     pg->get_pg_whoami(),
     pg->get_pgid(),
     pg->get_osdmap_epoch(),
