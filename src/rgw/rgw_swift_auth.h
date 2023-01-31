@@ -1,8 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
-#ifndef CEPH_RGW_SWIFT_AUTH_H
-#define CEPH_RGW_SWIFT_AUTH_H
+#pragma once
 
 #include "rgw_common.h"
 #include "rgw_user.h"
@@ -43,11 +42,11 @@ class TempURLEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
 
   CephContext* const cct;
-  rgw::sal::Store* store;
+  rgw::sal::Driver* driver;
   const TempURLApplier::Factory* const apl_factory;
 
   /* Helper methods. */
-  void get_owner_info(const DoutPrefixProvider* dpp, 
+  void get_owner_info(const DoutPrefixProvider* dpp,
                       const req_state* s,
                       RGWUserInfo& owner_info,
 		      optional_yield y) const;
@@ -61,10 +60,10 @@ class TempURLEngine : public rgw::auth::Engine {
 
 public:
   TempURLEngine(CephContext* const cct,
-                rgw::sal::Store* _store ,
+                rgw::sal::Driver* _driver ,
                 const TempURLApplier::Factory* const apl_factory)
     : cct(cct),
-      store(_store),
+      driver(_driver),
       apl_factory(apl_factory) {
   }
 
@@ -82,7 +81,7 @@ class SignedTokenEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
 
   CephContext* const cct;
-  rgw::sal::Store* store;
+  rgw::sal::Driver* driver;
   const rgw::auth::TokenExtractor* const extractor;
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 
@@ -94,11 +93,11 @@ class SignedTokenEngine : public rgw::auth::Engine {
 
 public:
   SignedTokenEngine(CephContext* const cct,
-                    rgw::sal::Store* _store,
+                    rgw::sal::Driver* _driver,
                     const rgw::auth::TokenExtractor* const extractor,
                     const rgw::auth::LocalApplier::Factory* const apl_factory)
     : cct(cct),
-      store(_store),
+      driver(_driver),
       extractor(extractor),
       apl_factory(apl_factory) {
   }
@@ -119,7 +118,7 @@ class ExternalTokenEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
 
   CephContext* const cct;
-  rgw::sal::Store* store;
+  rgw::sal::Driver* driver;
   const rgw::auth::TokenExtractor* const extractor;
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 
@@ -130,11 +129,11 @@ class ExternalTokenEngine : public rgw::auth::Engine {
 
 public:
   ExternalTokenEngine(CephContext* const cct,
-                      rgw::sal::Store* _store,
+                      rgw::sal::Driver* _driver,
                       const rgw::auth::TokenExtractor* const extractor,
                       const rgw::auth::LocalApplier::Factory* const apl_factory)
     : cct(cct),
-      store(_store),
+      driver(_driver),
       extractor(extractor),
       apl_factory(apl_factory) {
   }
@@ -185,8 +184,8 @@ class DefaultStrategy : public rgw::auth::Strategy,
                         public rgw::auth::RemoteApplier::Factory,
                         public rgw::auth::LocalApplier::Factory,
                         public rgw::auth::swift::TempURLApplier::Factory {
-  rgw::sal::Store* store;
-  ImplicitTenants& implicit_tenant_context;
+  rgw::sal::Driver* driver;
+  const ImplicitTenants& implicit_tenant_context;
 
   /* The engines. */
   const rgw::auth::swift::TempURLEngine tempurl_engine;
@@ -221,9 +220,9 @@ class DefaultStrategy : public rgw::auth::Strategy,
                              acl_strategy_t&& extra_acl_strategy,
                              const rgw::auth::RemoteApplier::AuthInfo &info) const override {
     auto apl = \
-      rgw::auth::add_3rdparty(store, rgw_user(s->account_name),
-        rgw::auth::add_sysreq(cct, store, s,
-          rgw::auth::RemoteApplier(cct, store, std::move(extra_acl_strategy), info,
+      rgw::auth::add_3rdparty(driver, rgw_user(s->account_name),
+        rgw::auth::add_sysreq(cct, driver, s,
+          rgw::auth::RemoteApplier(cct, driver, std::move(extra_acl_strategy), info,
                                    implicit_tenant_context,
                                    rgw::auth::ImplicitTenants::IMPLICIT_TENANTS_SWIFT)));
     /* TODO(rzarzynski): replace with static_ptr. */
@@ -237,8 +236,8 @@ class DefaultStrategy : public rgw::auth::Strategy,
                             const std::optional<uint32_t>& perm_mask,
                             const std::string& access_key_id) const override {
     auto apl = \
-      rgw::auth::add_3rdparty(store, rgw_user(s->account_name),
-        rgw::auth::add_sysreq(cct, store, s,
+      rgw::auth::add_3rdparty(driver, rgw_user(s->account_name),
+        rgw::auth::add_sysreq(cct, driver, s,
           rgw::auth::LocalApplier(cct, user_info, subuser, perm_mask, access_key_id)));
     /* TODO(rzarzynski): replace with static_ptr. */
     return aplptr_t(new decltype(apl)(std::move(apl)));
@@ -255,19 +254,19 @@ class DefaultStrategy : public rgw::auth::Strategy,
 
 public:
   DefaultStrategy(CephContext* const cct,
-                  ImplicitTenants& implicit_tenant_context,
-                  rgw::sal::Store* _store)
-    : store(_store),
+                  const ImplicitTenants& implicit_tenant_context,
+                  rgw::sal::Driver* _driver)
+    : driver(_driver),
       implicit_tenant_context(implicit_tenant_context),
       tempurl_engine(cct,
-                     store,
+                     driver,
                      static_cast<rgw::auth::swift::TempURLApplier::Factory*>(this)),
       signed_engine(cct,
-                    store,
+                    driver,
                     static_cast<rgw::auth::TokenExtractor*>(&auth_token_extractor),
                     static_cast<rgw::auth::LocalApplier::Factory*>(this)),
       external_engine(cct,
-                      store,
+                      driver,
                       static_cast<rgw::auth::TokenExtractor*>(&auth_token_extractor),
                       static_cast<rgw::auth::LocalApplier::Factory*>(this)),
       anon_engine(cct,
@@ -326,7 +325,7 @@ public:
   ~RGWHandler_SWIFT_Auth() override {}
   RGWOp *op_get() override;
 
-  int init(rgw::sal::Store* store, req_state *state, rgw::io::BasicClient *cio) override;
+  int init(rgw::sal::Driver* driver, req_state *state, rgw::io::BasicClient *cio) override;
   int authorize(const DoutPrefixProvider *dpp, optional_yield y) override;
   int postauth_init(optional_yield) override { return 0; }
   int read_permissions(RGWOp *op, optional_yield) override { return 0; }
@@ -346,13 +345,10 @@ public:
     return this;
   }
 
-  RGWHandler_REST* get_handler(rgw::sal::Store* store,
+  RGWHandler_REST* get_handler(rgw::sal::Driver* driver,
 			       req_state*,
                                const rgw::auth::StrategyRegistry&,
                                const std::string&) override {
     return new RGWHandler_SWIFT_Auth;
   }
 };
-
-
-#endif

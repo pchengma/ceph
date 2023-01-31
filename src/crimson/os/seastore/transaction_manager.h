@@ -355,6 +355,7 @@ public:
     paddr_t existing_paddr,
     extent_len_t length) {
     LOG_PREFIX(TransactionManager::map_existing_extent);
+    // FIXME: existing_paddr can be absolute and pending
     ceph_assert(existing_paddr.is_absolute());
     assert(t.is_retired(existing_paddr, length));
 
@@ -636,6 +637,11 @@ private:
   rewrite_extent_ret rewrite_logical_extent(
     Transaction& t,
     LogicalCachedExtentRef extent);
+
+  submit_transaction_direct_ret do_submit_transaction(
+    Transaction &t,
+    ExtentPlacementManager::dispatch_result_t dispatch_result,
+    std::optional<journal_seq_t> seq_to_trim = std::nullopt);
 
 public:
   // Testing interfaces
