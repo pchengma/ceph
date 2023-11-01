@@ -480,7 +480,7 @@ struct lc_op_ctx {
   LCObjsLister& ol;
 
   std::unique_ptr<rgw::sal::Object> obj;
-  RGWObjectCtx rctx;
+  RGWObjectCtx octx;
   const DoutPrefixProvider *dpp;
   WorkQ* wq;
 
@@ -493,7 +493,7 @@ struct lc_op_ctx {
     : cct(env.driver->ctx()), env(env), o(o), next_key_name(next_key_name),
       effective_mtime(effective_mtime),
       driver(env.driver), bucket(env.bucket), op(env.op), ol(env.ol),
-      rctx(env.driver), dpp(dpp), wq(wq)
+      octx(env.driver), dpp(dpp), wq(wq)
     {
       obj = bucket->get_object(o.key);
     }
@@ -528,26 +528,24 @@ static int remove_expired_obj(
     obj_key.instance = "null";
   }
 
+  std::unique_ptr<rgw::sal::User> user;
   std::unique_ptr<rgw::sal::Bucket> bucket;
   std::unique_ptr<rgw::sal::Object> obj;
 
-  ret = driver->get_bucket(nullptr, bucket_info, &bucket);
+  user = driver->get_user(bucket_info.owner);
+  ret = driver->get_bucket(user.get(), bucket_info, &bucket);
   if (ret < 0) {
     return ret;
   }
 
-  // XXXX currently, rgw::sal::Bucket.owner is always null here
-  std::unique_ptr<rgw::sal::User> user;
-  if (! bucket->get_owner()) {
-    auto& bucket_info = bucket->get_info();
-    user = driver->get_user(bucket_info.owner);
-    // forgive me, lord
-    if (user) {
-      bucket->set_owner(user.get());
-    }
+  obj = bucket->get_object(obj_key);
+
+  RGWObjState* obj_state{nullptr};
+  ret = obj->get_obj_state(dpp, &obj_state, null_yield, true);
+  if (ret < 0) {
+    return ret;
   }
 
-  obj = bucket->get_object(obj_key);
   std::unique_ptr<rgw::sal::Object::DeleteOp> del_op
     = obj->get_delete_op();
   del_op->params.versioning_status
@@ -578,9 +576,9 @@ static int remove_expired_obj(
       "ERROR: publishing notification failed, with error: " << ret << dendl;
   } else {
     // send request to notification manager
-    (void) notify->publish_commit(dpp, obj->get_obj_size(),
+    (void) notify->publish_commit(dpp, obj_state->size,
 				  ceph::real_clock::now(),
-				  obj->get_attrs()[RGW_ATTR_ETAG].to_str(),
+				  obj_state->attrset[RGW_ATTR_ETAG].to_str(),
 				  version_id);
   }
 
@@ -836,7 +834,7 @@ int RGWLC::handle_multipart_expiration(rgw::sal::Bucket* target,
     if (obj_has_expired(this, cct, obj.meta.mtime, rule.mp_expiration)) {
       rgw_obj_key key(obj.key);
       std::unique_ptr<rgw::sal::MultipartUpload> mpu = target->get_multipart_upload(key.name);
-      int ret = mpu->abort(this, cct);
+      int ret = mpu->abort(this, cct, null_yield);
       if (ret == 0) {
         if (perfcounter) {
           perfcounter->inc(l_rgw_lc_abort_mpu, 1);
@@ -876,6 +874,7 @@ int RGWLC::handle_multipart_expiration(rgw::sal::Bucket* target,
     }
     params.prefix = prefix_iter->first;
     do {
+      auto offset = 0;
       results.objs.clear();
       ret = target->list(this, params, 1000, results, null_yield);
       if (ret < 0) {
@@ -885,7 +884,7 @@ int RGWLC::handle_multipart_expiration(rgw::sal::Bucket* target,
           return ret;
       }
 
-      for (auto obj_iter = results.objs.begin(); obj_iter != results.objs.end(); ++obj_iter) {
+      for (auto obj_iter = results.objs.begin(); obj_iter != results.objs.end(); ++obj_iter, ++offset) {
 	std::tuple<lc_op, rgw_bucket_dir_entry> t1 =
 	  {prefix_iter->second, *obj_iter};
 	worker->workpool->enqueue(WorkItem{t1});
@@ -893,6 +892,15 @@ int RGWLC::handle_multipart_expiration(rgw::sal::Bucket* target,
 	  return 0;
 	}
       } /* for objs */
+
+      if ((offset % 100) == 0) {
+	if (worker_should_stop(stop_at, once)) {
+	  ldpp_dout(this, 5) << __func__ << " interval budget EXPIRED worker "
+			     << worker->ix
+			     << dendl;
+	  return 0;
+	}
+      }
 
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     } while(results.is_truncated);
@@ -1637,10 +1645,18 @@ int RGWLC::bucket_lc_process(string& shard_id, LCWorker* worker,
     LCOpRule orule(oenv);
     orule.build(); // why can't ctor do it?
     rgw_bucket_dir_entry* o{nullptr};
-    for (; ol.get_obj(this, &o /* , fetch_barrier */); ol.next()) {
+    for (auto offset = 0; ol.get_obj(this, &o /* , fetch_barrier */); ++offset, ol.next()) {
       orule.update();
       std::tuple<LCOpRule, rgw_bucket_dir_entry> t1 = {orule, *o};
       worker->workpool->enqueue(WorkItem{t1});
+      if ((offset % 100) == 0) {
+	if (worker_should_stop(stop_at, once)) {
+	  ldpp_dout(this, 5) << __func__ << " interval budget EXPIRED worker "
+			     << worker->ix
+			     << dendl;
+	  return 0;
+	}
+      }
     }
     worker->workpool->drain();
   }
@@ -2100,6 +2116,15 @@ int RGWLC::process(int index, int max_lock_secs, LCWorker* worker,
 
       /* fetches the entry pointed to by head.bucket */
       ret = sal_lc->get_entry(lc_shard, head->get_marker(), &entry);
+      if (ret == -ENOENT) {
+        ret = sal_lc->get_next_entry(lc_shard, head->get_marker(), &entry);
+        if (ret < 0) {
+          ldpp_dout(this, 0) << "RGWLC::process() sal_lc->get_next_entry(lc_shard, "
+                             << "head.marker, entry) returned error ret==" << ret
+                             << dendl;
+          goto exit;
+        }
+      }
       if (ret < 0) {
 	ldpp_dout(this, 0) << "RGWLC::process() sal_lc->get_entry(lc_shard, head.marker, entry) "
 			   << "returned error ret==" << ret << dendl;

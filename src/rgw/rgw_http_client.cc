@@ -1017,7 +1017,10 @@ int RGWHTTPManager::set_request_state(RGWHTTPClient *client, RGWHTTPRequestSetSt
     return 0;
   }
 
+  // mutex already locked
+  // coverity[missing_lock:SUPPRESS]
   req_data->write_paused = suggested_wr_paused;
+  // coverity[missing_lock:SUPPRESS]
   req_data->read_paused = suggested_rd_paused;
 
   int bitmask = CURLPAUSE_CONT;
@@ -1151,6 +1154,7 @@ void *RGWHTTPManager::reqs_thread_entry()
           case CURLE_OPERATION_TIMEDOUT:
             dout(0) << "WARNING: curl operation timed out, network average transfer speed less than " 
               << cct->_conf->rgw_curl_low_speed_limit << " Bytes per second during " << cct->_conf->rgw_curl_low_speed_time << " seconds." << dendl;
+          // coverity[unterminated_case:SUPPRESS]
           default:
             dout(20) << "ERROR: msg->data.result=" << result << " req_data->id=" << id << " http_status=" << http_status << dendl;
             dout(20) << "ERROR: curl error: " << curl_easy_strerror((CURLcode)result) << " req_data->error_buf=" << req_data->error_buf << dendl;

@@ -51,7 +51,7 @@ Misc
 ~~~~
 - [x] update src/ceph-volume/ceph_volume/__init__.py (`__release__`)
 - [x] update src/tools/monmaptool.cc (`min_mon_release` and corresponding output in `src/test/cli/monmaptool`)
-- [x] update src/cephadm/cephadm (`DEFAULT_IMAGE_RELEASE` to X)
+- [x] update src/cephadm/cephadmlib/constants.py (`DEFAULT_IMAGE_RELEASE` to X)
 
 Docs
 ~~~~
@@ -118,7 +118,28 @@ In the `ceph/ceph-build.git` repo:
 - [x] add the version -> X mapping (`release_from_version()` in `scripts/build_utils.sh`)
 - [x] add the option for X (`case $RELEASE_BRANCH` in `ceph-dev-build/build/build_osc`)
 - [x] add the option for X (`case $RELEASE_BRANCH` in `ceph-dev-build/build/setup_osc`)
+- [x] grep for previous release and add relevant build targets (e.g. for reef https://github.com/ceph/ceph-build/pull/2076 and https://github.com/ceph/ceph-build/pull/2119)
 
+
+ceph-container
+--------------
+In the `ceph/ceph-container.git` repo:
+
+- [ ] Add the release name to `Makefile`
+- [ ] Update `ceph-releases/ALL/centos/daemon-base/__DOCKERFILE_INSTALL__` with the with the supported nfs-ganesha version
+- [ ] Update `contrib/build-push-ceph-container-imgs.sh` with the new release
+- [ ] Update `contrib/ceph-build-config.sh` with the release name
+- [ ] Update `contrib/common.sh` with supported version numbers
+- [ ] Update `maint-lib/ceph_version.sh` with the release name
+
+See https://github.com/ceph/ceph-container/pull/2109 as an example for what to do.
+
+
+After dev freeze
+================
+
+- [x] add release name to redmine (using https://tracker.ceph.com/custom_fields/16/edit)
+- [x] add release name to .github/milestone.yml for github actions to automatically add milestone to backports (this commit must be backported to the release branch)
 
 First release candidate
 =======================
@@ -132,4 +153,4 @@ First stable release
 
 - [ ] src/ceph_release: change type `stable`
 - [ ] generate new object corpus for encoding/decoding tests - see :doc:`corpus`
-- [ ] src/cephadm/cephadm: update `LATEST_STABLE_RELEASE`
+- [ ] src/cephadm/cephadmlib/constants.py: update `LATEST_STABLE_RELEASE`

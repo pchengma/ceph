@@ -133,8 +133,15 @@ public:
     : RGWSimpleCoroutine(_svc->ctx()), dpp(_dpp), async_rados(_async_rados), svc(_svc),
       obj(_obj), result(_result),
       empty_on_enoent(empty_on_enoent), objv_tracker(objv_tracker) {}
+
   ~SysObjReadCR() override {
-    request_cleanup();
+    try {
+      request_cleanup();
+    } catch (const boost::container::length_error_t& e) {
+      ldpp_dout(dpp, 0) << "ERROR: " << __func__ <<
+	": reference counted object mismatched, \"" << e.what() <<
+	"\"" << dendl;
+    }
   }
 
   void request_cleanup() override {
@@ -209,7 +216,13 @@ public:
   }
 
   ~SysObjWriteCR() override {
-    request_cleanup();
+    try {
+      request_cleanup();
+    } catch (const boost::container::length_error_t& e) {
+      ldpp_dout(dpp, 0) << "ERROR: " << __func__ <<
+	": reference counted object mismatched, \"" << e.what() <<
+	"\"" << dendl;
+    }
   }
 
   void request_cleanup() override {
@@ -516,10 +529,10 @@ RGWMetadataLog* RGWSI_MDLog::get_log(const std::string& period)
   return &insert.first->second;
 }
 
-int RGWSI_MDLog::add_entry(const DoutPrefixProvider *dpp, const string& hash_key, const string& section, const string& key, bufferlist& bl)
+int RGWSI_MDLog::add_entry(const DoutPrefixProvider *dpp, const string& hash_key, const string& section, const string& key, bufferlist& bl, optional_yield y)
 {
   ceph_assert(current_log); // must have called init()
-  return current_log->add_entry(dpp, hash_key, section, key, bl);
+  return current_log->add_entry(dpp, hash_key, section, key, bl, y);
 }
 
 int RGWSI_MDLog::get_shard_id(const string& hash_key, int *shard_id)

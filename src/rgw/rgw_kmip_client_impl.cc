@@ -243,11 +243,7 @@ RGWKmipHandleBuilder::build() const
 
   failed = 0;
 Done:
-  if (!failed)
-    ;
-  else if (!r)
-    ;
-  else {
+  if(failed && r) {
     kmip_free_handle_stuff(r);
     delete r;
     r = 0;
@@ -418,6 +414,9 @@ RGWKMIPManagerImpl::add_request(RGWKMIPTransceiver *req)
   std::unique_lock l{lock};
   if (going_down)
     return -ECANCELED;
+  // requests is a boost::intrusive::list, which manages pointers and does not copy the instance
+  // coverity[leaked_storage:SUPPRESS]
+  // coverity[uninit_use_in_call:SUPPRESS]
   requests.push_back(*new Request{*req});
   l.unlock();
   if (worker)

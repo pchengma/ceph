@@ -286,7 +286,8 @@ void cls_rgw_bucket_complete_op(ObjectWriteOperation& o, RGWModifyOp op, const s
                                 const rgw_bucket_dir_entry_meta& dir_meta,
 				const list<cls_rgw_obj_key> *remove_objs, bool log_op,
                                 uint16_t bilog_flags,
-                                const rgw_zone_set *zones_trace)
+                                const rgw_zone_set *zones_trace,
+				const std::string& obj_locator)
 {
 
   bufferlist in;
@@ -295,6 +296,7 @@ void cls_rgw_bucket_complete_op(ObjectWriteOperation& o, RGWModifyOp op, const s
   call.tag = tag;
   call.key = key;
   call.ver = ver;
+  call.locator = obj_locator;
   call.meta = dir_meta;
   call.log_op = log_op;
   call.bilog_flags = bilog_flags;
@@ -1066,6 +1068,20 @@ int cls_rgw_lc_list(IoCtx& io_ctx, const string& oid,
 	      { return a.bucket < b.bucket; });
   entries = std::move(ret.entries);
   return r;
+}
+
+void cls_rgw_mp_upload_part_info_update(librados::ObjectWriteOperation& op,
+                                        const std::string& part_key,
+                                        const RGWUploadPartInfo& info)
+{
+  cls_rgw_mp_upload_part_info_update_op call;
+  call.part_key = part_key;
+  call.info     = info;
+
+  buffer::list in;
+  encode(call, in);
+
+  op.exec(RGW_CLASS, RGW_MP_UPLOAD_PART_INFO_UPDATE, in);
 }
 
 void cls_rgw_reshard_add(librados::ObjectWriteOperation& op, const cls_rgw_reshard_entry& entry)

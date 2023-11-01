@@ -6,7 +6,13 @@
 #include <thread>
 #include <vector>
 
-#include <boost/asio.hpp>
+#include <boost/asio/error.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ip/v6_only.hpp>
+#include <boost/asio/read.hpp>
+#include <boost/asio/write.hpp>
+
 #include <boost/intrusive/list.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
@@ -72,6 +78,7 @@ class StreamIO : public rgw::asio::ClientIO {
   timeout_timer& timeout;
   yield_context yield;
   parse_buffer& buffer;
+  boost::system::error_code fatal_ec;
  public:
   StreamIO(CephContext *cct, Stream& stream, timeout_timer& timeout,
            rgw::asio::parser_type& parser, yield_context yield,
@@ -82,6 +89,8 @@ class StreamIO : public rgw::asio::ClientIO {
         cct(cct), stream(stream), timeout(timeout), yield(yield),
         buffer(buffer)
   {}
+
+  boost::system::error_code get_fatal_error_code() const { return fatal_ec; }
 
   size_t write_data(const char* buf, size_t len) override {
     boost::system::error_code ec;
@@ -94,6 +103,9 @@ class StreamIO : public rgw::asio::ClientIO {
       if (ec == boost::asio::error::broken_pipe) {
         boost::system::error_code ec_ignored;
         stream.lowest_layer().shutdown(tcp_socket::shutdown_both, ec_ignored);
+      }
+      if (!fatal_ec) {
+        fatal_ec = ec;
       }
       throw rgw::io::Exception(ec.value(), std::system_category());
     }
@@ -116,6 +128,9 @@ class StreamIO : public rgw::asio::ClientIO {
       }
       if (ec) {
         ldout(cct, 4) << "failed to read body: " << ec.message() << dendl;
+        if (!fatal_ec) {
+          fatal_ec = ec;
+        }
         throw rgw::io::Exception(ec.value(), std::system_category());
       }
     }
@@ -158,8 +173,15 @@ struct log_ms_remainder {
 };
 std::ostream& operator<<(std::ostream& out, const log_ms_remainder& m) {
   using namespace std::chrono;
-  return out << std::setfill('0') << std::setw(3)
+
+  std::ios oldState(nullptr);
+  oldState.copyfmt(out);
+
+  out << std::setfill('0') << std::setw(3)
       << duration_cast<milliseconds>(m.t.time_since_epoch()).count() % 1000;
+
+  out.copyfmt(oldState);
+  return out;
 }
 
 // log time in apache format: day/month/year:hour:minute:second zone
@@ -288,6 +310,13 @@ void handle_connection(boost::asio::io_context& context,
             << latency << dendl;
       }
 
+      // process_request() can't distinguish between connection errors and
+      // http/s3 errors, so check StreamIO for fatal connection errors
+      ec = real_client.get_fatal_error_code();
+      if (ec) {
+        return;
+      }
+
       if (real_client.sent_100_continue()) {
         expect_continue = false;
       }
@@ -338,6 +367,8 @@ struct Connection : boost::intrusive::list_base_hook<>,
   void close(boost::system::error_code& ec) {
     socket.close(ec);
   }
+
+  tcp_socket& get_socket() { return socket; }
 };
 
 class ConnectionList {

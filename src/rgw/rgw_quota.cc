@@ -619,13 +619,14 @@ int RGWUserStatsCache::sync_bucket(const rgw_user& _u, rgw_bucket& _b, optional_
     return r;
   }
 
-  r = bucket->sync_user_stats(dpp, y);
+  RGWBucketEnt ent;
+  r = bucket->sync_user_stats(dpp, y, &ent);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "ERROR: sync_user_stats() for user=" << _u << ", bucket=" << bucket << " returned " << r << dendl;
     return r;
   }
 
-  return bucket->check_bucket_shards(dpp);
+  return bucket->check_bucket_shards(dpp, ent.count, y);
 }
 
 int RGWUserStatsCache::sync_user(const DoutPrefixProvider *dpp, const rgw_user& _u, optional_yield y)
@@ -1030,6 +1031,16 @@ void RGWQuotaInfo::dump(Formatter *f) const
   f->dump_int("max_size", max_size);
   f->dump_int("max_size_kb", rgw_rounded_kb(max_size));
   f->dump_int("max_objects", max_objects);
+}
+
+void RGWQuotaInfo::generate_test_instances(std::list<RGWQuotaInfo*>& o)
+{
+  o.push_back(new RGWQuotaInfo);
+  o.push_back(new RGWQuotaInfo);
+  o.back()->enabled = true;
+  o.back()->check_on_raw = true;
+  o.back()->max_size = 1024;
+  o.back()->max_objects = 1;
 }
 
 void RGWQuotaInfo::decode_json(JSONObj *obj)

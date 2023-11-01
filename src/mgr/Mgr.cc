@@ -388,7 +388,7 @@ void Mgr::init()
     entity_addrvec_t addrv;
     addrv.parse(ident);
     ident = (char*)realloc(ident, 0);
-    py_module_registry->register_client("libcephsqlite", addrv);
+    py_module_registry->register_client("libcephsqlite", addrv, true);
   }
 #endif
 
@@ -525,7 +525,7 @@ void Mgr::handle_osd_map()
   cluster_state.with_osdmap_and_pgmap([this, &names_exist](const OSDMap &osd_map,
 							   const PGMap &pg_map) {
     for (int osd_id = 0; osd_id < osd_map.get_max_osd(); ++osd_id) {
-      if (!osd_map.exists(osd_id)) {
+      if (!osd_map.exists(osd_id) || (osd_map.is_out(osd_id) && osd_map.is_down(osd_id))) {
         continue;
       }
 

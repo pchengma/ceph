@@ -27,7 +27,8 @@
 #include "include/stringify.h"
 #include "rgw_main.h"
 #include "rgw_common.h"
-#include "rgw_sal_rados.h"
+#include "rgw_sal.h"
+#include "rgw_sal_config.h"
 #include "rgw_period_pusher.h"
 #include "rgw_realm_reloader.h"
 #include "rgw_rest.h"
@@ -42,6 +43,7 @@
 #include "rgw_rest_config.h"
 #include "rgw_rest_realm.h"
 #include "rgw_rest_ratelimit.h"
+#include "rgw_rest_zero.h"
 #include "rgw_swift_auth.h"
 #include "rgw_log.h"
 #include "rgw_lib.h"
@@ -90,6 +92,11 @@ namespace {
 }
 
 OpsLogFile* rgw::AppMain::ops_log_file;
+
+rgw::AppMain::AppMain(const DoutPrefixProvider* dpp) : dpp(dpp)
+{
+}
+rgw::AppMain::~AppMain() = default;
 
 void rgw::AppMain::init_frontends1(bool nfs) 
 {
@@ -196,9 +203,22 @@ void rgw::AppMain::init_numa()
   }
 } /* init_numa */
 
-void rgw::AppMain::init_storage()
+int rgw::AppMain::init_storage()
 {
-    auto run_gc =
+  auto config_store_type = g_conf().get_val<std::string>("rgw_config_store");
+  cfgstore = DriverManager::create_config_store(dpp, config_store_type);
+  if (!cfgstore) {
+    return -EIO;
+  }
+  env.cfgstore = cfgstore.get();
+
+  int r = site.load(dpp, null_yield, cfgstore.get());
+  if (r < 0) {
+    return r;
+  }
+  env.site = &site;
+
+  auto run_gc =
     (g_conf()->rgw_enable_gc_threads &&
       ((!nfs) || (nfs && g_conf()->rgw_nfs_run_gc_threads)));
 
@@ -222,8 +242,12 @@ void rgw::AppMain::init_storage()
           run_quota,
           run_sync,
           g_conf().get_val<bool>("rgw_dynamic_resharding"),
+          true, null_yield, // run notification thread
           g_conf()->rgw_cache_enabled);
-
+  if (!env.driver) {
+    return -EIO;
+  }
+  return 0;
 } /* init_storage */
 
 void rgw::AppMain::init_perfcounters()
@@ -325,6 +349,10 @@ void rgw::AppMain::cond_init_apis()
       /* Register driver-specific admin APIs */
       env.driver->register_admin_apis(admin_resource);
       rest.register_resource(g_conf()->rgw_admin_entry, admin_resource);
+    }
+
+    if (apis_map.count("zero")) {
+      rest.register_resource("zero", new rgw::RESTMgr_Zero());
     }
   } /* have_http_frontend */
 } /* init_apis */
@@ -501,7 +529,7 @@ void rgw::AppMain::init_tracepoints()
 {
   TracepointProvider::initialize<rgw_rados_tracepoint_traits>(dpp->get_cct());
   TracepointProvider::initialize<rgw_op_tracepoint_traits>(dpp->get_cct());
-  tracing::rgw::tracer.init("rgw");
+  tracing::rgw::tracer.init(dpp->get_cct(), "rgw");
 } /* init_tracepoints() */
 
 void rgw::AppMain::init_notification_endpoints()
@@ -522,37 +550,29 @@ void rgw::AppMain::init_lua()
 {
   rgw::sal::Driver* driver = env.driver;
   int r{0};
-  std::string path = g_conf().get_val<std::string>("rgw_luarocks_location");
-  if (!path.empty()) {
-    path += "/" + g_conf()->name.to_str();
-  }
-  env.lua.luarocks_path = path;
+  std::string install_dir;
 
 #ifdef WITH_RADOSGW_LUA_PACKAGES
   rgw::lua::packages_t failed_packages;
-  std::string output;
-  r = rgw::lua::install_packages(dpp, driver, null_yield, path,
-                                 failed_packages, output);
+  r = rgw::lua::install_packages(dpp, driver, null_yield, g_conf().get_val<std::string>("rgw_luarocks_location"),
+                                 failed_packages, install_dir);
   if (r < 0) {
-    dout(1) << "WARNING: failed to install lua packages from allowlist"
+    ldpp_dout(dpp, 5) << "WARNING: failed to install Lua packages from allowlist. error: " << r
             << dendl;
   }
-  if (!output.empty()) {
-    dout(10) << "INFO: lua packages installation output: \n" << output << dendl;
-  }
   for (const auto &p : failed_packages) {
-    dout(5) << "WARNING: failed to install lua package: " << p
+    ldpp_dout(dpp, 5) << "WARNING: failed to install Lua package: " << p
             << " from allowlist" << dendl;
   }
 #endif
 
-  env.lua.manager = env.driver->get_lua_manager();
-
+  env.lua.manager = env.driver->get_lua_manager(install_dir);
   if (driver->get_name() == "rados") { /* Supported for only RadosStore */
     lua_background = std::make_unique<
-      rgw::lua::Background>(driver, dpp->get_cct(), path);
+      rgw::lua::Background>(driver, dpp->get_cct(), env.lua.manager.get());
     lua_background->start();
     env.lua.background = lua_background.get();
+    static_cast<rgw::sal::RadosLuaManager*>(env.lua.manager.get())->watch_reload(dpp);
   }
 } /* init_lua */
 
@@ -560,6 +580,7 @@ void rgw::AppMain::shutdown(std::function<void(void)> finalize_async_signals)
 {
   if (env.driver->get_name() == "rados") {
     reloader.reset(); // stop the realm reloader
+    static_cast<rgw::sal::RadosLuaManager*>(env.lua.manager.get())->unwatch_reload(dpp);
   }
 
   for (auto& fe : fes) {
@@ -585,6 +606,7 @@ void rgw::AppMain::shutdown(std::function<void(void)> finalize_async_signals)
     lua_background->shutdown();
   }
 
+  cfgstore.reset(); // deletes
   DriverManager::close_storage(env.driver);
 
   rgw_tools_cleanup();

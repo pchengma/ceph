@@ -312,7 +312,7 @@ public:
 } __attribute__ ((__may_alias__));
 WRITE_CLASS_ENCODER(openc_response_t)
 
-class MClientReply final : public SafeMessage {
+class MClientReply final : public MMDSOp {
 public:
   // reply data
   struct ceph_mds_reply_head head {};
@@ -326,7 +326,18 @@ public:
   epoch_t get_mdsmap_epoch() const { return head.mdsmap_epoch; }
 
   int get_result() const {
+    #ifdef _WIN32
+    // libclient and libcephfs return CEPHFS_E* errors, which are basically
+    // Linux errno codes. If we convert mds errors to host errno values, we
+    // end up mixing error codes.
+    //
+    // For Windows, we'll preserve the original error value, which is expected
+    // to be a linux (CEPHFS_E*) error. It may be worth doing the same for
+    // other platforms.
+    return head.result;
+    #else
     return ceph_to_hostos_errno((__s32)(__u32)head.result);
+    #endif
   }
 
   void set_result(int r) { head.result = r; }
@@ -336,9 +347,9 @@ public:
   bool is_safe() const { return head.safe; }
 
 protected:
-  MClientReply() : SafeMessage{CEPH_MSG_CLIENT_REPLY} {}
+  MClientReply() : MMDSOp{CEPH_MSG_CLIENT_REPLY} {}
   MClientReply(const MClientRequest &req, int result = 0) :
-    SafeMessage{CEPH_MSG_CLIENT_REPLY} {
+    MMDSOp{CEPH_MSG_CLIENT_REPLY} {
     memset(&head, 0, sizeof(head));
     header.tid = req.get_tid();
     head.op = req.get_op();

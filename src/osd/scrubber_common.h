@@ -32,6 +32,11 @@ private:
   ScrubberPasskey& operator=(const ScrubberPasskey&) = delete;
 };
 
+/// randomly returns true with probability equal to the passed parameter
+static inline bool random_bool_with_probability(double probability) {
+  return (ceph::util::generate_random_number<double>(0.0, 1.0) < probability);
+}
+
 namespace Scrub {
 
 /// high/low OP priority
@@ -42,12 +47,35 @@ enum class scrub_prio_t : bool { low_priority = false, high_priority = true };
 using act_token_t = uint32_t;
 
 /// "environment" preconditions affecting which PGs are eligible for scrubbing
-struct ScrubPreconds {
+struct OSDRestrictions {
   bool allow_requested_repair_only{false};
   bool load_is_low{true};
   bool time_permit{true};
   bool only_deadlined{false};
 };
+
+}  // namespace Scrub
+
+namespace fmt {
+template <>
+struct formatter<Scrub::OSDRestrictions> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+
+  template <typename FormatContext>
+  auto format(const Scrub::OSDRestrictions& conds, FormatContext& ctx)
+  {
+    return fmt::format_to(
+      ctx.out(),
+      "overdue-only:{} load:{} time:{} repair-only:{}",
+        conds.only_deadlined,
+        conds.load_is_low ? "ok" : "high",
+        conds.time_permit ? "ok" : "no",
+        conds.allow_requested_repair_only);
+  }
+};
+}  // namespace fmt
+
+namespace Scrub {
 
 /// PG services used by the scrubber backend
 struct PgScrubBeListener {
@@ -223,8 +251,6 @@ struct ScrubPgIF {
   virtual void send_sched_replica(epoch_t epoch_queued,
 				  Scrub::act_token_t token) = 0;
 
-  virtual void send_full_reset(epoch_t epoch_queued) = 0;
-
   virtual void send_chunk_free(epoch_t epoch_queued) = 0;
 
   virtual void send_chunk_busy(epoch_t epoch_queued) = 0;
@@ -234,8 +260,6 @@ struct ScrubPgIF {
   virtual void send_get_next_chunk(epoch_t epoch_queued) = 0;
 
   virtual void send_scrub_is_finished(epoch_t epoch_queued) = 0;
-
-  virtual void send_maps_compared(epoch_t epoch_queued) = 0;
 
   virtual void on_applied_when_primary(const eversion_t& applied_version) = 0;
 
@@ -281,6 +305,10 @@ struct ScrubPgIF {
   virtual void replica_scrub_op(OpRequestRef op) = 0;
 
   virtual void set_op_parameters(const requested_scrub_t&) = 0;
+
+  /// stop any active scrubbing (on interval end) and unregister from
+  /// the OSD scrub queue
+  virtual void on_new_interval() = 0;
 
   virtual void scrub_clear_state() = 0;
 
@@ -382,13 +410,10 @@ struct ScrubPgIF {
   virtual bool reserve_local() = 0;
 
   /**
-   * Register/de-register with the OSD scrub queue
-   *
-   * Following our status as Primary or replica.
+   * if activated as a Primary - register the scrub job with the OSD
+   * scrub queue
    */
-  virtual void on_primary_change(
-    std::string_view caller,
-    const requested_scrub_t& request_flags) = 0;
+  virtual void on_pg_activate(const requested_scrub_t& request_flags) = 0;
 
   /**
    * Recalculate the required scrub time.

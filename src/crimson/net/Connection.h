@@ -40,6 +40,15 @@ class Connection : public seastar::enable_shared_from_this<Connection> {
 
   virtual ~Connection() {}
 
+  /**
+   * get_shard_id
+   *
+   * The shard id where the Connection is dispatching events and handling I/O.
+   *
+   * May be changed with the accept/connect events.
+   */
+  virtual const seastar::shard_id get_shard_id() const = 0;
+
   virtual const entity_name_t &get_peer_name() const = 0;
 
   entity_type_t get_peer_type() const { return get_peer_name().type(); }
@@ -71,19 +80,22 @@ class Connection : public seastar::enable_shared_from_this<Connection> {
    * send
    *
    * Send a message over a connection that has completed its handshake.
-   * May be invoked from any core.
+   *
+   * May be invoked from any core, but that requires to chain the returned
+   * future to preserve ordering.
    */
   virtual seastar::future<> send(MessageURef msg) = 0;
 
   /**
-   * keepalive
+   * send_keepalive
    *
    * Send a keepalive message over a connection that has completed its
    * handshake.
    *
-   * May be invoked from any core.
+   * May be invoked from any core, but that requires to chain the returned
+   * future to preserve ordering.
    */
-  virtual seastar::future<> keepalive() = 0;
+  virtual seastar::future<> send_keepalive() = 0;
 
   virtual clock_t::time_point get_last_keepalive() const = 0;
 
@@ -109,9 +121,13 @@ class Connection : public seastar::enable_shared_from_this<Connection> {
   virtual void print(std::ostream& out) const = 0;
 
 #ifdef UNIT_TESTS_BUILT
-  virtual bool is_closed() const = 0;
+  virtual bool is_protocol_ready() const = 0;
 
-  virtual bool is_closed_clean() const = 0;
+  virtual bool is_protocol_standby() const = 0;
+
+  virtual bool is_protocol_closed() const = 0;
+
+  virtual bool is_protocol_closed_clean() const = 0;
 
   virtual bool peer_wins() const = 0;
 #endif

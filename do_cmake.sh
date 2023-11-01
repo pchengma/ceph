@@ -2,7 +2,7 @@
 set -ex
 
 if [ -d .git ]; then
-    git submodule update --init --recursive
+    git submodule update --init --recursive --progress
 fi
 
 : ${BUILD_DIR:=build}
@@ -19,7 +19,9 @@ if [ -r /etc/os-release ]; then
   source /etc/os-release
   case "$ID" in
       fedora)
-          if [ "$VERSION_ID" -ge "35" ] ; then
+          if [ "$VERSION_ID" -ge "37" ] ; then
+            PYBUILD="3.11"
+          elif [ "$VERSION_ID" -ge "35" ] ; then
             PYBUILD="3.10"
           elif [ "$VERSION_ID" -ge "33" ] ; then
             PYBUILD="3.9"
@@ -29,7 +31,7 @@ if [ -r /etc/os-release ]; then
             PYBUILD="3.7"
           fi
           ;;
-      rhel|centos)
+      rocky|rhel|centos)
           MAJOR_VER=$(echo "$VERSION_ID" | sed -e 's/\..*$//')
           if [ "$MAJOR_VER" -ge "9" ] ; then
               PYBUILD="3.9"

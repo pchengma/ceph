@@ -2,7 +2,7 @@ from enum import Enum
 from functools import wraps
 from inspect import isclass
 from typing import Any, Callable, Dict, Generator, Iterable, Iterator, List, \
-    NamedTuple, Optional, Union, get_type_hints
+    NamedTuple, Optional, Tuple, Union, get_type_hints
 
 from ._api_router import APIRouter
 from ._docs import APIDoc, EndpointDoc
@@ -14,13 +14,30 @@ class SecretStr(str):
     pass
 
 
+class MethodType(Enum):
+    POST = 'post'
+    PUT = 'put'
+
+
 def isnamedtuple(o):
     return isinstance(o, tuple) and hasattr(o, '_asdict') and hasattr(o, '_fields')
 
 
+class SerializableClass:
+    def __iter__(self):
+        for attr in self.__dict__:
+            if not attr.startswith("__"):
+                yield attr, getattr(self, attr)
+
+    def __contains__(self, value):
+        return value in self.__dict__
+
+    def __len__(self):
+        return len(self.__dict__)
+
+
 def serialize(o, expected_type=None):
     # pylint: disable=R1705,W1116
-    print(o, expected_type)
     if isnamedtuple(o):
         hints = get_type_hints(o)
         return {k: serialize(v, hints[k]) for k, v in zip(o._fields, o)}
@@ -30,6 +47,8 @@ def serialize(o, expected_type=None):
         # NOTE: we could add a metadata value in a list to indentify tuples and,
         # sets if we wanted but for now let's go for lists.
         return [serialize(i) for i in o]
+    elif isinstance(o, SerializableClass):
+        return {serialize(k): serialize(v) for k, v in o}
     elif isinstance(o, (Iterator, Generator)):
         return [serialize(i) for i in o]
     elif expected_type and isclass(expected_type) and issubclass(expected_type, SecretStr):
@@ -43,28 +62,53 @@ class TableColumn(NamedTuple):
     cellTemplate: str = ''
     isHidden: bool = False
     filterable: bool = True
+    flexGrow: int = 1
 
 
 class TableAction(NamedTuple):
     name: str
     permission: str
     icon: str
-    routerLink: str  # redirect to...
+    routerLink: str = ''  # redirect to...
+    click: str = ''
+    disable: bool = False  # disable without selection
 
 
-class TableComponent(NamedTuple):
-    columns: List[TableColumn] = []
-    columnMode: str = 'flex'
-    toolHeader: bool = True
+class SelectionType(Enum):
+    NONE = ''
+    SINGLE = 'single'
+    MULTI = 'multiClick'
+
+
+class TableComponent(SerializableClass):
+    def __init__(self) -> None:
+        self.columns: List[TableColumn] = []
+        self.columnMode: str = 'flex'
+        self.toolHeader: bool = True
+        self.selectionType: str = SelectionType.SINGLE.value
+
+    def set_selection_type(self, type_: SelectionType):
+        self.selectionType = type_.value
 
 
 class Icon(Enum):
-    add = 'fa fa-plus'
+    ADD = 'fa fa-plus'
+    DESTROY = 'fa fa-times'
+    IMPORT = 'fa fa-upload'
+    EXPORT = 'fa fa-download'
+    EDIT = 'fa fa-pencil'
+
+
+class Validator(Enum):
+    JSON = 'json'
+    RGW_ROLE_NAME = 'rgwRoleName'
+    RGW_ROLE_PATH = 'rgwRolePath'
+    FILE = 'file'
 
 
 class FormField(NamedTuple):
     """
-    The key of a FromField is then used to send the data related to that key into the
+    The key of a FormField is then used to send the data related to that key into the
     POST and PUT endpoints. It is imperative for the developer to map keys of fields and containers
     to the input of the POST and PUT endpoints.
     """
@@ -73,18 +117,22 @@ class FormField(NamedTuple):
     field_type: Any = str
     default_value: Optional[Any] = None
     optional: bool = False
-    html_class: str = ''
-    label_html_class: str = 'col-form-label'
-    field_html_class: str = 'col-form-input'
+    readonly: bool = False
+    help: str = ''
+    validators: List[Validator] = []
 
     def get_type(self):
         _type = ''
         if self.field_type == str:
             _type = 'string'
         elif self.field_type == int:
-            _type = 'integer'
+            _type = 'int'
         elif self.field_type == bool:
             _type = 'boolean'
+        elif self.field_type == 'textarea':
+            _type = 'textarea'
+        elif self.field_type == "file":
+            _type = 'file'
         else:
             raise NotImplementedError(f'Unimplemented type {self.field_type}')
         return _type
@@ -92,15 +140,13 @@ class FormField(NamedTuple):
 
 class Container:
     def __init__(self, name: str, key: str, fields: List[Union[FormField, "Container"]],
-                 optional: bool = False, html_class: str = '', label_html_class: str = '',
-                 field_html_class: str = ''):
+                 optional: bool = False, readonly: bool = False, min_items=1):
         self.name = name
         self.key = key
         self.fields = fields
         self.optional = optional
-        self.html_class = html_class
-        self.label_html_class = label_html_class
-        self.field_html_class = field_html_class
+        self.readonly = readonly
+        self.min_items = min_items
 
     def layout_type(self):
         raise NotImplementedError
@@ -109,7 +155,7 @@ class Container:
         raise NotImplementedError
 
     def to_dict(self, key=''):
-        # intialize the schema of this container
+        # initialize the schema of this container
         ui_schemas = []
         control_schema = {
             'type': self._property_type(),
@@ -119,39 +165,36 @@ class Container:
         properties = None  # control schema properties alias
         required = None
         if self._property_type() == 'array':
+            control_schema['required'] = []
+            control_schema['minItems'] = self.min_items
             control_schema['items'] = {
                 'type': 'object',
                 'properties': {},
                 'required': []
             }
             properties = control_schema['items']['properties']
-            required = control_schema['items']['required']
+            required = control_schema['required']
+            control_schema['items']['required'] = required
+
             ui_schemas.append({
-                'type': 'array',
                 'key': key,
-                'htmlClass': self.html_class,
-                'fieldHtmlClass': self.field_html_class,
-                'labelHtmlClass': self.label_html_class,
-                'items': [{
-                        'type': 'div',
-                        'flex-direction': self.layout_type(),
-                        'displayFlex': True,
-                        'items': []
-                }]
+                'templateOptions': {
+                    'objectTemplateOptions': {
+                        'layoutType': self.layout_type()
+                    }
+                },
+                'items': []
             })
-            items = ui_schemas[-1]['items'][0]['items']
+            items = ui_schemas[-1]['items']
         else:
             control_schema['properties'] = {}
             control_schema['required'] = []
             required = control_schema['required']
             properties = control_schema['properties']
             ui_schemas.append({
-                'type': 'section',
-                'flex-direction': self.layout_type(),
-                'displayFlex': True,
-                'htmlClass': self.html_class,
-                'fieldHtmlClass': self.field_html_class,
-                'labelHtmlClass': self.label_html_class,
+                'templateOptions': {
+                    'layoutType': self.layout_type()
+                },
                 'key': key,
                 'items': []
             })
@@ -166,7 +209,7 @@ class Container:
 
         # include fields in this container's schema
         for field in self.fields:
-            field_ui_schema = {}
+            field_ui_schema: Dict[str, Any] = {}
             properties[field.key] = {}
             field_key = field.key
             if key:
@@ -180,13 +223,13 @@ class Container:
                 properties[field.key]['type'] = _type
                 properties[field.key]['title'] = field.name
                 field_ui_schema['key'] = field_key
-                field_ui_schema['htmlClass'] = field.html_class
-                field_ui_schema['fieldHtmlClass'] = field.field_html_class
-                field_ui_schema['labelHtmlClass'] = field.label_html_class
+                field_ui_schema['readonly'] = field.readonly
+                field_ui_schema['help'] = f'{field.help}'
+                field_ui_schema['validators'] = [i.value for i in field.validators]
                 items.append(field_ui_schema)
             elif isinstance(field, Container):
                 container_schema = field.to_dict(key+'.'+field.key if key else field.key)
-                control_schema['properties'][field.key] = container_schema['control_schema']
+                properties[field.key] = container_schema['control_schema']
                 ui_schemas.extend(container_schema['ui_schema'])
             if not field.optional:
                 required.append(field.key)
@@ -228,52 +271,42 @@ class ArrayHorizontalContainer(Container):
         return 'array'
 
 
-class Form:
-    def __init__(self, path, root_container, action: str = '',
-                 footer_html_class: str = 'card-footer position-absolute pb-0 mt-3',
-                 submit_style: str = 'btn btn-primary', cancel_style: str = ''):
-        self.path = path
-        self.action = action
-        self.root_container = root_container
-        self.footer_html_class = footer_html_class
-        self.submit_style = submit_style
-        self.cancel_style = cancel_style
+class FormTaskInfo:
+    def __init__(self, message: str, metadata_fields: List[str]) -> None:
+        self.message = message
+        self.metadata_fields = metadata_fields
 
     def to_dict(self):
-        container_schema = self.root_container.to_dict()
-
-        # root container style
-        container_schema['ui_schema'].append({
-            'type': 'flex',
-            'flex-flow': f'{self.root_container.layout_type()} wrap',
-            'displayFlex': True,
-        })
-
-        footer = {
-            "type": "flex",
-            "htmlClass": self.footer_html_class,
-            "items": [
-                {
-                    'type': 'flex',
-                    'flex-direction': 'row',
-                    'displayFlex': True,
-                    'htmlClass': 'd-flex justify-content-end mb-0',
-                    'items': [
-                        {"type": "cancel", "style": self.cancel_style, 'htmlClass': 'mr-2'},
-                        {"type": "submit", "style": self.submit_style, "title": self.action},
-                    ]
-                }
-            ]
-        }
-        container_schema['ui_schema'].append(footer)
-        return container_schema
+        return {'message': self.message, 'metadataFields': self.metadata_fields}
 
 
-class CRUDMeta(NamedTuple):
-    table: TableComponent = TableComponent()
-    permissions: List[str] = []
-    actions: List[Dict[str, Any]] = []
-    forms: List[Dict[str, Any]] = []
+class Form:
+    def __init__(self, path, root_container, method_type='',
+                 task_info: FormTaskInfo = FormTaskInfo("Unknown task", []),
+                 model_callback=None):
+        self.path = path
+        self.root_container: Container = root_container
+        self.method_type = method_type
+        self.task_info = task_info
+        self.model_callback = model_callback
+
+    def to_dict(self):
+        res = self.root_container.to_dict()
+        res['method_type'] = self.method_type
+        res['task_info'] = self.task_info.to_dict()
+        res['path'] = self.path
+        res['ask'] = self.path
+        return res
+
+
+class CRUDMeta(SerializableClass):
+    def __init__(self):
+        self.table = TableComponent()
+        self.permissions = []
+        self.actions = []
+        self.forms = []
+        self.columnKey = ''
+        self.detail_columns = []
 
 
 class CRUDCollectionMethod(NamedTuple):
@@ -286,23 +319,41 @@ class CRUDResourceMethod(NamedTuple):
     doc: EndpointDoc
 
 
-class CRUDEndpoint(NamedTuple):
-    router: APIRouter
-    doc: APIDoc
-    set_column: Optional[Dict[str, Dict[str, str]]] = None
-    actions: List[TableAction] = []
-    permissions: List[str] = []
-    forms: List[Form] = []
-    meta: CRUDMeta = CRUDMeta()
-    get_all: Optional[CRUDCollectionMethod] = None
-    create: Optional[CRUDCollectionMethod] = None
-
+# pylint: disable=R0902
+class CRUDEndpoint:
     # for testing purposes
     CRUDClass: Optional[RESTController] = None
     CRUDClassMetadata: Optional[RESTController] = None
-    # ---------------------
 
-    def __call__(self, cls: NamedTuple):
+    def __init__(self, router: APIRouter, doc: APIDoc,
+                 set_column: Optional[Dict[str, Dict[str, str]]] = None,
+                 actions: Optional[List[TableAction]] = None,
+                 permissions: Optional[List[str]] = None, forms: Optional[List[Form]] = None,
+                 column_key: Optional[str] = None,
+                 meta: CRUDMeta = CRUDMeta(), get_all: Optional[CRUDCollectionMethod] = None,
+                 create: Optional[CRUDCollectionMethod] = None,
+                 delete: Optional[CRUDCollectionMethod] = None,
+                 selection_type: SelectionType = SelectionType.SINGLE,
+                 extra_endpoints: Optional[List[Tuple[str, CRUDCollectionMethod]]] = None,
+                 edit: Optional[CRUDCollectionMethod] = None,
+                 detail_columns: Optional[List[str]] = None):
+        self.router = router
+        self.doc = doc
+        self.set_column = set_column
+        self.actions = actions if actions is not None else []
+        self.forms = forms if forms is not None else []
+        self.meta = meta
+        self.get_all = get_all
+        self.create = create
+        self.delete = delete
+        self.edit = edit
+        self.permissions = permissions if permissions is not None else []
+        self.column_key = column_key if column_key is not None else ''
+        self.detail_columns = detail_columns if detail_columns is not None else []
+        self.extra_endpoints = extra_endpoints if extra_endpoints is not None else []
+        self.selection_type = selection_type
+
+    def __call__(self, cls: Any):
         self.create_crud_class(cls)
 
         self.meta.table.columns.extend(TableColumn(prop=field) for field in cls._fields)
@@ -312,64 +363,123 @@ class CRUDEndpoint(NamedTuple):
     def create_crud_class(self, cls):
         outer_self: CRUDEndpoint = self
 
-        @self.router
-        @self.doc
-        class CRUDClass(RESTController):
+        funcs = {}
+        if self.get_all:
+            @self.get_all.doc
+            @wraps(self.get_all.func)
+            def _list(self, *args, **kwargs):
+                items = []
+                for item in outer_self.get_all.func(self, *args, **kwargs):  # type: ignore
+                    items.append(serialize(cls(**item)))
+                return items
+            funcs['list'] = _list
 
-            if self.get_all:
-                @self.get_all.doc
-                @wraps(self.get_all.func)
-                def list(self, *args, **kwargs):
-                    items = []
-                    for item in outer_self.get_all.func(self, *args, **kwargs):  # type: ignore
-                        items.append(serialize(cls(**item)))
-                    return items
+        if self.create:
+            @self.create.doc
+            @wraps(self.create.func)
+            def _create(self, *args, **kwargs):
+                return outer_self.create.func(self, *args, **kwargs)  # type: ignore
+            funcs['create'] = _create
 
-            if self.create:
-                @self.create.doc
-                @wraps(self.create.func)
-                def create(self, *args, **kwargs):
-                    return outer_self.create.func(self, *args, **kwargs)  # type: ignore
+        if self.delete:
+            @self.delete.doc
+            @wraps(self.delete.func)
+            def delete(self, *args, **kwargs):
+                return outer_self.delete.func(self, *args, **kwargs)  # type: ignore
+            funcs['delete'] = delete
 
-        cls.CRUDClass = CRUDClass
+        if self.edit:
+            @self.edit.doc
+            @wraps(self.edit.func)
+            def singleton_set(self, *args, **kwargs):
+                return outer_self.edit.func(self, *args, **kwargs)  # type: ignore
+            funcs['singleton_set'] = singleton_set
+
+        for extra_endpoint in self.extra_endpoints:
+            funcs[extra_endpoint[0]] = extra_endpoint[1].doc(extra_endpoint[1].func)
+
+        class_name = self.router.path.replace('/', '')
+        crud_class = type(f'{class_name}_CRUDClass',
+                          (RESTController,),
+                          {
+                              **funcs,
+                              'outer_self': self,
+                          })
+        self.router(self.doc(crud_class))
+        cls.CRUDClass = crud_class
 
     def create_meta_class(self, cls):
-        outer_self: CRUDEndpoint = self
+        def _list(self, model_key: str = ''):
+            self.update_columns()
+            self.generate_actions()
+            self.generate_forms(model_key)
+            self.set_permissions()
+            self.set_column_key()
+            self.get_detail_columns()
+            selection_type = self.__class__.outer_self.selection_type
+            self.__class__.outer_self.meta.table.set_selection_type(selection_type)
+            return serialize(self.__class__.outer_self.meta)
 
-        @UIRouter(self.router.path, self.router.security_scope)
-        class CRUDClassMetadata(RESTController):
-            def list(self):
-                self.update_columns()
-                self.generate_actions()
-                self.generate_forms()
-                self.set_permissions()
-                return serialize(outer_self.meta)
+        def get_detail_columns(self):
+            columns = self.__class__.outer_self.detail_columns
+            self.__class__.outer_self.meta.detail_columns = columns
 
-            def update_columns(self):
-                if outer_self.set_column:
-                    for i, column in enumerate(outer_self.meta.table.columns):
-                        if column.prop in dict(outer_self.set_column):
-                            new_template = outer_self.set_column[column.prop]["cellTemplate"]
-                            new_column = TableColumn(column.prop,
-                                                     new_template,
-                                                     column.isHidden,
-                                                     column.filterable)
-                            outer_self.meta.table.columns[i] = new_column
+        def update_columns(self):
+            if self.__class__.outer_self.set_column:
+                for i, column in enumerate(self.__class__.outer_self.meta.table.columns):
+                    if column.prop in dict(self.__class__.outer_self.set_column):
+                        prop = self.__class__.outer_self.set_column[column.prop]
+                        new_template = ""
+                        if "cellTemplate" in prop:
+                            new_template = prop["cellTemplate"]
+                        hidden = prop['isHidden'] if 'isHidden' in prop else False
+                        flex_grow = prop['flexGrow'] if 'flexGrow' in prop else column.flexGrow
+                        new_column = TableColumn(column.prop,
+                                                 new_template,
+                                                 hidden,
+                                                 column.filterable,
+                                                 flex_grow)
+                        self.__class__.outer_self.meta.table.columns[i] = new_column
 
-            def generate_actions(self):
-                outer_self.meta.actions.clear()
+        def generate_actions(self):
+            self.__class__.outer_self.meta.actions.clear()
 
-                for action in outer_self.actions:
-                    outer_self.meta.actions.append(action._asdict())
+            for action in self.__class__.outer_self.actions:
+                self.__class__.outer_self.meta.actions.append(action._asdict())
 
-            def generate_forms(self):
-                outer_self.meta.forms.clear()
+        def generate_forms(self, model_key):
+            self.__class__.outer_self.meta.forms.clear()
 
-                for form in outer_self.forms:
-                    outer_self.meta.forms.append(form.to_dict())
+            for form in self.__class__.outer_self.forms:
+                form_as_dict = form.to_dict()
+                model = {}
+                if form.model_callback and model_key:
+                    model = form.model_callback(model_key)
+                    form_as_dict['model'] = model
+                self.__class__.outer_self.meta.forms.append(form_as_dict)
 
-            def set_permissions(self):
-                if outer_self.permissions:
-                    outer_self.meta.permissions.extend(outer_self.permissions)
+        def set_permissions(self):
+            self.__class__.outer_self.meta.permissions.clear()
 
-        cls.CRUDClassMetadata = CRUDClassMetadata
+            if self.__class__.outer_self.permissions:
+                self.outer_self.meta.permissions.extend(self.__class__.outer_self.permissions)
+
+        def set_column_key(self):
+            if self.__class__.outer_self.column_key:
+                self.outer_self.meta.columnKey = self.__class__.outer_self.column_key
+
+        class_name = self.router.path.replace('/', '')
+        meta_class = type(f'{class_name}_CRUDClassMetadata',
+                          (RESTController,),
+                          {
+                              'list': _list,
+                              'update_columns': update_columns,
+                              'generate_actions': generate_actions,
+                              'generate_forms': generate_forms,
+                              'set_permissions': set_permissions,
+                              'set_column_key': set_column_key,
+                              'get_detail_columns': get_detail_columns,
+                              'outer_self': self,
+                          })
+        UIRouter(self.router.path, self.router.security_scope)(meta_class)
+        cls.CRUDClassMetadata = meta_class

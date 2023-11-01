@@ -51,6 +51,14 @@ struct RGWUID
     decode(s, bl);
     user_id.from_str(s);
   }
+  void dump(Formatter *f) const {
+    f->dump_string("user_id", user_id.to_str());
+  }
+  static void generate_test_instances(std::list<RGWUID*>& o) {
+    o.push_back(new RGWUID);
+    o.push_back(new RGWUID);
+    o.back()->user_id.from_str("test:tester");
+  }
 };
 WRITE_CLASS_ENCODER(RGWUID)
 
@@ -304,6 +312,10 @@ struct RGWUserAdminOpState {
     max_buckets = mb;
     max_buckets_specified = true;
   }
+
+  rgw::sal::Attrs get_attrs();
+
+  void set_attrs(rgw::sal::Attrs& attrs);
 
   void set_gen_access() {
     gen_access = true;

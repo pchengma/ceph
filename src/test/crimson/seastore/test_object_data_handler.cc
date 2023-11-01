@@ -30,13 +30,77 @@ public:
   const onode_layout_t &get_layout() const final {
     return layout;
   }
-  onode_layout_t &get_mutable_layout(Transaction &t) final {
-    dirty = true;
-    return layout;
+  template <typename Func>
+  void with_mutable_layout(Transaction &t, Func&& f) {
+    f(layout);
+  }
+  bool is_alive() const {
+    return true;
   }
   bool is_dirty() const { return dirty; }
   laddr_t get_hint() const final {return L_ADDR_MIN; }
   ~TestOnode() final = default;
+
+  void update_onode_size(Transaction &t, uint32_t size) final {
+    with_mutable_layout(t, [size](onode_layout_t &mlayout) {
+      mlayout.size = size;
+    });
+  }
+
+  void update_omap_root(Transaction &t, omap_root_t &oroot) final {
+    with_mutable_layout(t, [&oroot](onode_layout_t &mlayout) {
+      mlayout.omap_root.update(oroot);
+    });
+  }
+
+  void update_xattr_root(Transaction &t, omap_root_t &xroot) final {
+    with_mutable_layout(t, [&xroot](onode_layout_t &mlayout) {
+      mlayout.xattr_root.update(xroot);
+    });
+  }
+
+  void update_object_data(Transaction &t, object_data_t &odata) final {
+    with_mutable_layout(t, [&odata](onode_layout_t &mlayout) {
+      mlayout.object_data.update(odata);
+    });
+  }
+
+  void update_object_info(Transaction &t, ceph::bufferlist &oi_bl) final {
+    with_mutable_layout(t, [&oi_bl](onode_layout_t &mlayout) {
+      maybe_inline_memcpy(
+	&mlayout.oi[0],
+	oi_bl.c_str(),
+	oi_bl.length(),
+	onode_layout_t::MAX_OI_LENGTH);
+      mlayout.oi_size = oi_bl.length();
+    });
+  }
+
+  void clear_object_info(Transaction &t) final {
+    with_mutable_layout(t, [](onode_layout_t &mlayout) {
+      memset(&mlayout.oi[0], 0, mlayout.oi_size);
+      mlayout.oi_size = 0;
+    });
+  }
+
+  void update_snapset(Transaction &t, ceph::bufferlist &ss_bl) final {
+    with_mutable_layout(t, [&ss_bl](onode_layout_t &mlayout) {
+      maybe_inline_memcpy(
+	&mlayout.ss[0],
+	ss_bl.c_str(),
+	ss_bl.length(),
+	onode_layout_t::MAX_OI_LENGTH);
+      mlayout.ss_size = ss_bl.length();
+    });
+  }
+
+  void clear_snapset(Transaction &t) final {
+    with_mutable_layout(t, [](onode_layout_t &mlayout) {
+      memset(&mlayout.ss[0], 0, mlayout.ss_size);
+      mlayout.ss_size = 0;
+    });
+  }
+
 };
 
 struct object_data_handler_test_t:
@@ -135,7 +199,7 @@ struct object_data_handler_test_t:
       }
     }
   }
-  std::list<LBAPinRef> get_mappings(objaddr_t offset, extent_len_t length) {
+  std::list<LBAMappingRef> get_mappings(objaddr_t offset, extent_len_t length) {
     auto t = create_mutate_transaction();
     auto ret = with_trans_intr(*t, [&](auto &t) {
       return tm->get_pins(t, offset, length);
@@ -160,7 +224,7 @@ struct object_data_handler_test_t:
   }
 };
 
-TEST_F(object_data_handler_test_t, single_write)
+TEST_P(object_data_handler_test_t, single_write)
 {
   run_async([this] {
     write(1<<20, 8<<10, 'c');
@@ -170,7 +234,7 @@ TEST_F(object_data_handler_test_t, single_write)
   });
 }
 
-TEST_F(object_data_handler_test_t, multi_write)
+TEST_P(object_data_handler_test_t, multi_write)
 {
   run_async([this] {
     write((1<<20) - (4<<10), 4<<10, 'a');
@@ -185,7 +249,7 @@ TEST_F(object_data_handler_test_t, multi_write)
   });
 }
 
-TEST_F(object_data_handler_test_t, write_hole)
+TEST_P(object_data_handler_test_t, write_hole)
 {
   run_async([this] {
     write((1<<20) - (4<<10), 4<<10, 'a');
@@ -200,7 +264,7 @@ TEST_F(object_data_handler_test_t, write_hole)
   });
 }
 
-TEST_F(object_data_handler_test_t, overwrite_single)
+TEST_P(object_data_handler_test_t, overwrite_single)
 {
   run_async([this] {
     write((1<<20), 4<<10, 'a');
@@ -211,7 +275,7 @@ TEST_F(object_data_handler_test_t, overwrite_single)
   });
 }
 
-TEST_F(object_data_handler_test_t, overwrite_double)
+TEST_P(object_data_handler_test_t, overwrite_double)
 {
   run_async([this] {
     write((1<<20), 4<<10, 'a');
@@ -229,7 +293,7 @@ TEST_F(object_data_handler_test_t, overwrite_double)
   });
 }
 
-TEST_F(object_data_handler_test_t, overwrite_partial)
+TEST_P(object_data_handler_test_t, overwrite_partial)
 {
   run_async([this] {
     write((1<<20), 12<<10, 'a');
@@ -254,7 +318,7 @@ TEST_F(object_data_handler_test_t, overwrite_partial)
   });
 }
 
-TEST_F(object_data_handler_test_t, unaligned_write)
+TEST_P(object_data_handler_test_t, unaligned_write)
 {
   run_async([this] {
     objaddr_t base = 1<<20;
@@ -271,7 +335,7 @@ TEST_F(object_data_handler_test_t, unaligned_write)
   });
 }
 
-TEST_F(object_data_handler_test_t, unaligned_overwrite)
+TEST_P(object_data_handler_test_t, unaligned_overwrite)
 {
   run_async([this] {
     objaddr_t base = 1<<20;
@@ -292,7 +356,7 @@ TEST_F(object_data_handler_test_t, unaligned_overwrite)
   });
 }
 
-TEST_F(object_data_handler_test_t, truncate)
+TEST_P(object_data_handler_test_t, truncate)
 {
   run_async([this] {
     objaddr_t base = 1<<20;
@@ -314,7 +378,7 @@ TEST_F(object_data_handler_test_t, truncate)
   });
 }
 
-TEST_F(object_data_handler_test_t, no_split) {
+TEST_P(object_data_handler_test_t, no_split) {
   run_async([this] {
     write(0, 8<<10, 'x');
     write(0, 8<<10, 'a');
@@ -326,7 +390,7 @@ TEST_F(object_data_handler_test_t, no_split) {
   });
 }
 
-TEST_F(object_data_handler_test_t, split_left) {
+TEST_P(object_data_handler_test_t, split_left) {
   run_async([this] {
     write(0, 128<<10, 'x');
 
@@ -346,7 +410,7 @@ TEST_F(object_data_handler_test_t, split_left) {
   });
 }
 
-TEST_F(object_data_handler_test_t, split_right) {
+TEST_P(object_data_handler_test_t, split_right) {
   run_async([this] {
     write(0, 128<<10, 'x');
     write(4<<10, 60<<10, 'a');
@@ -364,7 +428,7 @@ TEST_F(object_data_handler_test_t, split_right) {
     read(0, 128<<10);
   });
 }
-TEST_F(object_data_handler_test_t, split_left_right) {
+TEST_P(object_data_handler_test_t, split_left_right) {
   run_async([this] {
     write(0, 128<<10, 'x');
     write(48<<10, 32<<10, 'a');
@@ -381,7 +445,7 @@ TEST_F(object_data_handler_test_t, split_left_right) {
     }
   });
 }
-TEST_F(object_data_handler_test_t, multiple_split) {
+TEST_P(object_data_handler_test_t, multiple_split) {
   run_async([this] {
     write(0, 128<<10, 'x');
 
@@ -415,3 +479,14 @@ TEST_F(object_data_handler_test_t, multiple_split) {
     read(0, 128<<10);
   });
 }
+
+INSTANTIATE_TEST_SUITE_P(
+  object_data_handler_test,
+  object_data_handler_test_t,
+  ::testing::Values (
+    "segmented",
+    "circularbounded"
+  )
+);
+
+

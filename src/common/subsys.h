@@ -74,7 +74,6 @@ SUBSYS(bluefs, 1, 5)
 SUBSYS(bdev, 1, 3)
 SUBSYS(kstore, 1, 5)
 SUBSYS(rocksdb, 4, 5)
-SUBSYS(leveldb, 4, 5)
 SUBSYS(fuse, 1, 5)
 SUBSYS(mgr, 2, 5)
 SUBSYS(mgrc, 1, 5)
@@ -103,6 +102,7 @@ SUBSYS(mclock, 1, 5)
 SUBSYS(cyanstore, 0, 5)
 SUBSYS(ceph_exporter, 1, 5)
 SUBSYS(memstore, 1, 5)
+SUBSYS(trace, 1, 5)
 // *********************************************************************
 // Developers should update /doc/rados/troubleshooting/log-and-debug.rst
 // when adding or removing a subsystem accordingly.

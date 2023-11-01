@@ -45,16 +45,19 @@ PGBackend::create(pg_t pgid,
 		  const pg_pool_t& pool,
 		  crimson::os::CollectionRef coll,
 		  crimson::osd::ShardServices& shard_services,
-		  const ec_profile_t& ec_profile)
+		  const ec_profile_t& ec_profile,
+		  DoutPrefixProvider &dpp)
 {
   switch (pool.type) {
   case pg_pool_t::TYPE_REPLICATED:
     return std::make_unique<ReplicatedBackend>(pgid, pg_shard,
-					       coll, shard_services);
+					       coll, shard_services,
+					       dpp);
   case pg_pool_t::TYPE_ERASURE:
     return std::make_unique<ECBackend>(pg_shard.shard, coll, shard_services,
                                        std::move(ec_profile),
-                                       pool.stripe_width);
+                                       pool.stripe_width,
+				       dpp);
   default:
     throw runtime_error(seastar::format("unsupported pool type '{}'",
                                         pool.type));
@@ -63,10 +66,12 @@ PGBackend::create(pg_t pgid,
 
 PGBackend::PGBackend(shard_id_t shard,
                      CollectionRef coll,
-                     crimson::osd::ShardServices &shard_services)
+                     crimson::osd::ShardServices &shard_services,
+		     DoutPrefixProvider &dpp)
   : shard{shard},
     coll{coll},
     shard_services{shard_services},
+    dpp{dpp},
     store{&shard_services.get_store()}
 {}
 
@@ -74,10 +79,6 @@ PGBackend::load_metadata_iertr::future
   <PGBackend::loaded_object_md_t::ref>
 PGBackend::load_metadata(const hobject_t& oid)
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   return interruptor::make_interruptible(store->get_attrs(
     coll,
     ghobject_t{oid, ghobject_t::NO_GEN, shard})).safe_then_interruptible(
@@ -783,27 +784,43 @@ PGBackend::rollback_iertr::future<> PGBackend::rollback(
                   __func__, os.oi.soid ,snapid);
   hobject_t target_coid = os.oi.soid;
   target_coid.snap = snapid;
-  return obc_loader.with_clone_obc_only<RWState::RWREAD>(
+  return obc_loader.with_clone_obc_only<RWState::RWWRITE>(
     head, target_coid,
     [this, &os, &txn, &delta_stats, &osd_op_params]
-    (auto clone_obc) {
+    (auto resolved_obc) {
+    if (resolved_obc->obs.oi.soid.is_head()) {
+      // no-op: The resolved oid returned the head object
+      logger().debug("PGBackend::rollback: loaded head_obc: {}"
+                     " do nothing",
+                     resolved_obc->obs.oi.soid);
+      return rollback_iertr::now();
+    }
+    /* TODO: https://tracker.ceph.com/issues/59114 This implementation will not
+     * behave correctly for a rados operation consisting of a mutation followed
+     * by a rollback to a snapshot since the last mutation of the object.
+     * The correct behavior would be for the rollback to undo the mutation
+     * earlier in the operation by resolving to the clone created at the start
+     * of the operation (see resolve_oid).
+     * Instead, it will select HEAD leaving that mutation intact since the SnapSet won't
+     * yet contain that clone. This behavior exists in classic as well.
+     */
     logger().debug("PGBackend::rollback: loaded clone_obc: {}",
-                   clone_obc->obs.oi.soid);
+                   resolved_obc->obs.oi.soid);
     // 1) Delete current head
     if (os.exists) {
       txn.remove(coll->get_cid(), ghobject_t{os.oi.soid,
                                   ghobject_t::NO_GEN, shard});
     }
     // 2) Clone correct snapshot into head
-    txn.clone(coll->get_cid(), ghobject_t{clone_obc->obs.oi.soid},
+    txn.clone(coll->get_cid(), ghobject_t{resolved_obc->obs.oi.soid},
                                ghobject_t{os.oi.soid});
     //    Copy clone obc.os.oi to os.oi
     os.oi.clear_flag(object_info_t::FLAG_WHITEOUT);
-    os.oi.copy_user_bits(clone_obc->obs.oi);
+    os.oi.copy_user_bits(resolved_obc->obs.oi);
     delta_stats.num_bytes -= os.oi.size;
-    delta_stats.num_bytes += clone_obc->obs.oi.size;
+    delta_stats.num_bytes += resolved_obc->obs.oi.size;
     osd_op_params.clean_regions.mark_data_region_dirty(0,
-      std::max(os.oi.size, clone_obc->obs.oi.size));
+      std::max(os.oi.size, resolved_obc->obs.oi.size));
     osd_op_params.clean_regions.mark_omap_dirty();
     // TODO: 3) Calculate clone_overlaps by following overlaps
     //          forward from rollback snapshot
@@ -998,10 +1015,6 @@ PGBackend::remove(ObjectState& os, ceph::os::Transaction& txn,
 PGBackend::interruptible_future<std::tuple<std::vector<hobject_t>, hobject_t>>
 PGBackend::list_objects(const hobject_t& start, uint64_t limit) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   auto gstart = start.is_min() ? ghobject_t{} : ghobject_t{start, 0, shard};
   return interruptor::make_interruptible(store->list_objects(coll,
 					 gstart,
@@ -1090,10 +1103,6 @@ PGBackend::getxattr(
   const hobject_t& soid,
   std::string_view key) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   return store->get_attr(coll, ghobject_t{soid}, key);
 }
 
@@ -1102,9 +1111,6 @@ PGBackend::getxattr(
   const hobject_t& soid,
   std::string&& key) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   return seastar::do_with(key, [this, &soid](auto &key) {
     return store->get_attr(coll, ghobject_t{soid}, key);
   });
@@ -1115,9 +1121,6 @@ PGBackend::get_attr_ierrorator::future<> PGBackend::get_xattrs(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   return store->get_attrs(coll, ghobject_t{os.oi.soid}).safe_then(
     [&delta_stats, &osd_op](auto&& attrs) {
     std::vector<std::pair<std::string, bufferlist>> user_xattrs;
@@ -1249,9 +1252,6 @@ PGBackend::rm_xattr(
   const OSDOp& osd_op,
   ceph::os::Transaction& txn)
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: {} DNE", __func__, os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1280,7 +1280,7 @@ void PGBackend::clone(
 }
 
 using get_omap_ertr =
-  crimson::os::FuturizedStore::read_errorator::extend<
+  crimson::os::FuturizedStore::Shard::read_errorator::extend<
     crimson::ct_error::enodata>;
 using get_omap_iertr =
   ::crimson::interruptible::interruptible_errorator<
@@ -1288,9 +1288,9 @@ using get_omap_iertr =
     get_omap_ertr>;
 static
 get_omap_iertr::future<
-  crimson::os::FuturizedStore::omap_values_t>
+  crimson::os::FuturizedStore::Shard::omap_values_t>
 maybe_get_omap_vals_by_keys(
-  crimson::os::FuturizedStore* store,
+  crimson::os::FuturizedStore::Shard* store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
   const std::set<std::string>& keys_to_get)
@@ -1304,9 +1304,9 @@ maybe_get_omap_vals_by_keys(
 
 static
 get_omap_iertr::future<
-  std::tuple<bool, crimson::os::FuturizedStore::omap_values_t>>
+  std::tuple<bool, crimson::os::FuturizedStore::Shard::omap_values_t>>
 maybe_get_omap_vals(
-  crimson::os::FuturizedStore* store,
+  crimson::os::FuturizedStore::Shard* store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
   const std::string& start_after)
@@ -1338,13 +1338,19 @@ PGBackend::omap_get_header(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  return omap_get_header(coll, ghobject_t{os.oi.soid}).safe_then_interruptible(
-    [&delta_stats, &osd_op] (ceph::bufferlist&& header) {
-      osd_op.outdata = std::move(header);
-      delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
-      delta_stats.num_rd++;
-      return seastar::now();
-    });
+  if (os.oi.is_omap()) {
+    return omap_get_header(coll, ghobject_t{os.oi.soid}).safe_then_interruptible(
+      [&delta_stats, &osd_op] (ceph::bufferlist&& header) {
+        osd_op.outdata = std::move(header);
+        delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+        delta_stats.num_rd++;
+        return seastar::now();
+      });
+  } else {
+    // no omap? return empty data but not ENOENT. This is imporant for
+    // the case when the object is being creating due to to may_write().
+    return seastar::now();
+  }
 }
 
 PGBackend::ll_read_ierrorator::future<>
@@ -1353,9 +1359,6 @@ PGBackend::omap_get_keys(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1478,10 +1481,6 @@ PGBackend::omap_get_vals(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1548,9 +1547,6 @@ PGBackend::omap_get_vals_by_keys(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", __func__, os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1567,7 +1563,7 @@ PGBackend::omap_get_vals_by_keys(
   delta_stats.num_rd++;
   return maybe_get_omap_vals_by_keys(store, coll, os.oi, keys_to_get)
   .safe_then_interruptible(
-    [&osd_op] (crimson::os::FuturizedStore::omap_values_t&& vals) {
+    [&osd_op] (crimson::os::FuturizedStore::Shard::omap_values_t&& vals) {
       encode(vals, osd_op.outdata);
       return ll_read_errorator::now();
     }).handle_error_interruptible(
@@ -1673,9 +1669,6 @@ PGBackend::omap_clear(
   osd_op_params_t& osd_op_params,
   object_stat_sum_t& delta_stats)
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1814,9 +1807,5 @@ PGBackend::read_ierrorator::future<> PGBackend::tmapget(
       return read_errorator::future<>{crimson::ct_error::object_corrupted::make()};
     }),
     read_errorator::pass_further{});
-}
-
-void PGBackend::on_activate_complete() {
-  peering.reset();
 }
 

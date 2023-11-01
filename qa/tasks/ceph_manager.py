@@ -234,6 +234,7 @@ class OSDThrasher(Thrasher):
         self.chance_thrash_pg_upmap_items = self.config.get('chance_thrash_pg_upmap', 1.0)
         self.random_eio = self.config.get('random_eio')
         self.chance_force_recovery = self.config.get('chance_force_recovery', 0.3)
+        self.chance_reset_purged_snaps_last = self.config.get('chance_reset_purged_snaps_last', 0.3)
 
         num_osds = self.in_osds + self.out_osds
         self.max_pgs = self.config.get("max_pgs_per_pool_osd", 1200) * len(num_osds)
@@ -534,27 +535,6 @@ class OSDThrasher(Thrasher):
             if imp_remote != exp_remote:
                 imp_remote.run(args=cmd)
 
-            # apply low split settings to each pool
-            if not self.ceph_manager.cephadm:
-                for pool in self.ceph_manager.list_pools():
-                    cmd = ("CEPH_ARGS='--filestore-merge-threshold 1 "
-                           "--filestore-split-multiple 1' sudo -E "
-                           + 'ceph-objectstore-tool '
-                           + ' '.join(prefix + [
-                               '--data-path', FSPATH.format(id=imp_osd),
-                               '--journal-path', JPATH.format(id=imp_osd),
-                           ])
-                           + " --op apply-layout-settings --pool " + pool).format(id=osd)
-                    proc = imp_remote.run(args=cmd,
-                                          wait=True, check_status=False,
-                                          stderr=StringIO())
-                    if 'Couldn\'t find pool' in proc.stderr.getvalue():
-                        continue
-                    if proc.exitstatus:
-                        raise Exception("ceph-objectstore-tool apply-layout-settings"
-                                        " failed with {status}".format(status=proc.exitstatus))
-
-
     def blackhole_kill_osd(self, osd=None):
         """
         If all else fails, kill the osd.
@@ -799,6 +779,19 @@ class OSDThrasher(Thrasher):
            self.force_recovery()
         else:
            self.cancel_force_recovery()
+
+    def reset_purged_snaps_last(self):
+        """
+        Run reset_purged_snaps_last
+        """
+        self.log('reset_purged_snaps_last')
+        for osd in self.in_osds:
+            try:
+               self.ceph_manager.raw_cluster_cmd(
+               'tell', "osd.%s" % (str(osd)),
+               'reset_purged_snaps_last')
+            except CommandFailedError:
+                self.log('Failed to reset_purged_snaps_last, ignoring')
 
     def all_up(self):
         """
@@ -1250,6 +1243,8 @@ class OSDThrasher(Thrasher):
             actions.append((self.thrash_pg_upmap_items, self.chance_thrash_pg_upmap_items,))
         if self.chance_force_recovery > 0:
             actions.append((self.force_cancel_recovery, self.chance_force_recovery))
+        if self.chance_reset_purged_snaps_last > 0:
+            actions.append((self.reset_purged_snaps_last, self.chance_reset_purged_snaps_last))
 
         for key in ['heartbeat_inject_failure', 'filestore_inject_stall']:
             for scenario in [
@@ -1550,8 +1545,6 @@ class CephManager:
         self.CEPH_CMD = ['sudo'] + pre + ['timeout', '120', 'ceph',
                                           '--cluster', self.cluster]
         self.RADOS_CMD = pre + ['rados', '--cluster', self.cluster]
-        self.run_ceph_w_prefix = ['sudo', 'daemon-helper', 'kill', 'ceph',
-                                  '--cluster', self.cluster]
 
         pools = self.list_pools()
         self.pools = {}
@@ -1585,19 +1578,28 @@ class CephManager:
         elif isinstance(kwargs['args'], tuple):
             kwargs['args'] = list(kwargs['args'])
 
+        prefixcmd = []
+        timeoutcmd = kwargs.pop('timeoutcmd', None)
+        if timeoutcmd is not None:
+            prefixcmd += ['timeout', str(timeoutcmd)]
+
         if self.cephadm:
+            prefixcmd += ['ceph']
+            cmd = prefixcmd + list(kwargs['args'])
             return shell(self.ctx, self.cluster, self.controller,
-                         args=['ceph'] + list(kwargs['args']),
+                         args=cmd,
                          stdout=StringIO(),
                          check_status=kwargs.get('check_status', True))
-        if self.rook:
+        elif self.rook:
+            prefixcmd += ['ceph']
+            cmd = prefixcmd + list(kwargs['args'])
             return toolbox(self.ctx, self.cluster,
-                           args=['ceph'] + list(kwargs['args']),
+                           args=cmd,
                            stdout=StringIO(),
                            check_status=kwargs.get('check_status', True))
-
-        kwargs['args'] = self.CEPH_CMD + kwargs['args']
-        return self.controller.run(**kwargs)
+        else:
+            kwargs['args'] = prefixcmd + self.CEPH_CMD + kwargs['args']
+            return self.controller.run(**kwargs)
 
     def raw_cluster_cmd(self, *args, **kwargs) -> str:
         """
@@ -1628,8 +1630,7 @@ class CephManager:
             client_id = client_id.replace('client.', '')
 
         keyring = self.run_cluster_cmd(args=f'auth get client.{client_id}',
-                                       stdout=StringIO()).\
-            stdout.getvalue().strip()
+                                       stdout=StringIO()).stdout.getvalue()
 
         assert isinstance(keyring, str) and keyring != ''
         return keyring
@@ -1643,7 +1644,7 @@ class CephManager:
                               'cluster', 'audit', ...
         :type watch_channel: str
         """
-        args = self.run_ceph_w_prefix + ['-w']
+        args = ['sudo', 'daemon-helper', 'kill', 'ceph', '--cluster', self.cluster, '-w']
         if watch_channel is not None:
             args.append("--watch-channel")
             args.append(watch_channel)
@@ -3164,11 +3165,14 @@ class CephManager:
                         raise
         self.log("quorum is size %d" % size)
 
-    def get_mon_health(self, debug=False):
+    def get_mon_health(self, debug=False, detail=False):
         """
         Extract all the monitor health information.
         """
-        out = self.raw_cluster_cmd('health', '--format=json')
+        if detail:
+            out = self.raw_cluster_cmd('health', 'detail', '--format=json')
+        else:
+            out = self.raw_cluster_cmd('health', '--format=json')
         if debug:
             self.log('health:\n{h}'.format(h=out))
         return json.loads(out)

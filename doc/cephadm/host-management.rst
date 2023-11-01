@@ -101,8 +101,19 @@ To drain all daemons from a host, run a command of the following form:
 
    ceph orch host drain *<host>*
 
-The ``_no_schedule`` label will be applied to the host. See
-:ref:`cephadm-special-host-labels`.
+The ``_no_schedule`` and ``_no_conf_keyring`` labels will be applied to the
+host. See :ref:`cephadm-special-host-labels`.
+
+If you only want to drain daemons but leave managed ceph conf and keyring
+files on the host, you may pass the ``--keep-conf-keyring`` flag to the
+drain command.
+
+.. prompt:: bash #
+
+   ceph orch host drain *<host>* --keep-conf-keyring
+
+This will apply the ``_no_schedule`` label to the host but not the
+``_no_conf_keyring`` label.
 
 All OSDs on the host will be scheduled to be removed. You can check the progress of the OSD removal operation with the following command:
 
@@ -111,6 +122,14 @@ All OSDs on the host will be scheduled to be removed. You can check the progress
    ceph orch osd rm status
 
 See :ref:`cephadm-osd-removal` for more details about OSD removal.
+
+The ``orch host drain`` command also supports a ``--zap-osd-devices``
+flag. Setting this flag while draining a host will cause cephadm to zap
+the devices of the OSDs it is removing as part of the drain process
+
+.. prompt:: bash #
+
+   ceph orch host drain *<host>* --zap-osd-devices
 
 Use the following command to determine whether any daemons are still on the
 host:
@@ -183,6 +202,12 @@ The following host labels have a special meaning to cephadm.  All start with ``_
   an existing host that already contains Ceph daemons, it will cause cephadm to move
   those daemons elsewhere (except OSDs, which are not removed automatically).
 
+* ``_no_conf_keyring``: *Do not deploy config files or keyrings on this host*.
+
+  This label is effectively the same as ``_no_schedule`` but instead of working for
+  daemons it works for client keyrings and ceph conf files that are being managed
+  by cephadm
+
 * ``_no_autotune_memory``: *Do not autotune memory on this host*.
 
   This label will prevent daemon memory from being tuned even when the
@@ -206,10 +231,18 @@ Place a host in and out of maintenance mode (stops all Ceph daemons on host):
 
 .. prompt:: bash #
 
-   ceph orch host maintenance enter <hostname> [--force]
+   ceph orch host maintenance enter <hostname> [--force] [--yes-i-really-mean-it]
    ceph orch host maintenance exit <hostname>
 
-Where the force flag when entering maintenance allows the user to bypass warnings (but not alerts)
+The ``--force`` flag allows the user to bypass warnings (but not alerts). The ``--yes-i-really-mean-it``
+flag bypasses all safety checks and will attempt to force the host into maintenance mode no
+matter what.
+
+.. warning:: Using the --yes-i-really-mean-it flag to force the host to enter maintenance
+   mode can potentially cause loss of data availability, the mon quorum to break down due
+   to too few running monitors, mgr module commands (such as ``ceph orch . . .`` commands)
+   to be become unresponsive, and a number of other possible issues. Please only use this
+   flag if you're absolutely certain you know what you're doing.
 
 See also :ref:`cephadm-fqdn`
 
@@ -260,9 +293,10 @@ Many hosts can be added at once using
     hostname: node-02
     addr: 192.168.0.12
 
-This can be combined with service specifications (below) to create a cluster spec
-file to deploy a whole cluster in one command.  see ``cephadm bootstrap --apply-spec``
-also to do this during bootstrap. Cluster SSH Keys must be copied to hosts prior to adding them.
+This can be combined with :ref:`service specifications<orchestrator-cli-service-spec>`
+to create a cluster spec file to deploy a whole cluster in one command.  see
+``cephadm bootstrap --apply-spec`` also to do this during bootstrap. Cluster
+SSH Keys must be copied to hosts prior to adding them.
 
 Setting the initial CRUSH location of host
 ==========================================
@@ -281,7 +315,7 @@ create a new CRUSH host located in the specified hierarchy.
 .. note:: 
 
   The ``location`` attribute will be only affect the initial CRUSH location. Subsequent
-  changes of the ``location`` property will be ignored. Also, removing a host will no remove
+  changes of the ``location`` property will be ignored. Also, removing a host will not remove
   any CRUSH buckets.
 
 See also :ref:`crush_map_default_types`.
@@ -496,7 +530,23 @@ There are two ways to customize this configuration for your environment:
    manually distributed to the mgr data directory
    (``/var/lib/ceph/<cluster-fsid>/mgr.<id>`` on the host, visible at
    ``/var/lib/ceph/mgr/ceph-<id>`` from inside the container).
-   
+
+Setting up CA signed keys for the cluster
+-----------------------------------------
+
+Cephadm also supports using CA signed keys for SSH authentication
+across cluster nodes. In this setup, instead of needing a private
+key and public key, we instead need a private key and certificate
+created by signing that private key with a CA key. For more info
+on setting up nodes for authentication using a CA signed key, see
+:ref:`cephadm-bootstrap-ca-signed-keys`. Once you have your private
+key and signed cert, they can be set up for cephadm to use by running:
+
+.. prompt:: bash #
+
+   ceph config-key set mgr/cephadm/ssh_identity_key -i <private-key-file>
+   ceph config-key set mgr/cephadm/ssh_identity_cert -i <signed-cert-file>
+
 .. _cephadm-fqdn:
 
 Fully qualified domain names vs bare host names

@@ -25,6 +25,7 @@
 
 #include "common/ceph_crypto.h"
 #include "common/random_string.h"
+#include "common/tracer.h"
 #include "rgw_acl.h"
 #include "rgw_bucket_layout.h"
 #include "rgw_cors.h"
@@ -43,7 +44,6 @@
 #include "cls/rgw/cls_rgw_types.h"
 #include "include/rados/librados.hpp"
 #include "rgw_public_access.h"
-#include "common/tracer.h"
 #include "rgw_sal_fwd.h"
 
 namespace ceph {
@@ -75,8 +75,8 @@ using ceph::crypto::MD5;
 #define RGW_SYS_PARAM_PREFIX "rgwx-"
 
 #define RGW_ATTR_ACL		RGW_ATTR_PREFIX "acl"
-#define RGW_ATTR_RATELIMIT		RGW_ATTR_PREFIX "ratelimit"
-#define RGW_ATTR_LC            RGW_ATTR_PREFIX "lc"
+#define RGW_ATTR_RATELIMIT	RGW_ATTR_PREFIX "ratelimit"
+#define RGW_ATTR_LC		RGW_ATTR_PREFIX "lc"
 #define RGW_ATTR_CORS		RGW_ATTR_PREFIX "cors"
 #define RGW_ATTR_ETAG    	RGW_ATTR_PREFIX "etag"
 #define RGW_ATTR_BUCKETS	RGW_ATTR_PREFIX "buckets"
@@ -133,10 +133,18 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_OLH_PENDING_PREFIX RGW_ATTR_OLH_PREFIX "pending."
 
 #define RGW_ATTR_COMPRESSION    RGW_ATTR_PREFIX "compression"
+#define RGW_ATTR_TORRENT        RGW_ATTR_PREFIX "torrent"
 
 #define RGW_ATTR_APPEND_PART_NUM    RGW_ATTR_PREFIX "append_part_num"
 
+/* Attrs to store cloudtier config information. These are used internally
+ * for the replication of cloudtiered objects but not stored as xattrs in
+ * the head object. */
+#define RGW_ATTR_CLOUD_TIER_TYPE    RGW_ATTR_PREFIX "cloud_tier_type"
+#define RGW_ATTR_CLOUD_TIER_CONFIG    RGW_ATTR_PREFIX "cloud_tier_config"
+
 #define RGW_ATTR_OBJ_REPLICATION_STATUS RGW_ATTR_PREFIX "amz-replication-status"
+#define RGW_ATTR_OBJ_REPLICATION_TRACE RGW_ATTR_PREFIX "replication-trace"
 
 /* IAM Policy */
 #define RGW_ATTR_IAM_POLICY	RGW_ATTR_PREFIX "iam-policy"
@@ -154,6 +162,7 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_CRYPT_KEYSEL   RGW_ATTR_CRYPT_PREFIX "keysel"
 #define RGW_ATTR_CRYPT_CONTEXT  RGW_ATTR_CRYPT_PREFIX "context"
 #define RGW_ATTR_CRYPT_DATAKEY  RGW_ATTR_CRYPT_PREFIX "datakey"
+#define RGW_ATTR_CRYPT_PARTS    RGW_ATTR_CRYPT_PREFIX "part-lengths"
 
 /* SSE-S3 Encryption Attributes */
 #define RGW_ATTR_BUCKET_ENCRYPTION_PREFIX RGW_ATTR_PREFIX "sse-s3."
@@ -200,6 +209,7 @@ static inline const char* to_mime_type(const RGWFormat f)
 #define RGW_REST_WEBSITE     0x8
 #define RGW_REST_STS            0x10
 #define RGW_REST_IAM            0x20
+#define RGW_REST_SNS            0x30
 
 #define RGW_SUSPENDED_USER_AUID (uint64_t)-2
 
@@ -415,6 +425,7 @@ class RGWHTTPArgs {
 }; // RGWHTTPArgs
 
 const char *rgw_conf_get(const std::map<std::string, std::string, ltstr_nocase>& conf_map, const char *name, const char *def_val);
+boost::optional<const std::string&> rgw_conf_get_optional(const std::map<std::string, std::string, ltstr_nocase>& conf_map, const std::string& name);
 int rgw_conf_get_int(const std::map<std::string, std::string, ltstr_nocase>& conf_map, const char *name, int def_val);
 bool rgw_conf_get_bool(const std::map<std::string, std::string, ltstr_nocase>& conf_map, const char *name, bool def_val);
 
@@ -442,6 +453,8 @@ public:
   void init(CephContext *cct, char **envp);
   void set(std::string name, std::string val);
   const char *get(const char *name, const char *def_val = nullptr) const;
+  boost::optional<const std::string&>
+  get_optional(const std::string& name) const;
   int get_int(const char *name, int def_val = 0) const;
   bool get_bool(const char *name, bool def_val = 0);
   size_t get_size(const char *name, size_t def_val = 0) const;
@@ -558,7 +571,6 @@ struct RGWUserInfo
   RGWQuota quota;
   uint32_t type;
   std::set<std::string> mfa_ids;
-  std::string assumed_role_arn;
 
   RGWUserInfo()
     : suspended(0),
@@ -623,7 +635,10 @@ struct RGWUserInfo
      encode(admin, bl);
      encode(type, bl);
      encode(mfa_ids, bl);
-     encode(assumed_role_arn, bl);
+     {
+       std::string assumed_role_arn; // removed
+       encode(assumed_role_arn, bl);
+     }
      encode(user_id.ns, bl);
      ENCODE_FINISH(bl);
   }
@@ -707,6 +722,7 @@ struct RGWUserInfo
       decode(mfa_ids, bl);
     }
     if (struct_v >= 21) {
+      std::string assumed_role_arn; // removed
       decode(assumed_role_arn, bl);
     }
     if (struct_v >= 22) {
@@ -1216,7 +1232,7 @@ struct req_state : DoutPrefixProvider {
 
   std::vector<rgw::IAM::Policy> session_policies;
 
-  jspan trace;
+  jspan_ptr trace;
   bool trace_enabled = false;
 
   //Principal tags that come in as part of AssumeRoleWithWebIdentity
@@ -1281,6 +1297,8 @@ struct RGWBucketEnt {
   void encode(bufferlist& bl) const {
     ENCODE_START(7, 5, bl);
     uint64_t s = size;
+    // issue tracked here: https://tracker.ceph.com/issues/61160
+    // coverity[store_truncates_time_t:SUPPRESS]
     __u32 mt = ceph::real_clock::to_time_t(creation_time);
     std::string empty_str;  // originally had the bucket name here, but we encode bucket later
     encode(empty_str, bl);
@@ -1349,6 +1367,17 @@ struct multipart_upload_info
     DECODE_START(1, bl);
     decode(dest_placement, bl);
     DECODE_FINISH(bl);
+  }
+
+  void dump(Formatter *f) const {
+    dest_placement.dump(f);
+  }
+
+  static void generate_test_instances(std::list<multipart_upload_info*>& o) {
+    o.push_back(new multipart_upload_info);
+    o.push_back(new multipart_upload_info);
+    o.back()->dest_placement.name = "dest_placement";
+    o.back()->dest_placement.storage_class = "dest_storage_class";
   }
 };
 WRITE_CLASS_ENCODER(multipart_upload_info)
@@ -1584,7 +1613,8 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
                             const std::vector<rgw::IAM::Policy>& user_policies,
                             const std::vector<rgw::IAM::Policy>& session_policies,
                             const rgw::ARN& res,
-                            const uint64_t op);
+                            const uint64_t op,
+                            bool mandatory_policy=true);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       req_state * const s,
                                       RGWAccessControlPolicy * const user_acl,
@@ -1592,7 +1622,8 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             req_state * const s,
                             const rgw::ARN& res,
-                            const uint64_t op);
+                            const uint64_t op,
+                            bool mandatory_policy=true);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       req_state * const s,
                                       int perm);

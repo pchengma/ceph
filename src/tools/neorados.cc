@@ -23,7 +23,6 @@
 #include <tuple>
 #include <vector>
 
-#include <boost/asio.hpp>
 #include <boost/io/ios_state.hpp>
 #include <boost/program_options.hpp>
 #include <boost/system/system_error.hpp>
@@ -294,7 +293,7 @@ const std::array commands = {
 };
 
 #if FMT_VERSION >= 90000
-template <> struct fmt::formatter<boost::program_options::options_description> : ostream_formatter {};
+template <> struct fmt::formatter<boost::program_options::options_description> : fmt::ostream_formatter {};
 #endif // FMT_VERSION
 
 int main(int argc, char* argv[])

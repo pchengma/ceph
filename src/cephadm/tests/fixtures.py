@@ -1,4 +1,3 @@
-from importlib.resources import contents
 import mock
 import os
 import pytest
@@ -68,11 +67,22 @@ def cephadm_fs(
     """
     use pyfakefs to stub filesystem calls
     """
+    from cephadmlib import constants
+
     uid = os.getuid()
     gid = os.getgid()
 
+    def fchown(fd, _uid, _gid):
+        """pyfakefs doesn't provide a working fchown or fchmod.
+        In order to get permissions working generally across renames
+        we need to provide our own implemenation.
+        """
+        file_obj = fs.get_open_file(fd).get_object()
+        file_obj.st_uid = _uid
+        file_obj.st_gid = _gid
+
     _cephadm = import_cephadm()
-    with mock.patch('os.fchown'), \
+    with mock.patch('os.fchown', side_effect=fchown), \
          mock.patch('os.fchmod'), \
          mock.patch('platform.processor', return_value='x86_64'), \
          mock.patch('cephadm.extract_uid_gid', return_value=(uid, gid)):
@@ -83,11 +93,11 @@ def cephadm_fs(
         except AttributeError:
             pass
 
-        fs.create_dir(_cephadm.DATA_DIR)
-        fs.create_dir(_cephadm.LOG_DIR)
-        fs.create_dir(_cephadm.LOCK_DIR)
-        fs.create_dir(_cephadm.LOGROTATE_DIR)
-        fs.create_dir(_cephadm.UNIT_DIR)
+        fs.create_dir(constants.DATA_DIR)
+        fs.create_dir(constants.LOG_DIR)
+        fs.create_dir(constants.LOCK_DIR)
+        fs.create_dir(constants.LOGROTATE_DIR)
+        fs.create_dir(constants.UNIT_DIR)
         fs.create_dir('/sys/block')
 
         yield fs
@@ -135,14 +145,17 @@ def with_cephadm_ctx(
         hostname = 'host1'
 
     _cephadm = import_cephadm()
-    with mock.patch('cephadm.attempt_bind'), \
+    with mock.patch('cephadmlib.net_utils.attempt_bind'), \
+         mock.patch('cephadmlib.call_wrappers.call', return_value=('', '', 0)), \
+         mock.patch('cephadmlib.call_wrappers.call_timeout', return_value=0), \
          mock.patch('cephadm.call', return_value=('', '', 0)), \
          mock.patch('cephadm.call_timeout', return_value=0), \
-         mock.patch('cephadm.find_executable', return_value='foo'), \
+         mock.patch('cephadmlib.exe_utils.find_executable', return_value='foo'), \
          mock.patch('cephadm.get_container_info', return_value=None), \
          mock.patch('cephadm.is_available', return_value=True), \
          mock.patch('cephadm.json_loads_retry', return_value={'epoch' : 1}), \
          mock.patch('cephadm.logger'), \
+         mock.patch('cephadm.FileLock'), \
          mock.patch('socket.gethostname', return_value=hostname):
         ctx: _cephadm.CephadmContext = _cephadm.cephadm_init_ctx(cmd)
         ctx.container_engine = mock_podman()

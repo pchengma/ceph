@@ -58,7 +58,7 @@ public:
   }
 
   rgw_raw_obj get_raw_obj(const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params) const;
-  rgw_raw_obj get_raw_obj(rgw::sal::RadosStore* store) const;
+  rgw_raw_obj get_raw_obj(RGWRados* store) const;
 
   rgw_obj_select& operator=(const rgw_obj& rhs) {
     obj = rhs;
@@ -154,6 +154,7 @@ struct RGWObjManifestRule {
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
+  static void generate_test_instances(std::list<RGWObjManifestRule*>& o);
 };
 WRITE_CLASS_ENCODER(RGWObjManifestRule)
 
@@ -180,6 +181,7 @@ struct RGWObjTier {
       DECODE_FINISH(bl);
     }
     void dump(Formatter *f) const;
+    static void generate_test_instances(std::list<RGWObjTier*>& o);
 };
 WRITE_CLASS_ENCODER(RGWObjTier)
 
@@ -545,6 +547,10 @@ public:
       return ofs;
     }
 
+    int get_cur_part_id() const {
+      return cur_part_id;
+    }
+
     /* stripe number */
     int get_cur_stripe() const {
       return cur_stripe;
@@ -607,7 +613,7 @@ public:
     int create_next(uint64_t ofs);
 
     rgw_raw_obj get_cur_obj(RGWZoneGroup& zonegroup, RGWZoneParams& zone_params) { return cur_obj.get_raw_obj(zonegroup, zone_params); }
-    rgw_raw_obj get_cur_obj(rgw::sal::RadosStore* store) const { return cur_obj.get_raw_obj(store); }
+    rgw_raw_obj get_cur_obj(RGWRados* store) const { return cur_obj.get_raw_obj(store); }
 
     /* total max size of current stripe (including head obj) */
     uint64_t cur_stripe_max_size() const {

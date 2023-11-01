@@ -165,6 +165,8 @@ There are a few ways to create new OSDs:
 
     ceph orch apply -i spec.yml
 
+.. warning:: When deploying new OSDs with ``cephadm``, ensure that the ``ceph-osd`` package is not already installed on the target host. If it is installed, conflicts may arise in the management and control of the OSD that may lead to errors or unexpected behavior.
+
 Dry Run
 -------
 
@@ -317,7 +319,7 @@ Replacing an OSD
 
 .. prompt:: bash #
 
-  orch osd rm <osd_id(s)> --replace [--force]
+  ceph orch osd rm <osd_id(s)> --replace [--force]
 
 Example:
 
@@ -924,6 +926,57 @@ It is also possible to specify directly device paths in specific hosts like the 
 
 
 This can easily be done with other filters, like `size` or `vendor` as well.
+
+It's possible to specify the `crush_device_class` parameter within the
+DriveGroup spec, and it's applied to all the devices defined by the `paths`
+keyword:
+
+.. code-block:: yaml
+
+    service_type: osd
+    service_id: osd_using_paths
+    placement:
+      hosts:
+        - Node01
+        - Node02
+    crush_device_class: ssd
+    spec:
+      data_devices:
+        paths:
+        - /dev/sdb
+        - /dev/sdc
+      db_devices:
+        paths:
+        - /dev/sdd
+      wal_devices:
+        paths:
+        - /dev/sde
+
+The `crush_device_class` parameter, however, can be defined for each OSD passed
+using the `paths` keyword with the following syntax:
+
+.. code-block:: yaml
+
+    service_type: osd
+    service_id: osd_using_paths
+    placement:
+      hosts:
+        - Node01
+        - Node02
+    crush_device_class: ssd
+    spec:
+      data_devices:
+        paths:
+        - path: /dev/sdb
+          crush_device_class: ssd
+        - path: /dev/sdc
+          crush_device_class: nvme
+      db_devices:
+        paths:
+        - /dev/sdd
+      wal_devices:
+        paths:
+        - /dev/sde
 
 .. _cephadm-osd-activate:
 

@@ -17,6 +17,7 @@
 #include "include/buffer.h"
 #include "include/stringify.h"
 #include "include/cephfs/libcephfs.h"
+#include "include/fs_types.h"
 #include "include/rados/librados.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +29,8 @@
 #include <iostream>
 #include <vector>
 #include "json_spirit/json_spirit.h"
+
+#include "include/fs_types.h"
 
 #ifdef __linux__
 #include <limits.h>
@@ -61,7 +64,7 @@ int do_mon_command(string s, string *key)
     std::cout << "key: " << *key << std::endl;
     free(outbuf);
   } else {
-    return -EINVAL;
+    return -CEPHFS_EINVAL;
   }
   if (outs_len) {
     string s(outs, outs_len);
@@ -71,13 +74,13 @@ int do_mon_command(string s, string *key)
   return r;
 }
 
-string get_unique_dir()
+string get_unique_dir(string name)
 {
-  return string("/ceph_test_libcephfs_access.") + stringify(rand());
+  return string("/ceph_test_libcephfs_access.") + name + string(".") + stringify(rand());
 }
 
 TEST(AccessTest, Foo) {
-  string dir = get_unique_dir();
+  string dir = get_unique_dir("foo");
   string user = "libcephfs_foo_test." + stringify(rand());
   // admin mount to set up test
   struct ceph_mount_info *admin;
@@ -110,8 +113,8 @@ TEST(AccessTest, Foo) {
 }
 
 TEST(AccessTest, Path) {
-  string good = get_unique_dir();
-  string bad = get_unique_dir();
+  string good = get_unique_dir("good");
+  string bad = get_unique_dir("bad");
   string user = "libcephfs_path_test." + stringify(rand());
   struct ceph_mount_info *admin;
   ASSERT_EQ(0, ceph_create(&admin, NULL));
@@ -180,9 +183,9 @@ TEST(AccessTest, Path) {
   ASSERT_EQ(ceph_rename(admin, string(good + "/renameme").c_str(),
 			string(bad + "/asdf").c_str()), 0);
   ASSERT_GE(ceph_write(cmount, fd, "foo", 3, 0), 0);
-  ASSERT_GE(ceph_fchmod(cmount, fd, 0777), -EACCES);
-  ASSERT_GE(ceph_ftruncate(cmount, fd, 0), -EACCES);
-  ASSERT_GE(ceph_fsetxattr(cmount, fd, "user.any", "bar", 3, 0), -EACCES);
+  ASSERT_GE(ceph_fchmod(cmount, fd, 0777), -CEPHFS_EACCES);
+  ASSERT_GE(ceph_ftruncate(cmount, fd, 0), -CEPHFS_EACCES);
+  ASSERT_GE(ceph_fsetxattr(cmount, fd, "user.any", "bar", 3, 0), -CEPHFS_EACCES);
   ceph_close(cmount, fd);
 
   ceph_shutdown(cmount);
@@ -196,8 +199,8 @@ TEST(AccessTest, Path) {
 }
 
 TEST(AccessTest, ReadOnly) {
-  string dir = get_unique_dir();
-  string dir2 = get_unique_dir();
+  string dir = get_unique_dir("dir");
+  string dir2 = get_unique_dir("dir2");
   string user = "libcephfs_readonly_test." + stringify(rand());
   struct ceph_mount_info *admin;
   ASSERT_EQ(0, ceph_create(&admin, NULL));
@@ -240,7 +243,7 @@ TEST(AccessTest, ReadOnly) {
 }
 
 TEST(AccessTest, User) {
-  string dir = get_unique_dir();
+  string dir = get_unique_dir("user");
   string user = "libcephfs_user_test." + stringify(rand());
 
   // admin mount to set up test
@@ -265,7 +268,7 @@ TEST(AccessTest, User) {
   ASSERT_EQ(0, ceph_conf_read_file(cmount, NULL));
   ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
   ASSERT_EQ(0, ceph_conf_set(cmount, "key", key.c_str()));
-  ASSERT_EQ(-EACCES, ceph_mount(cmount, "/"));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mount(cmount, "/"));
   ASSERT_EQ(0, ceph_init(cmount));
 
   UserPerm *perms = ceph_userperm_new(123, 456, 0, NULL);
@@ -281,35 +284,35 @@ TEST(AccessTest, User) {
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 123, 456));
   ASSERT_EQ(0, ceph_mkdir(cmount, string(dir + "/u1").c_str(), 0755));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 456));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
 
   // group bits
   ASSERT_EQ(0, ceph_chmod(admin, dir.c_str(), 0770));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 456));
   ASSERT_EQ(0, ceph_mkdir(cmount, string(dir + "/u2").c_str(), 0755));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 2));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
 
   // user overrides group
   ASSERT_EQ(0, ceph_chmod(admin, dir.c_str(), 0470));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 123, 456));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
 
   // other
   ASSERT_EQ(0, ceph_chmod(admin, dir.c_str(), 0777));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 1));
   ASSERT_EQ(0, ceph_mkdir(cmount, string(dir + "/u3").c_str(), 0755));
   ASSERT_EQ(0, ceph_chmod(admin, dir.c_str(), 0770));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
 
   // user and group overrides other
   ASSERT_EQ(0, ceph_chmod(admin, dir.c_str(), 07));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 456));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 123, 1));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 123, 456));
-  ASSERT_EQ(-EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_mkdir(cmount, string(dir + "/no").c_str(), 0755));
 
   // chown and chgrp
   ASSERT_EQ(0, ceph_chmod(admin, dir.c_str(), 0700));
@@ -319,18 +322,18 @@ TEST(AccessTest, User) {
   ASSERT_EQ(0, ceph_chown(cmount, dir.c_str(), 123, 456));
   // ASSERT_EQ(0, ceph_chown(cmount, dir.c_str(), -1, 789));
   ASSERT_EQ(0, ceph_chown(cmount, dir.c_str(), -1, 456));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), 123, 1));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), 1, 456));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), 123, 1));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), 1, 456));
 
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 1));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), 123, 456));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), 123, -1));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), -1, 456));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), 123, 456));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), 123, -1));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), -1, 456));
 
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 1, 456));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), 123, 456));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), 123, -1));
-  ASSERT_EQ(-EACCES, ceph_chown(cmount, dir.c_str(), -1, 456));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), 123, 456));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), 123, -1));
+  ASSERT_EQ(-CEPHFS_EACCES, ceph_chown(cmount, dir.c_str(), -1, 456));
 
   ASSERT_EQ(0, ceph_chown(admin, dir.c_str(), 123, 1));
   ASSERT_EQ(0, ceph_chown(cmount, dir.c_str(), -1, 456));

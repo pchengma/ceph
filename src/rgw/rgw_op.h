@@ -16,6 +16,7 @@
 
 #include <array>
 #include <memory>
+#include <span>
 #include <string>
 #include <set>
 #include <map>
@@ -47,7 +48,6 @@
 #include "rgw_log.h"
 
 #include "rgw_lc.h"
-#include "rgw_torrent.h"
 #include "rgw_tag.h"
 #include "rgw_object_lock.h"
 #include "cls/rgw/cls_rgw_client.h"
@@ -60,12 +60,11 @@
 
 #include "include/ceph_assert.h"
 
-using ceph::crypto::SHA1;
-
 struct req_state;
 class RGWOp;
 class RGWRados;
 class RGWMultiCompleteUpload;
+class RGWPutObj_Torrent;
 
 
 namespace rgw {
@@ -182,6 +181,7 @@ protected:
   RGWQuota quota;
   int op_ret;
   int do_aws4_auth_completion();
+  bool init_called = false;
 
   virtual int init_quota();
 
@@ -233,7 +233,9 @@ public:
   }
 
   virtual void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *dialect_handler) {
+    if (init_called) return;
     this->driver = driver;
+    init_called = true;
     this->s = s;
     this->dialect_handler = dialect_handler;
   }
@@ -328,7 +330,6 @@ public:
 
 class RGWGetObj : public RGWOp {
 protected:
-  seed torrent; // get torrent
   const char *range_str;
   const char *if_mod;
   const char *if_unmod;
@@ -346,17 +347,20 @@ protected:
   ceph::real_time *mod_ptr;
   ceph::real_time *unmod_ptr;
   rgw::sal::Attrs attrs;
+  bool get_torrent = false;
   bool get_data;
   bool partial_content;
   bool ignore_invalid_range;
   bool range_parsed;
   bool skip_manifest;
   bool skip_decrypt{false};
+  bool sync_cloudtiered{false};
   utime_t gc_invalidate_time;
   bool is_slo;
   std::string lo_etag;
   bool rgwx_stat; /* extended rgw stat operation */
   std::string version_id;
+  rgw_zone_set_entry dst_zone_trace;
 
   // compression attrs
   RGWCompressionInfo cs_info;
@@ -832,7 +836,7 @@ public:
   void execute(optional_yield y) override;
 
   virtual int get_params(optional_yield y) = 0;
-  virtual void handle_listing_chunk(rgw::sal::BucketList&& buckets) {
+  virtual void handle_listing_chunk(std::span<RGWBucketEnt> buckets) {
     /* The default implementation, used by e.g. S3, just generates a new
      * part of listing and sends it client immediately. Swift can behave
      * differently: when the reverse option is requested, all incoming
@@ -840,7 +844,7 @@ public:
     return send_response_data(buckets);
   }
   virtual void send_response_begin(bool has_buckets) = 0;
-  virtual void send_response_data(rgw::sal::BucketList& buckets) = 0;
+  virtual void send_response_data(std::span<const RGWBucketEnt> buckets) = 0;
   virtual void send_response_end() = 0;
   void send_response() override {}
 
@@ -907,23 +911,21 @@ protected:
   std::string max_keys;
   std::string delimiter;
   std::string encoding_type;
-  bool list_versions;
-  int max;
+  bool list_versions{false};
+  int max{0};
   std::vector<rgw_bucket_dir_entry> objs;
   std::map<std::string, bool> common_prefixes;
+  std::optional<RGWStorageStats> stats; // initialized if need_container_stats()
 
-  int default_max;
-  bool is_truncated;
-  bool allow_unordered;
+  int default_max{0};
+  bool is_truncated{false};
+  bool allow_unordered{false};
 
-  int shard_id;
+  int shard_id{-1};
 
   int parse_max_keys();
 
 public:
-  RGWListBucket() : list_versions(false), max(0),
-                    default_max(0), is_truncated(false),
-		    allow_unordered(false), shard_id(-1) {}
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1060,6 +1062,7 @@ public:
 class RGWStatBucket : public RGWOp {
 protected:
   std::unique_ptr<rgw::sal::Bucket> bucket;
+  RGWStorageStats stats;
 
 public:
   int verify_permission(optional_yield y) override;
@@ -1186,7 +1189,6 @@ WRITE_CLASS_ENCODER(RGWSLOInfo)
 
 class RGWPutObj : public RGWOp {
 protected:
-  seed torrent;
   off_t ofs;
   const char *supplied_md5_b64;
   const char *supplied_etag;
@@ -1218,7 +1220,7 @@ protected:
   std::string multipart_upload_id;
   std::string multipart_part_str;
   int multipart_part_num = 0;
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
 
   boost::optional<ceph::real_time> delete_at;
   //append obj
@@ -1282,6 +1284,9 @@ public:
                                  rgw::sal::DataProcessor *cb) {
     return 0;
   }
+  // if configured, construct a filter to generate torrent metadata
+  auto get_torrent_filter(rgw::sal::DataProcessor *cb)
+      -> std::optional<RGWPutObj_Torrent>;
 
   // get lua script to run as a "put object" filter
   int get_lua_filter(std::unique_ptr<rgw::sal::DataProcessor>* filter,
@@ -1507,11 +1512,7 @@ protected:
   ceph::real_time *mod_ptr;
   ceph::real_time *unmod_ptr;
   rgw::sal::Attrs attrs;
-  std::string src_tenant_name, src_bucket_name, src_obj_name;
   std::unique_ptr<rgw::sal::Bucket> src_bucket;
-  std::string dest_tenant_name, dest_bucket_name, dest_obj_name;
-  std::unique_ptr<rgw::sal::Bucket> dest_bucket;
-  std::unique_ptr<rgw::sal::Object> dest_object;
   ceph::real_time src_mtime;
   ceph::real_time mtime;
   rgw::sal::AttrsMod attrs_mod;
@@ -1571,6 +1572,7 @@ public:
     RGWOp::init(driver, s, h);
     dest_policy.set_ctx(s->cct);
   }
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1845,7 +1847,7 @@ protected:
   std::string upload_id;
   RGWAccessControlPolicy policy;
   ceph::real_time mtime;
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
 
 public:
   RGWInitMultipart() {}
@@ -1873,7 +1875,7 @@ protected:
   std::string version_id;
   bufferlist data;
   std::unique_ptr<rgw::sal::MPSerializer> serializer;
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
 
 public:
   RGWCompleteMultipart() {}
@@ -1894,7 +1896,7 @@ public:
 
 class RGWAbortMultipart : public RGWOp {
 protected:
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
 public:
   RGWAbortMultipart() {}
 

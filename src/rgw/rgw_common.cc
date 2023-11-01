@@ -286,10 +286,16 @@ req_state::~req_state() {
 
 std::ostream& req_state::gen_prefix(std::ostream& out) const
 {
-  auto p = out.precision();
-  return out << "req " << id << ' '
+  std::ios oldState(nullptr);
+  oldState.copyfmt(out);
+
+  out << "req " << id << ' '
       << std::setprecision(3) << std::fixed << time_elapsed() // '0.123s'
-      << std::setprecision(p) << std::defaultfloat << ' ';
+      << ' ';
+
+  out.copyfmt(oldState);
+  return out;
+
 }
 
 bool search_err(rgw_http_errors& errs, int err_no, int& http_ret, string& code)
@@ -368,8 +374,7 @@ void dump(req_state* s)
     s->formatter->open_object_section("Error");
   if (!s->err.err_code.empty())
     s->formatter->dump_string("Code", s->err.err_code);
-  if (!s->err.message.empty())
-    s->formatter->dump_string("Message", s->err.message);
+  s->formatter->dump_string("Message", s->err.message);
   if (!s->bucket_name.empty())	// TODO: connect to expose_bucket
     s->formatter->dump_string("BucketName", s->bucket_name);
   if (!s->trans_id.empty())	// TODO: connect to expose_bucket or another toggle
@@ -386,13 +391,13 @@ struct str_len {
 
 #define STR_LEN_ENTRY(s) { s, sizeof(s) - 1 }
 
-struct str_len meta_prefixes[] = { STR_LEN_ENTRY("HTTP_X_AMZ"),
-                                   STR_LEN_ENTRY("HTTP_X_GOOG"),
-                                   STR_LEN_ENTRY("HTTP_X_DHO"),
-                                   STR_LEN_ENTRY("HTTP_X_RGW"),
-                                   STR_LEN_ENTRY("HTTP_X_OBJECT"),
-                                   STR_LEN_ENTRY("HTTP_X_CONTAINER"),
-                                   STR_LEN_ENTRY("HTTP_X_ACCOUNT"),
+struct str_len meta_prefixes[] = { STR_LEN_ENTRY("HTTP_X_AMZ_"),
+                                   STR_LEN_ENTRY("HTTP_X_GOOG_"),
+                                   STR_LEN_ENTRY("HTTP_X_DHO_"),
+                                   STR_LEN_ENTRY("HTTP_X_RGW_"),
+                                   STR_LEN_ENTRY("HTTP_X_OBJECT_"),
+                                   STR_LEN_ENTRY("HTTP_X_CONTAINER_"),
+                                   STR_LEN_ENTRY("HTTP_X_ACCOUNT_"),
                                    {NULL, 0} };
 
 void req_info::init_meta_info(const DoutPrefixProvider *dpp, bool *found_bad_meta)
@@ -412,7 +417,7 @@ void req_info::init_meta_info(const DoutPrefixProvider *dpp, bool *found_bad_met
         const char *name = p+len; /* skip the prefix */
         int name_len = header_name.size() - len;
 
-        if (found_bad_meta && strncmp(name, "_META_", name_len) == 0)
+        if (found_bad_meta && strncmp(name, "META_", name_len) == 0)
           *found_bad_meta = true;
 
         char name_low[meta_prefixes[0].len + name_len + 1];
@@ -1144,7 +1149,8 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
                             const vector<rgw::IAM::Policy>& user_policies,
                             const vector<rgw::IAM::Policy>& session_policies,
                             const rgw::ARN& res,
-                            const uint64_t op)
+                            const uint64_t op,
+                            bool mandatory_policy)
 {
   auto identity_policy_res = eval_identity_or_session_policies(dpp, user_policies, s->env, op, res);
   if (identity_policy_res == Effect::Deny) {
@@ -1167,13 +1173,15 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
     return true;
   }
 
-  if (op == rgw::IAM::s3CreateBucket || op == rgw::IAM::s3ListAllMyBuckets) {
-    auto perm = op_to_perm(op);
-
-    return verify_user_permission_no_policy(dpp, s, user_acl, perm);
+  if (mandatory_policy) {
+    // no policies, and policy is mandatory
+    ldpp_dout(dpp, 20) << "no policies for a policy mandatory op " << op << dendl;
+    return false;
   }
 
-  return false;
+  auto perm = op_to_perm(op);
+
+  return verify_user_permission_no_policy(dpp, s, user_acl, perm);
 }
 
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
@@ -1197,10 +1205,11 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             req_state * const s,
                             const rgw::ARN& res,
-                            const uint64_t op)
+                            const uint64_t op,
+                            bool mandatory_policy)
 {
   perm_state_from_req_state ps(s);
-  return verify_user_permission(dpp, &ps, s->user_acl.get(), s->iam_user_policies, s->session_policies, res, op);
+  return verify_user_permission(dpp, &ps, s->user_acl.get(), s->iam_user_policies, s->session_policies, res, op, mandatory_policy);
 }
 
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp, 
@@ -2020,6 +2029,15 @@ void RGWUserCaps::dump(Formatter *f) const
   dump(f, "caps");
 }
 
+void RGWUserCaps::generate_test_instances(list<RGWUserCaps*>& o)
+{
+  o.push_back(new RGWUserCaps);
+  RGWUserCaps *caps = new RGWUserCaps;
+  caps->add_cap("read");
+  caps->add_cap("write");
+  o.push_back(caps);
+}
+
 void RGWUserCaps::dump(Formatter *f, const char *name) const
 {
   f->open_array_section(name);
@@ -2145,6 +2163,16 @@ void rgw_raw_obj::decode_from_rgw_obj(bufferlist::const_iterator& bl)
 
   get_obj_bucket_and_oid_loc(old_obj, oid, loc);
   pool = old_obj.get_explicit_data_pool();
+}
+
+void rgw_raw_obj::generate_test_instances(std::list<rgw_raw_obj*>& o)
+{
+  rgw_raw_obj *r = new rgw_raw_obj;
+  r->oid = "foo";
+  r->loc = "bar";
+  r->pool.name = "baz";
+  r->pool.ns = "ns";
+  o.push_back(r);
 }
 
 static struct rgw_name_to_flag op_type_mapping[] = { {"*",  RGW_OP_TYPE_ALL},
@@ -2720,8 +2748,8 @@ void RGWRateLimitInfo::decode_json(JSONObj *obj)
 {
   JSONDecoder::decode_json("max_read_ops", max_read_ops, obj);
   JSONDecoder::decode_json("max_write_ops", max_write_ops, obj);
-  JSONDecoder::decode_json("max_read_bytes", max_read_ops, obj);
-  JSONDecoder::decode_json("max_write_bytes", max_write_ops, obj);
+  JSONDecoder::decode_json("max_read_bytes", max_read_bytes, obj);
+  JSONDecoder::decode_json("max_write_bytes", max_write_bytes, obj);
   JSONDecoder::decode_json("enabled", enabled, obj);
 }
 

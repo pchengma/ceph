@@ -355,7 +355,8 @@ void cls_rgw_bucket_complete_op(librados::ObjectWriteOperation& o, RGWModifyOp o
                                 const cls_rgw_obj_key& key,
                                 const rgw_bucket_dir_entry_meta& dir_meta,
 				const std::list<cls_rgw_obj_key> *remove_objs, bool log_op,
-                                uint16_t bilog_op, const rgw_zone_set *zones_trace);
+                                uint16_t bilog_op, const rgw_zone_set *zones_trace,
+				const std::string& obj_locator = ""); // ignored if it's the empty string
 
 void cls_rgw_remove_obj(librados::ObjectWriteOperation& o, std::list<std::string>& keep_attr_prefixes);
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const std::string& attr);
@@ -617,6 +618,9 @@ int cls_rgw_lc_list(librados::IoCtx& io_ctx, const std::string& oid,
 		    const std::string& marker, uint32_t max_entries,
                     std::vector<cls_rgw_lc_entry>& entries);
 #endif
+
+/* multipart */
+void cls_rgw_mp_upload_part_info_update(librados::ObjectWriteOperation& op, const std::string& part_key, const RGWUploadPartInfo& info);
 
 /* resharding */
 void cls_rgw_reshard_add(librados::ObjectWriteOperation& op, const cls_rgw_reshard_entry& entry);

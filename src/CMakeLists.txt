@@ -295,6 +295,10 @@ if(WITH_CEPHFS_JAVA)
   add_subdirectory(java)
 endif()
 
+if(WITH_RADOSGW_D4N)
+  add_subdirectory(cpp_redis)
+endif()
+
 if (WITH_BLKIN)
   add_subdirectory(blkin/blkin-lib)
 endif(WITH_BLKIN)
@@ -302,6 +306,7 @@ endif(WITH_BLKIN)
 set(mds_files)
 list(APPEND mds_files
   mds/MDSMap.cc
+  mds/MDSAuthCaps.cc
   mds/FSMap.cc
   mds/FSMapUser.cc
   mds/inode_backtrace.cc
@@ -321,20 +326,26 @@ if(NOT TARGET RapidJSON::RapidJSON)
 endif()
 
 option(WITH_FMT_HEADER_ONLY "use header-only version of fmt library" OFF)
-set(WITH_FMT_VERSION "7.0.0" CACHE
-  STRING "build with fmt version")
-find_package(fmt ${WITH_FMT_VERSION} QUIET)
-if(fmt_FOUND)
-  include_directories(SYSTEM "${fmt_INCLUDE_DIR}")
+option(WITH_SYSTEM_FMT "build against system fmt" OFF)
+if(WITH_SYSTEM_FMT)
+  find_package(fmt 8.1.1...<10.0.0 REQUIRED)
+endif()
+if (WITH_FMT_HEADER_ONLY)
+  message(STATUS "Using fmt header-only.")
+  set(FMT_LIB fmt::fmt-header-only)
 else()
-  message(STATUS "Could not find fmt, will build it")
+  message(STATUS "Linking to fmt library.")
+  set(FMT_LIB fmt::fmt)
+endif()
+if(fmt_FOUND)
+  message(STATUS "Building with system fmt.")
+else()
+  message(STATUS "Building fmt as submodule")
   set(old_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
   set(BUILD_SHARED_LIBS FALSE)
   add_subdirectory(fmt)
   set(BUILD_SHARED_LIBS ${old_BUILD_SHARED_LIBS})
   unset(old_BUILD_SHARED_LIBS)
-  target_compile_definitions(fmt PUBLIC
-    $<$<BOOL:${WIN32}>:FMT_USE_TZSET=0>)
   include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/fmt/include")
 endif()
 
@@ -428,7 +439,7 @@ set_source_files_properties(ceph_ver.c
   APPEND PROPERTY OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h)
 add_library(common-objs OBJECT ${libcommon_files})
 target_compile_definitions(common-objs PRIVATE
-  $<TARGET_PROPERTY:fmt::fmt,INTERFACE_COMPILE_DEFINITIONS>)
+  $<TARGET_PROPERTY:${FMT_LIB},INTERFACE_COMPILE_DEFINITIONS>)
 add_dependencies(common-objs legacy-option-headers)
 
 if(WITH_JAEGER)
@@ -471,7 +482,7 @@ set(ceph_common_deps
   Boost::date_time
   Boost::iostreams
   StdFilesystem::filesystem
-  fmt::fmt
+  ${FMT_LIB}
   ${BLKID_LIBRARIES}
   ${Backtrace_LIBRARIES}
   ${BLKIN_LIBRARIES}
@@ -565,7 +576,7 @@ endif()
 set_target_properties(ceph-common PROPERTIES
   SOVERSION 2
   SKIP_RPATH TRUE)
-if(NOT APPLE AND NOT FREEBSD)
+if(NOT APPLE AND NOT FREEBSD AND NOT WIN32)
   # Apple uses Mach-O, not ELF. so this option does not apply to APPLE.
   #
   # prefer the local symbol definitions when binding references to global
@@ -809,7 +820,8 @@ if(WITH_LIBCEPHFS)
       OUTPUT_NAME cephfs
       VERSION 2.0.0
       SOVERSION 2)
-    if(NOT APPLE)
+    if(NOT APPLE AND NOT
+        (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL Clang))
       foreach(name ceph-common client osdc)
         set_property(TARGET cephfs APPEND_STRING PROPERTY
           LINK_FLAGS " -Wl,--exclude-libs,lib${name}.a")
