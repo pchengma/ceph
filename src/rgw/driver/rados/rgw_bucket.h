@@ -45,7 +45,6 @@ extern bool rgw_bucket_object_check_filter(const std::string& oid);
 
 void init_default_bucket_layout(CephContext *cct, rgw::BucketLayout& layout,
 				const RGWZone& zone,
-				std::optional<uint32_t> shards,
 				std::optional<rgw::BucketIndexType> type);
 
 struct RGWBucketCompleteInfo {
@@ -111,7 +110,7 @@ public:
 };
 
 /**
- * store a list of the user's buckets, with associated functinos.
+ * store a list of the user's buckets, with associated functions.
  */
 class RGWUserBuckets {
   std::map<std::string, RGWBucketEnt> buckets;
@@ -356,7 +355,6 @@ public:
   int set_quota(RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, optional_yield y, std::string *err_msg = NULL);
 
   int remove_object(const DoutPrefixProvider *dpp, RGWBucketAdminOpState& op_state, optional_yield y, std::string *err_msg = NULL);
-  int policy_bl_to_stream(bufferlist& bl, std::ostream& o);
   int get_policy(RGWBucketAdminOpState& op_state, RGWAccessControlPolicy& policy, optional_yield y, const DoutPrefixProvider *dpp);
   int sync(RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, optional_yield y, std::string *err_msg = NULL);
 
@@ -499,7 +497,7 @@ public:
       RGWObjVersionTracker *objv_tracker{nullptr};
       ceph::real_time mtime;
       bool exclusive{false};
-      std::map<std::string, bufferlist> *attrs{nullptr};
+      const std::map<std::string, bufferlist> *attrs{nullptr};
 
       PutParams() {}
 
@@ -518,7 +516,7 @@ public:
         return *this;
       }
 
-      PutParams& set_attrs(std::map<std::string, bufferlist> *_attrs) {
+      PutParams& set_attrs(const std::map<std::string, bufferlist> *_attrs) {
         attrs = _attrs;
         return *this;
       }
@@ -583,7 +581,7 @@ public:
                                                    nullptr: orig_info was not found (new bucket instance */
       ceph::real_time mtime;
       bool exclusive{false};
-      std::map<std::string, bufferlist> *attrs{nullptr};
+      const std::map<std::string, bufferlist> *attrs{nullptr};
       RGWObjVersionTracker *objv_tracker{nullptr};
 
       PutParams() {}
@@ -603,7 +601,7 @@ public:
         return *this;
       }
 
-      PutParams& set_attrs(std::map<std::string, bufferlist> *_attrs) {
+      PutParams& set_attrs(const std::map<std::string, bufferlist> *_attrs) {
         attrs = _attrs;
         return *this;
       }

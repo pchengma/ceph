@@ -441,14 +441,14 @@ void OsdScrub::dec_scrubs_local()
   m_resource_bookkeeper.dec_scrubs_local();
 }
 
-bool OsdScrub::inc_scrubs_remote()
+bool OsdScrub::inc_scrubs_remote(pg_t pgid)
 {
-  return m_resource_bookkeeper.inc_scrubs_remote();
+  return m_resource_bookkeeper.inc_scrubs_remote(pgid);
 }
 
-void OsdScrub::dec_scrubs_remote()
+void OsdScrub::dec_scrubs_remote(pg_t pgid)
 {
-  m_resource_bookkeeper.dec_scrubs_remote();
+  m_resource_bookkeeper.dec_scrubs_remote(pgid);
 }
 
 void OsdScrub::mark_pg_scrub_blocked(spg_t blocked_pg)
@@ -466,12 +466,12 @@ int OsdScrub::get_blocked_pgs_count() const
   return m_queue.get_blocked_pgs_count();
 }
 
-bool OsdScrub::set_reserving_now()
+bool OsdScrub::set_reserving_now(spg_t reserving_id, utime_t now_is)
 {
-  return m_queue.set_reserving_now();
+  return m_queue.set_reserving_now(reserving_id, now_is);
 }
 
-void OsdScrub::clear_reserving_now()
+void OsdScrub::clear_reserving_now(spg_t reserving_id)
 {
-  m_queue.clear_reserving_now();
+  m_queue.clear_reserving_now(reserving_id);
 }

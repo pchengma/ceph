@@ -77,51 +77,6 @@ namespace rgw::sal {
 static constexpr size_t listing_max_entries = 1000;
 static std::string pubsub_oid_prefix = "pubsub.";
 
-static int decode_policy(CephContext* cct,
-                         bufferlist& bl,
-                         RGWAccessControlPolicy* policy)
-{
-  auto iter = bl.cbegin();
-  try {
-    policy->decode(iter);
-  } catch (buffer::error& err) {
-    ldout(cct, 0) << "ERROR: could not decode policy, caught buffer::error" << dendl;
-    return -EIO;
-  }
-  if (cct->_conf->subsys.should_gather<ceph_subsys_rgw, 15>()) {
-    ldout(cct, 15) << __func__ << " Read AccessControlPolicy";
-    RGWAccessControlPolicy_S3* s3policy = static_cast<RGWAccessControlPolicy_S3 *>(policy);
-    s3policy->to_xml(*_dout);
-    *_dout << dendl;
-  }
-  return 0;
-}
-
-static int rgw_op_get_bucket_policy_from_attr(const DoutPrefixProvider* dpp,
-					      RadosStore* store,
-					      User* user,
-					      Attrs& bucket_attrs,
-					      RGWAccessControlPolicy* policy,
-					      optional_yield y)
-{
-  auto aiter = bucket_attrs.find(RGW_ATTR_ACL);
-
-  if (aiter != bucket_attrs.end()) {
-    int ret = decode_policy(store->ctx(), aiter->second, policy);
-    if (ret < 0)
-      return ret;
-  } else {
-    ldout(store->ctx(), 0) << "WARNING: couldn't find acl header for bucket, generating default" << dendl;
-    /* object exists, but policy is broken */
-    int r = user->load_user(dpp, y);
-    if (r < 0)
-      return r;
-
-    policy->create_default(user->get_id(), user->get_display_name());
-  }
-  return 0;
-}
-
 static int drain_aio(std::list<librados::AioCompletion*>& handles)
 {
   int ret = 0;
@@ -165,141 +120,48 @@ int RadosUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& ma
   return 0;
 }
 
-int RadosUser::create_bucket(const DoutPrefixProvider* dpp,
-				 const rgw_bucket& b,
-				 const std::string& zonegroup_id,
-				 rgw_placement_rule& placement_rule,
-				 std::string& swift_ver_location,
-				 const RGWQuotaInfo * pquota_info,
-				 const RGWAccessControlPolicy& policy,
-				 Attrs& attrs,
-				 RGWBucketInfo& info,
-				 obj_version& ep_objv,
-				 bool exclusive,
-				 bool obj_lock_enabled,
-				 bool* existed,
-				 req_info& req_info,
-				 std::unique_ptr<Bucket>* bucket_out,
-				 optional_yield y)
+int RadosBucket::create(const DoutPrefixProvider* dpp,
+                        const CreateParams& params,
+                        optional_yield y)
 {
-  int ret;
-  bufferlist in_data;
-  RGWBucketInfo master_info;
-  rgw_bucket* pmaster_bucket;
-  uint32_t* pmaster_num_shards;
-  real_time creation_time;
-  std::unique_ptr<Bucket> bucket;
-  obj_version objv,* pobjv = NULL;
+  rgw_bucket key = get_key();
+  key.marker = params.marker;
+  key.bucket_id = params.bucket_id;
 
-  /* If it exists, look it up; otherwise create it */
-  ret = store->get_bucket(dpp, this, b, &bucket, y);
-  if (ret < 0 && ret != -ENOENT)
+  int ret = store->getRados()->create_bucket(
+      dpp, y, key, params.owner, params.zonegroup_id,
+      params.placement_rule, params.zone_placement, params.attrs,
+      params.obj_lock_enabled, params.swift_ver_location,
+      params.quota, params.creation_time, &bucket_version, info);
+
+  bool existed = false;
+  if (ret == -EEXIST) {
+    existed = true;
+    /* bucket already existed, might have raced with another bucket creation,
+     * or might be partial bucket creation that never completed. Read existing
+     * bucket info, verify that the reported bucket owner is the current user.
+     * If all is ok then update the user's list of buckets.  Otherwise inform
+     * client about a name conflict.
+     */
+    if (info.owner != params.owner) {
+      return -ERR_BUCKET_EXISTS;
+    }
+    ret = 0;
+  } else if (ret != 0) {
     return ret;
-
-  if (ret != -ENOENT) {
-    RGWAccessControlPolicy old_policy(store->ctx());
-    *existed = true;
-    if (swift_ver_location.empty()) {
-      swift_ver_location = bucket->get_info().swift_ver_location;
-    }
-    placement_rule.inherit_from(bucket->get_info().placement_rule);
-
-    // don't allow changes to the acl policy
-    int r = rgw_op_get_bucket_policy_from_attr(dpp, store, this, bucket->get_attrs(),
-					       &old_policy, y);
-    if (r >= 0 && old_policy != policy) {
-      bucket_out->swap(bucket);
-      return -EEXIST;
-    }
-  } else {
-    bucket = std::unique_ptr<Bucket>(new RadosBucket(store, b, this));
-    *existed = false;
-    bucket->set_attrs(attrs);
   }
 
-  if (!store->svc()->zone->is_meta_master()) {
-    JSONParser jp;
-    ret = store->forward_request_to_master(dpp, this, NULL, in_data, &jp, req_info, y);
-    if (ret < 0) {
-      return ret;
-    }
-
-    JSONDecoder::decode_json("entry_point_object_ver", ep_objv, &jp);
-    JSONDecoder::decode_json("object_ver", objv, &jp);
-    JSONDecoder::decode_json("bucket_info", master_info, &jp);
-    ldpp_dout(dpp, 20) << "parsed: objv.tag=" << objv.tag << " objv.ver=" << objv.ver << dendl;
-    std::time_t ctime = ceph::real_clock::to_time_t(master_info.creation_time);
-    ldpp_dout(dpp, 20) << "got creation time: << " << std::put_time(std::localtime(&ctime), "%F %T") << dendl;
-    pmaster_bucket= &master_info.bucket;
-    creation_time = master_info.creation_time;
-    pmaster_num_shards = &master_info.layout.current_index.layout.normal.num_shards;
-    pobjv = &objv;
-    if (master_info.obj_lock_enabled()) {
-      info.flags = BUCKET_VERSIONED | BUCKET_OBJ_LOCK_ENABLED;
-    }
-  } else {
-    pmaster_bucket = NULL;
-    pmaster_num_shards = NULL;
-    if (obj_lock_enabled)
-      info.flags = BUCKET_VERSIONED | BUCKET_OBJ_LOCK_ENABLED;
-  }
-
-  std::string zid = zonegroup_id;
-  if (zid.empty()) {
-    zid = store->svc()->zone->get_zonegroup().get_id();
-  }
-
-  if (*existed) {
-    rgw_placement_rule selected_placement_rule;
-    ret = store->svc()->zone->select_bucket_placement(dpp, this->get_info(),
-					       zid, placement_rule,
-					       &selected_placement_rule, nullptr, y);
-    if (selected_placement_rule != info.placement_rule) {
-      ret = -EEXIST;
-      bucket_out->swap(bucket);
-      return ret;
-    }
-  } else {
-
-    ret = store->getRados()->create_bucket(this->get_info(), bucket->get_key(),
-				    zid, placement_rule, swift_ver_location, pquota_info,
-				    attrs, info, pobjv, &ep_objv, creation_time,
-				    pmaster_bucket, pmaster_num_shards, y, dpp,
-				    exclusive);
-    if (ret == -EEXIST) {
-      *existed = true;
-      /* bucket already existed, might have raced with another bucket creation,
-       * or might be partial bucket creation that never completed. Read existing
-       * bucket info, verify that the reported bucket owner is the current user.
-       * If all is ok then update the user's list of buckets.  Otherwise inform
-       * client about a name conflict.
-       */
-      if (info.owner.compare(this->get_id()) != 0) {
-	return -EEXIST;
-      }
-      ret = 0;
-    } else if (ret != 0) {
-      return ret;
-    }
-  }
-
-  bucket->set_version(ep_objv);
-  bucket->get_info() = info;
-
-  RadosBucket* rbucket = static_cast<RadosBucket*>(bucket.get());
-  ret = rbucket->link(dpp, this, y, false);
-  if (ret && !*existed && ret != -EEXIST) {
+  ret = link(dpp, params.owner, y, false);
+  if (ret && !existed && ret != -EEXIST) {
     /* if it exists (or previously existed), don't remove it! */
-    ret = rbucket->unlink(dpp, this, y);
+    ret = unlink(dpp, params.owner, y);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "WARNING: failed to unlink bucket: ret=" << ret
 		       << dendl;
     }
-  } else if (ret == -EEXIST || (ret == 0 && *existed)) {
+  } else if (ret == -EEXIST || (ret == 0 && existed)) {
     ret = -ERR_BUCKET_EXISTS;
   }
-
-  bucket_out->swap(bucket);
 
   return ret;
 }
@@ -325,7 +187,7 @@ int RadosUser::read_stats(const DoutPrefixProvider *dpp,
   return store->ctl()->user->read_stats(dpp, get_id(), stats, y, last_stats_sync, last_stats_update);
 }
 
-int RadosUser::read_stats_async(const DoutPrefixProvider *dpp, RGWGetUserStats_CB* cb)
+int RadosUser::read_stats_async(const DoutPrefixProvider *dpp, boost::intrusive_ptr<ReadStatsCB> cb)
 {
   return store->svc()->user->read_stats_async(dpp, get_id(), cb);
 }
@@ -406,11 +268,9 @@ int RadosUser::verify_mfa(const std::string& mfa_str, bool* verified,
 
 RadosBucket::~RadosBucket() {}
 
-int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
-			       bool delete_children,
-			       bool forward_to_master,
-			       req_info* req_info,
-			       optional_yield y)
+int RadosBucket::remove(const DoutPrefixProvider* dpp,
+			bool delete_children,
+			optional_yield y)
 {
   int ret;
 
@@ -470,7 +330,7 @@ int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
   RGWObjVersionTracker ot;
 
   // if we deleted children above we will force delete, as any that
-  // remain is detrius from a prior bug
+  // remain is detritus from a prior bug
   ret = store->getRados()->delete_bucket(info, ot, y, dpp, !delete_children);
   if (ret < 0) {
     ldpp_dout(dpp, -1) << "ERROR: could not remove bucket " <<
@@ -492,26 +352,13 @@ int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
     ldpp_dout(dpp, -1) << "ERROR: unable to remove user bucket information" << dendl;
   }
 
-  if (forward_to_master) {
-    bufferlist in_data;
-    ret = store->forward_request_to_master(dpp, owner, &ot.read_version, in_data, nullptr, *req_info, y);
-    if (ret < 0) {
-      if (ret == -ENOENT) {
-	/* adjust error, we want to return with NoSuchBucket and not
-	 * NoSuchKey */
-	ret = -ERR_NO_SUCH_BUCKET;
-      }
-      return ret;
-    }
-  }
-
   return ret;
 }
 
-int RadosBucket::remove_bucket_bypass_gc(int concurrent_max, bool
-					 keep_index_consistent,
-					 optional_yield y, const
-					 DoutPrefixProvider *dpp)
+int RadosBucket::remove_bypass_gc(int concurrent_max, bool
+				  keep_index_consistent,
+				  optional_yield y, const
+				  DoutPrefixProvider *dpp)
 {
   int ret;
   map<RGWObjCategory, RGWStorageStats> stats;
@@ -635,7 +482,7 @@ int RadosBucket::remove_bucket_bypass_gc(int concurrent_max, bool
   // this function can only be run if caller wanted children to be
   // deleted, so we can ignore the check for children as any that
   // remain are detritus from a prior bug
-  ret = remove_bucket(dpp, true, false, nullptr, y);
+  ret = remove(dpp, true, y);
   if (ret < 0) {
     ldpp_dout(dpp, -1) << "ERROR: could not remove bucket " << this << dendl;
     return ret;
@@ -684,7 +531,7 @@ int RadosBucket::read_stats(const DoutPrefixProvider *dpp,
 
 int RadosBucket::read_stats_async(const DoutPrefixProvider *dpp,
 				  const bucket_index_layout_generation& idx_layout,
-				  int shard_id, RGWGetBucketStats_CB* ctx)
+				  int shard_id, boost::intrusive_ptr<ReadStatsCB> ctx)
 {
   return store->getRados()->get_bucket_stats_async(dpp, get_info(), idx_layout, shard_id, ctx);
 }
@@ -692,7 +539,7 @@ int RadosBucket::read_stats_async(const DoutPrefixProvider *dpp,
 int RadosBucket::sync_user_stats(const DoutPrefixProvider *dpp, optional_yield y,
                                  RGWBucketEnt* ent)
 {
-  return store->ctl()->bucket->sync_user_stats(dpp, owner->get_id(), info, y, ent);
+  return store->ctl()->bucket->sync_user_stats(dpp, info.owner, info, y, ent);
 }
 
 int RadosBucket::check_bucket_shards(const DoutPrefixProvider* dpp,
@@ -701,17 +548,17 @@ int RadosBucket::check_bucket_shards(const DoutPrefixProvider* dpp,
   return store->getRados()->check_bucket_shards(info, num_objs, dpp, y);
 }
 
-int RadosBucket::link(const DoutPrefixProvider* dpp, User* new_user, optional_yield y, bool update_entrypoint, RGWObjVersionTracker* objv)
+int RadosBucket::link(const DoutPrefixProvider* dpp, const rgw_user& new_user, optional_yield y, bool update_entrypoint, RGWObjVersionTracker* objv)
 {
   RGWBucketEntryPoint ep;
   ep.bucket = info.bucket;
-  ep.owner = new_user->get_id();
+  ep.owner = new_user;
   ep.creation_time = get_creation_time();
   ep.linked = true;
   Attrs ep_attrs;
   rgw_ep_info ep_data{ep, ep_attrs};
 
-  int r = store->ctl()->bucket->link_bucket(new_user->get_id(), info.bucket,
+  int r = store->ctl()->bucket->link_bucket(new_user, info.bucket,
 					    get_creation_time(), y, dpp, update_entrypoint,
 					    &ep_data);
   if (r < 0)
@@ -723,27 +570,20 @@ int RadosBucket::link(const DoutPrefixProvider* dpp, User* new_user, optional_yi
   return r;
 }
 
-int RadosBucket::unlink(const DoutPrefixProvider* dpp, User* new_user, optional_yield y, bool update_entrypoint)
+int RadosBucket::unlink(const DoutPrefixProvider* dpp, const rgw_user& owner, optional_yield y, bool update_entrypoint)
 {
-  return store->ctl()->bucket->unlink_bucket(new_user->get_id(), info.bucket, y, dpp, update_entrypoint);
+  return store->ctl()->bucket->unlink_bucket(owner, info.bucket, y, dpp, update_entrypoint);
 }
 
-int RadosBucket::chown(const DoutPrefixProvider* dpp, User& new_user, optional_yield y)
+int RadosBucket::chown(const DoutPrefixProvider* dpp, const rgw_user& new_owner, optional_yield y)
 {
   std::string obj_marker;
-  int r;
-
-  if (!owner) {
-      ldpp_dout(dpp, 0) << __func__ << " Cannot chown without an owner " << dendl;
-      return -EINVAL;
-  }
-
-  r = this->unlink(dpp, owner, y);
+  int r = this->unlink(dpp, info.owner, y);
   if (r < 0) {
     return r;
   }
 
-  return this->link(dpp, &new_user, y);
+  return this->link(dpp, new_owner, y);
 }
 
 int RadosBucket::put_info(const DoutPrefixProvider* dpp, bool exclusive, ceph::real_time _mtime, optional_yield y)
@@ -783,14 +623,14 @@ int RadosBucket::read_usage(const DoutPrefixProvider *dpp, uint64_t start_epoch,
 			       RGWUsageIter& usage_iter,
 			       map<rgw_user_bucket, rgw_usage_log_entry>& usage)
 {
-  return store->getRados()->read_usage(dpp, owner->get_id(), get_name(), start_epoch,
+  return store->getRados()->read_usage(dpp, info.owner, get_name(), start_epoch,
 				       end_epoch, max_entries, is_truncated,
 				       usage_iter, usage);
 }
 
 int RadosBucket::trim_usage(const DoutPrefixProvider *dpp, uint64_t start_epoch, uint64_t end_epoch, optional_yield y)
 {
-  return store->getRados()->trim_usage(dpp, owner->get_id(), get_name(), start_epoch, end_epoch, y);
+  return store->getRados()->trim_usage(dpp, info.owner, get_name(), start_epoch, end_epoch, y);
 }
 
 int RadosBucket::remove_objs_from_index(const DoutPrefixProvider *dpp, std::list<rgw_obj_index_key>& objs_to_unlink)
@@ -844,7 +684,7 @@ int RadosBucket::set_acl(const DoutPrefixProvider* dpp, RGWAccessControlPolicy &
   map<string, bufferlist>& attrs = get_attrs();
 
   attrs[RGW_ATTR_ACL] = aclbl;
-  info.owner = acl.get_owner().get_id();
+  info.owner = acl.get_owner().id;
 
   int r = store->ctl()->bucket->store_bucket_instance_info(info.bucket,
                  info, y, dpp,
@@ -911,13 +751,12 @@ int RadosBucket::list_multiparts(const DoutPrefixProvider *dpp,
 {
   rgw::sal::Bucket::ListParams params;
   rgw::sal::Bucket::ListResults results;
-  MultipartMetaFilter mp_filter;
 
   params.prefix = prefix;
   params.delim = delim;
   params.marker = marker;
   params.ns = RGW_OBJ_NS_MULTIPART;
-  params.access_list_filter = &mp_filter;
+  params.access_list_filter = MultipartMetaFilter;
 
   int ret = list(dpp, params, max_uploads, results, y);
 
@@ -927,8 +766,10 @@ int RadosBucket::list_multiparts(const DoutPrefixProvider *dpp,
   if (!results.objs.empty()) {
     for (const rgw_bucket_dir_entry& dentry : results.objs) {
       rgw_obj_key key(dentry.key);
-      ACLOwner owner(rgw_user(dentry.meta.owner));
-      owner.set_name(dentry.meta.owner_display_name);
+      const ACLOwner owner{
+        .id = rgw_user(dentry.meta.owner),
+        .display_name = dentry.meta.owner_display_name
+      };
       uploads.push_back(this->get_multipart_upload(key.name,
 			std::nullopt, std::move(owner), dentry.meta.mtime));
     }
@@ -1137,118 +978,22 @@ std::unique_ptr<Object> RadosStore::get_object(const rgw_obj_key& k)
   return std::make_unique<RadosObject>(this, k);
 }
 
-int RadosStore::get_bucket(const DoutPrefixProvider* dpp, User* u, const rgw_bucket& b, std::unique_ptr<Bucket>* bucket, optional_yield y)
+std::unique_ptr<Bucket> RadosStore::get_bucket(const RGWBucketInfo& i)
 {
-  int ret;
-  Bucket* bp;
-
-  bp = new RadosBucket(this, b, u);
-  ret = bp->load_bucket(dpp, y);
-  if (ret < 0) {
-    delete bp;
-    return ret;
-  }
-
-  bucket->reset(bp);
-  return 0;
-}
-
-int RadosStore::get_bucket(User* u, const RGWBucketInfo& i, std::unique_ptr<Bucket>* bucket)
-{
-  Bucket* bp;
-
-  bp = new RadosBucket(this, i, u);
   /* Don't need to fetch the bucket info, use the provided one */
-
-  bucket->reset(bp);
-  return 0;
+  return std::make_unique<RadosBucket>(this, i);
 }
 
-int RadosStore::get_bucket(const DoutPrefixProvider* dpp, User* u, const std::string& tenant, const std::string& name, std::unique_ptr<Bucket>* bucket, optional_yield y)
+int RadosStore::load_bucket(const DoutPrefixProvider* dpp, const rgw_bucket& b,
+                            std::unique_ptr<Bucket>* bucket, optional_yield y)
 {
-  rgw_bucket b;
-
-  b.tenant = tenant;
-  b.name = name;
-
-  return get_bucket(dpp, u, b, bucket, y);
+  *bucket = std::make_unique<RadosBucket>(this, b);
+  return (*bucket)->load_bucket(dpp, y);
 }
 
 bool RadosStore::is_meta_master()
 {
   return svc()->zone->is_meta_master();
-}
-
-int RadosStore::forward_request_to_master(const DoutPrefixProvider *dpp, User* user, obj_version* objv,
-					     bufferlist& in_data,
-					     JSONParser* jp, req_info& info,
-					     optional_yield y)
-{
-  if (is_meta_master()) {
-    /* We're master, don't forward */
-    return 0;
-  }
-
-  if (!svc()->zone->get_master_conn()) {
-    ldpp_dout(dpp, 0) << "rest connection is invalid" << dendl;
-    return -EINVAL;
-  }
-  ldpp_dout(dpp, 0) << "sending request to master zonegroup" << dendl;
-  bufferlist response;
-  std::string uid_str = user->get_id().to_str();
-#define MAX_REST_RESPONSE (128 * 1024) // we expect a very small response
-  int ret = svc()->zone->get_master_conn()->forward(dpp, rgw_user(uid_str), info,
-                                                    objv, MAX_REST_RESPONSE,
-						    &in_data, &response, y);
-  if (ret < 0)
-    return ret;
-
-  ldpp_dout(dpp, 20) << "response: " << response.c_str() << dendl;
-  if (jp && !jp->parse(response.c_str(), response.length())) {
-    ldpp_dout(dpp, 0) << "failed parsing response from master zonegroup" << dendl;
-    return -EINVAL;
-  }
-
-  return 0;
-}
-
-int RadosStore::forward_iam_request_to_master(const DoutPrefixProvider *dpp, const RGWAccessKey& key, obj_version* objv,
-					     bufferlist& in_data,
-					     RGWXMLDecoder::XMLParser* parser, req_info& info,
-					     optional_yield y)
-{
-  if (is_meta_master()) {
-    /* We're master, don't forward */
-    return 0;
-  }
-
-  if (!svc()->zone->get_master_conn()) {
-    ldpp_dout(dpp, 0) << "rest connection is invalid" << dendl;
-    return -EINVAL;
-  }
-  ldpp_dout(dpp, 0) << "sending request to master zonegroup" << dendl;
-  bufferlist response;
-#define MAX_REST_RESPONSE (128 * 1024) // we expect a very small response
-  int ret = svc()->zone->get_master_conn()->forward_iam_request(dpp, key, info,
-                                                    objv, MAX_REST_RESPONSE,
-						                                        &in_data, &response, y);
-  if (ret < 0)
-    return ret;
-
-  ldpp_dout(dpp, 20) << "response: " << response.c_str() << dendl;
-
-  std::string r = response.c_str();
-  std::string str_to_search = "&quot;";
-  std::string str_to_replace = "\"";
-  boost::replace_all(r, str_to_search, str_to_replace);
-  ldpp_dout(dpp, 20) << "r: " << r.c_str() << dendl;
-
-  if (parser && !parser->parse(r.c_str(), r.length(), 1)) {
-    ldpp_dout(dpp, 0) << "ERROR: failed to parse response from master zonegroup" << dendl;
-    return -EIO;
-  }
-
-  return 0;
 }
 
 std::string RadosStore::zone_unique_id(uint64_t unique_num)
@@ -1847,7 +1592,7 @@ int RadosObject::get_torrent_info(const DoutPrefixProvider* dpp,
   librados::ObjectReadOperation op;
   op.omap_get_vals_by_keys(keys, &result, nullptr);
 
-  ret = rgw_rados_operate(dpp, ref.pool.ioctx(), ref.obj.oid, &op, nullptr, y);
+  ret = rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, &op, nullptr, y);
   if (ret < 0) {
     return ret;
   }
@@ -1904,7 +1649,7 @@ int RadosObject::chown(User& new_user, const DoutPrefixProvider* dpp, optional_y
   }
 
   bufferlist& bl = aiter->second;
-  RGWAccessControlPolicy policy(store->ctx());
+  RGWAccessControlPolicy policy;
   ACLOwner owner;
   auto bliter = bl.cbegin();
   try {
@@ -1920,16 +1665,16 @@ int RadosObject::chown(User& new_user, const DoutPrefixProvider* dpp, optional_y
   RGWAccessControlList& acl = policy.get_acl();
 
   //Remove grant that is set to old owner
-  acl.remove_canon_user_grant(owner.get_id());
+  acl.remove_canon_user_grant(owner.id);
 
   //Create a grant and add grant
   ACLGrant grant;
   grant.set_canon(new_user.get_id(), new_user.get_display_name(), RGW_PERM_FULL_CONTROL);
-  acl.add_grant(&grant);
+  acl.add_grant(grant);
 
   //Update the ACL owner to the new user
-  owner.set_id(new_user.get_id());
-  owner.set_name(new_user.get_display_name());
+  owner.id = new_user.get_id();
+  owner.display_name = new_user.get_display_name();
   policy.set_owner(owner);
 
   bl.clear();
@@ -2202,6 +1947,7 @@ int RadosObject::RadosReadOp::prepare(optional_yield y, const DoutPrefixProvider
   parent_op.conds.if_nomatch = params.if_nomatch;
   parent_op.params.lastmod = params.lastmod;
   parent_op.params.target_obj = params.target_obj;
+  parent_op.params.part_num = params.part_num;
   parent_op.params.obj_size = &obj_size;
   parent_op.params.attrs = &source->get_attrs();
 
@@ -2209,8 +1955,9 @@ int RadosObject::RadosReadOp::prepare(optional_yield y, const DoutPrefixProvider
   if (ret < 0)
     return ret;
 
-  source->set_key(parent_op.state.obj.key);
+  source->set_instance(parent_op.state.obj.key.instance);
   source->set_obj_size(obj_size);
+  params.parts_count = parent_op.params.parts_count;
 
   return ret;
 }
@@ -2241,7 +1988,7 @@ RadosObject::RadosDeleteOp::RadosDeleteOp(RadosObject *_source) :
 
 int RadosObject::RadosDeleteOp::delete_obj(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  parent_op.params.bucket_owner = params.bucket_owner.get_id();
+  parent_op.params.bucket_owner = params.bucket_owner.id;
   parent_op.params.versioning_status = params.versioning_status;
   parent_op.params.obj_owner = params.obj_owner;
   parent_op.params.olh_epoch = params.olh_epoch;
@@ -2348,7 +2095,7 @@ int RadosObject::swift_versioning_restore(bool& restored,
 {
   rgw_obj obj = get_obj();
   return store->getRados()->swift_versioning_restore(*rados_ctx,
-						     bucket->get_owner()->get_id(),
+						     bucket->get_owner(),
 						     bucket->get_info(),
 						     obj,
 						     restored,
@@ -2475,7 +2222,7 @@ int RadosMultipartUpload::abort(const DoutPrefixProvider *dpp, CephContext *cct,
   }
 
   std::unique_ptr<rgw::sal::Object::DeleteOp> del_op = meta_obj->get_delete_op();
-  del_op->params.bucket_owner = bucket->get_acl_owner();
+  del_op->params.bucket_owner.id = bucket->get_info().owner;
   del_op->params.versioning_status = 0;
   if (!remove_objs.empty()) {
     del_op->params.remove_objs = &remove_objs;
@@ -2527,7 +2274,7 @@ int RadosMultipartUpload::init(const DoutPrefixProvider *dpp, optional_yield y, 
     RGWRados::Object::Write obj_op(&op_target);
 
     op_target.set_versioning_disabled(true); /* no versioning for multipart meta */
-    obj_op.meta.owner = owner.get_id();
+    obj_op.meta.owner = owner.id;
     obj_op.meta.category = RGWObjCategory::MultiMeta;
     obj_op.meta.flags = PUT_OBJ_CREATE_EXCL;
     obj_op.meta.mtime = &mtime;
@@ -2816,7 +2563,7 @@ int RadosMultipartUpload::complete(const DoutPrefixProvider *dpp,
   obj_op.meta.remove_objs = &remove_objs;
 
   obj_op.meta.ptag = &tag; /* use req_id as operation tag */
-  obj_op.meta.owner = owner.get_id();
+  obj_op.meta.owner = owner.id;
   obj_op.meta.flags = PUT_OBJ_CREATE;
   obj_op.meta.modify_tail = true;
   obj_op.meta.completeMultipart = true;
@@ -3154,20 +2901,6 @@ int RadosMultipartWriter::complete(size_t accounted_size, const std::string& eta
 			    if_match, if_nomatch, user_data, zones_trace, canceled, rctx);
 }
 
-const std::string& RadosZoneGroup::get_endpoint() const
-{
-  if (!group.endpoints.empty()) {
-      return group.endpoints.front();
-  } else {
-    // use zonegroup's master zone endpoints
-    auto z = group.zones.find(group.master_zone);
-    if (z != group.zones.end() && !z->second.endpoints.empty()) {
-      return z->second.endpoints.front();
-    }
-  }
-  return empty;
-}
-
 bool RadosZoneGroup::placement_target_exists(std::string& target) const
 {
   return !!group.placement_targets.count(target);
@@ -3409,7 +3142,7 @@ int RadosLuaManager::remove_package(const DoutPrefixProvider *dpp, optional_yiel
   librados::ObjectWriteOperation op;
   size_t pos = package_name.find(" ");
   if (pos != package_name.npos) {
-    // remove specfic version of the the package
+    // remove specific version of the the package
     op.omap_rm_keys(std::set<std::string>({package_name}));
     auto ret = rgw_rados_operate(dpp, ioctx,
         PACKAGE_LIST_OBJECT_NAME, &op, y);

@@ -18,12 +18,14 @@ struct PGPool;
 
 namespace Scrub {
   class ReplicaReservations;
+  struct ReplicaActive;
 }
 
-/// Facilitating scrub-realated object access to private PG data
+/// Facilitating scrub-related object access to private PG data
 class ScrubberPasskey {
 private:
   friend class Scrub::ReplicaReservations;
+  friend struct Scrub::ReplicaActive;
   friend class PrimaryLogScrub;
   friend class PgScrubber;
   friend class ScrubBackend;
@@ -92,7 +94,7 @@ struct PgScrubBeListener {
   // query the PG backend for the on-disk size of an object
   virtual uint64_t logical_to_ondisk_size(uint64_t logical_size) const = 0;
 
-  // used to verify our "cleaness" before scrubbing
+  // used to verify our "cleanliness" before scrubbing
   virtual bool is_waiting_for_unreadable_object() const = 0;
 };
 
@@ -169,8 +171,7 @@ struct requested_scrub_t {
    * the value of auto_repair is determined in sched_scrub() (once per scrub.
    * previous value is not remembered). Set if
    * - allowed by configuration and backend, and
-   * - must_scrub is not set (i.e. - this is a periodic scrub),
-   * - time_for_deep was just set
+   * - for periodic scrubs: time_for_deep was just set
    */
   bool auto_repair{false};
 
@@ -310,11 +311,29 @@ struct ScrubPgIF {
   /// the OSD scrub queue
   virtual void on_new_interval() = 0;
 
+  /// we are peered as a replica
+  virtual void on_replica_activate() = 0;
+
   virtual void scrub_clear_state() = 0;
 
   virtual void handle_query_state(ceph::Formatter* f) = 0;
 
   virtual pg_scrubbing_status_t get_schedule() const = 0;
+
+
+  // // perform 'scrub'/'deep_scrub' asok commands
+
+  /// ... by faking the "last scrub" stamps
+  virtual void on_operator_periodic_cmd(
+    ceph::Formatter* f,
+    scrub_level_t scrub_level,
+    int64_t offset) = 0;
+
+  /// ... by requesting an "operator initiated" scrub
+  virtual void on_operator_forced_scrub(
+    ceph::Formatter* f,
+    scrub_level_t scrub_level,
+    requested_scrub_t& request_flags) = 0;
 
   virtual void dump_scrubber(ceph::Formatter* f,
 			     const requested_scrub_t& request_flags) const = 0;
@@ -356,18 +375,6 @@ struct ScrubPgIF {
    */
   virtual void clear_pgscrub_state() = 0;
 
-  /**
-   *  triggers the 'RemotesReserved' (all replicas granted scrub resources)
-   *  state-machine event
-   */
-  virtual void send_remotes_reserved(epoch_t epoch_queued) = 0;
-
-  /**
-   * triggers the 'ReservationFailure' (at least one replica denied us the
-   * requested resources) state-machine event
-   */
-  virtual void send_reservation_failure(epoch_t epoch_queued) = 0;
-
   virtual void cleanup_store(ObjectStore::Transaction* t) = 0;
 
   virtual bool get_store_errors(const scrub_ls_arg_t& arg,
@@ -381,25 +388,6 @@ struct ScrubPgIF {
     ceph::coarse_real_clock::time_point now_is) = 0;
 
   // --------------- reservations -----------------------------------
-
-  /**
-   *  message all replicas with a request to "unreserve" scrub
-   */
-  virtual void unreserve_replicas() = 0;
-
-  /**
-   *  "forget" all replica reservations. No messages are sent to the
-   *  previously-reserved.
-   *
-   *  Used upon interval change. The replicas' state is guaranteed to
-   *  be reset separately by the interval-change event.
-   */
-  virtual void discard_replica_reservations() = 0;
-
-  /**
-   * clear both local and OSD-managed resource reservation flags
-   */
-  virtual void clear_scrub_reservations() = 0;
 
   /**
    * Reserve local scrub resources (managed by the OSD)
@@ -423,20 +411,20 @@ struct ScrubPgIF {
    */
   virtual void update_scrub_job(const requested_scrub_t& request_flags) = 0;
 
-  // on the replica:
-  virtual void handle_scrub_reserve_request(OpRequestRef op) = 0;
-  virtual void handle_scrub_reserve_release(OpRequestRef op) = 0;
-
-  // and on the primary:
-  virtual void handle_scrub_reserve_grant(OpRequestRef op, pg_shard_t from) = 0;
-  virtual void handle_scrub_reserve_reject(OpRequestRef op,
-					   pg_shard_t from) = 0;
+  /**
+   * route incoming replica-reservations requests/responses to the
+   * appropriate handler.
+   * As the ReplicaReservations object is to be owned by the ScrubMachine, we
+   * send all relevant messages to the ScrubMachine.
+   */
+  virtual void handle_scrub_reserve_msgs(OpRequestRef op) = 0;
 
   virtual void rm_from_osd_scrubbing() = 0;
 
-  virtual void scrub_requested(scrub_level_t scrub_level,
-			       scrub_type_t scrub_type,
-			       requested_scrub_t& req_flags) = 0;
+  virtual scrub_level_t scrub_requested(
+      scrub_level_t scrub_level,
+      scrub_type_t scrub_type,
+      requested_scrub_t& req_flags) = 0;
 
   // --------------- debugging via the asok ------------------------------
 

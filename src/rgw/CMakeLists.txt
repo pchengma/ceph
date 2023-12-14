@@ -48,7 +48,6 @@ set(librgw_common_srcs
   services/svc_otp.cc
   services/svc_quota.cc
   services/svc_sync_modules.cc
-  services/svc_rados.cc
   services/svc_role_rados.cc
   services/svc_sys_obj.cc
   services/svc_sys_obj_cache.cc
@@ -279,7 +278,6 @@ target_link_libraries(rgw_common
     ${ARROW_LIBRARIES}
     ${ARROW_FLIGHT_LIBRARIES}
     ${LMDB_LIBRARIES}
-    ${ALLOC_LIBS}
   PUBLIC
     ${LUA_LIBRARIES}
     RapidJSON::RapidJSON
@@ -287,7 +285,6 @@ target_link_libraries(rgw_common
     ${FMT_LIB})
 target_include_directories(rgw_common
   PUBLIC "${CMAKE_SOURCE_DIR}/src/rgw/services"
-  PUBLIC "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados"
   PUBLIC "${CMAKE_SOURCE_DIR}/src/rgw"
   PUBLIC "${LUA_INCLUDE_DIR}")
 
@@ -459,7 +456,12 @@ target_include_directories(radosgw
 
 target_include_directories(radosgw SYSTEM PUBLIC "../rapidjson/include")
 
-target_link_libraries(radosgw PRIVATE ${rgw_libs} rgw_schedulers kmip)
+target_link_libraries(radosgw PRIVATE
+  ${rgw_libs}
+  rgw_schedulers
+  kmip
+  ${ALLOC_LIBS})
+
 if(WITH_RADOSGW_BEAST_OPENSSL)
   # used by rgw_asio_frontend.cc
   target_link_libraries(radosgw PRIVATE OpenSSL::SSL)
@@ -509,7 +511,7 @@ set(radosgw_token_srcs
   rgw_token.cc)
 add_executable(radosgw-token ${radosgw_token_srcs})
 target_link_libraries(radosgw-token librados
-  global ${ALLOC_LIBS})
+  global)
 install(TARGETS radosgw-token DESTINATION bin)
 
 set(radosgw_object_expirer_srcs

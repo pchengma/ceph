@@ -39,7 +39,13 @@ from cephadm.http_server import CephadmHttpServer
 from cephadm.agent import CephadmAgentHelpers
 
 
-from mgr_module import MgrModule, HandleCommandResult, Option, NotifyType
+from mgr_module import (
+    MgrModule,
+    HandleCommandResult,
+    Option,
+    NotifyType,
+    MonCommandFailed,
+)
 from mgr_util import build_url
 import orchestrator
 from orchestrator.module import to_format, Format
@@ -108,11 +114,11 @@ os._exit = os_exit_noop   # type: ignore
 DEFAULT_IMAGE = 'quay.io/ceph/ceph'
 DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.43.0'
 DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v1.5.0'
-DEFAULT_NVMEOF_IMAGE = 'quay.io/ceph/nvmeof:v0.0.5'
+DEFAULT_NVMEOF_IMAGE = 'quay.io/ceph/nvmeof:latest'
 DEFAULT_LOKI_IMAGE = 'docker.io/grafana/loki:2.4.0'
 DEFAULT_PROMTAIL_IMAGE = 'docker.io/grafana/promtail:2.4.0'
 DEFAULT_ALERT_MANAGER_IMAGE = 'quay.io/prometheus/alertmanager:v0.25.0'
-DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/ceph-grafana:9.4.7'
+DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/ceph-grafana:9.4.12'
 DEFAULT_HAPROXY_IMAGE = 'quay.io/ceph/haproxy:2.3'
 DEFAULT_KEEPALIVED_IMAGE = 'quay.io/ceph/keepalived:2.2.4'
 DEFAULT_SNMP_GATEWAY_IMAGE = 'docker.io/maxwo/snmp-notifier:v1.2.1'
@@ -1630,7 +1636,7 @@ Then run the following:
         return self._add_host(spec)
 
     @handle_orch_error
-    def remove_host(self, host: str, force: bool = False, offline: bool = False) -> str:
+    def remove_host(self, host: str, force: bool = False, offline: bool = False, rm_crush_entry: bool = False) -> str:
         """
         Remove a host from orchestrator management.
 
@@ -1709,6 +1715,17 @@ Then run the following:
                 'name': host
             }
             run_cmd(cmd_args)
+
+        if rm_crush_entry:
+            try:
+                self.check_mon_command({
+                    'prefix': 'osd crush remove',
+                    'name': host,
+                })
+            except MonCommandFailed as e:
+                self.log.error(f'Couldn\'t remove host {host} from CRUSH map: {str(e)}')
+                return (f'Cephadm failed removing host {host}\n'
+                        f'Failed to remove host {host} from the CRUSH map: {str(e)}')
 
         self.inventory.rm_host(host)
         self.cache.rm_host(host)
@@ -3362,8 +3379,7 @@ Then run the following:
         """
         for osd_id in osd_ids:
             try:
-                self.to_remove_osds.rm(OSD(osd_id=int(osd_id),
-                                           remove_util=self.to_remove_osds.rm_util))
+                self.to_remove_osds.rm_by_osd_id(int(osd_id))
             except (NotFoundError, KeyError, ValueError):
                 return f'Unable to find OSD in the queue: {osd_id}'
 
@@ -3397,6 +3413,18 @@ Then run the following:
                                                   f"It is recommended to add the {SpecialHostLabels.ADMIN} label to another host"
                                                   " before completing this operation.\nIf you're certain this is"
                                                   " what you want rerun this command with --force.")
+            # if the user has specified the host we are going to drain
+            # explicitly in any service spec, warn the user. Having a
+            # drained host listed in a placement provides no value, so
+            # they may want to fix it.
+            services_matching_drain_host: List[str] = []
+            for sname, sspec in self.spec_store.all_specs.items():
+                if sspec.placement.hosts and hostname in [h.hostname for h in sspec.placement.hosts]:
+                    services_matching_drain_host.append(sname)
+            if services_matching_drain_host:
+                raise OrchestratorValidationError(f'Host {hostname} was found explicitly listed in the placements '
+                                                  f'of services:\n  {services_matching_drain_host}.\nPlease update those '
+                                                  'specs to not list this host.\nThis warning can be bypassed with --force')
 
         self.add_host_label(hostname, '_no_schedule')
         if not keep_conf_keyring:

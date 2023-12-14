@@ -161,74 +161,23 @@ std::unique_ptr<Object> FilterDriver::get_object(const rgw_obj_key& k)
   return std::make_unique<FilterObject>(std::move(o));
 }
 
-int FilterDriver::get_bucket(const DoutPrefixProvider* dpp, User* u, const rgw_bucket& b, std::unique_ptr<Bucket>* bucket, optional_yield y)
+std::unique_ptr<Bucket> FilterDriver::get_bucket(const RGWBucketInfo& i)
 {
-  std::unique_ptr<Bucket> nb;
-  int ret;
-  User* nu = nextUser(u);
-
-  ret = next->get_bucket(dpp, nu, b, &nb, y);
-  if (ret != 0)
-    return ret;
-
-  Bucket* fb = new FilterBucket(std::move(nb), u);
-  bucket->reset(fb);
-  return 0;
+  return std::make_unique<FilterBucket>(next->get_bucket(i));
 }
 
-int FilterDriver::get_bucket(User* u, const RGWBucketInfo& i, std::unique_ptr<Bucket>* bucket)
+int FilterDriver::load_bucket(const DoutPrefixProvider* dpp, const rgw_bucket& b,
+                              std::unique_ptr<Bucket>* bucket, optional_yield y)
 {
   std::unique_ptr<Bucket> nb;
-  int ret;
-  User* nu = nextUser(u);
-
-  ret = next->get_bucket(nu, i, &nb);
-  if (ret != 0)
-    return ret;
-
-  Bucket* fb = new FilterBucket(std::move(nb), u);
-  bucket->reset(fb);
-  return 0;
-}
-
-int FilterDriver::get_bucket(const DoutPrefixProvider* dpp, User* u, const std::string& tenant, const std::string& name, std::unique_ptr<Bucket>* bucket, optional_yield y)
-{
-  std::unique_ptr<Bucket> nb;
-  int ret;
-  User* nu = nextUser(u);
-
-  ret = next->get_bucket(dpp, nu, tenant, name, &nb, y);
-  if (ret != 0)
-    return ret;
-
-  Bucket* fb = new FilterBucket(std::move(nb), u);
-  bucket->reset(fb);
-  return 0;
+  const int ret = next->load_bucket(dpp, b, &nb, y);
+  *bucket = std::make_unique<FilterBucket>(std::move(nb));
+  return ret;
 }
 
 bool FilterDriver::is_meta_master()
 {
   return next->is_meta_master();
-}
-
-int FilterDriver::forward_request_to_master(const DoutPrefixProvider *dpp,
-					   User* user, obj_version* objv,
-					   bufferlist& in_data,
-					   JSONParser* jp, req_info& info,
-					   optional_yield y)
-{
-  return next->forward_request_to_master(dpp, user, objv, in_data, jp, info, y);
-}
-
-int FilterDriver::forward_iam_request_to_master(const DoutPrefixProvider *dpp,
-					       const RGWAccessKey& key,
-					       obj_version* objv,
-					       bufferlist& in_data,
-					       RGWXMLDecoder::XMLParser* parser,
-					       req_info& info,
-					       optional_yield y)
-{
-  return next->forward_iam_request_to_master(dpp, key, objv, in_data, parser, info, y);
 }
 
 std::string FilterDriver::zone_unique_id(uint64_t unique_num)
@@ -540,35 +489,6 @@ int FilterUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& m
                             need_stats, buckets, y);
 }
 
-int FilterUser::create_bucket(const DoutPrefixProvider* dpp,
-			      const rgw_bucket& b,
-			      const std::string& zonegroup_id,
-			      rgw_placement_rule& placement_rule,
-			      std::string& swift_ver_location,
-			      const RGWQuotaInfo * pquota_info,
-			      const RGWAccessControlPolicy& policy,
-			      Attrs& attrs,
-			      RGWBucketInfo& info,
-			      obj_version& ep_objv,
-			      bool exclusive,
-			      bool obj_lock_enabled,
-			      bool* existed,
-			      req_info& req_info,
-			      std::unique_ptr<Bucket>* bucket_out,
-			      optional_yield y)
-{
-  std::unique_ptr<Bucket> nb;
-  int ret;
-
-  ret = next->create_bucket(dpp, b, zonegroup_id, placement_rule, swift_ver_location, pquota_info, policy, attrs, info, ep_objv, exclusive, obj_lock_enabled, existed, req_info, &nb, y);
-  if (ret < 0)
-    return ret;
-
-  Bucket* fb = new FilterBucket(std::move(nb), this);
-  bucket_out->reset(fb);
-  return 0;
-}
-
 int FilterUser::read_attrs(const DoutPrefixProvider* dpp, optional_yield y)
 {
   return next->read_attrs(dpp, y);
@@ -588,7 +508,7 @@ int FilterUser::read_stats(const DoutPrefixProvider *dpp,
   return next->read_stats(dpp, y, stats, last_stats_sync, last_stats_update);
 }
 
-int FilterUser::read_stats_async(const DoutPrefixProvider *dpp, RGWGetUserStats_CB* cb)
+int FilterUser::read_stats_async(const DoutPrefixProvider *dpp, boost::intrusive_ptr<ReadStatsCB> cb)
 {
   return next->read_stats_async(dpp, cb);
 }
@@ -647,27 +567,32 @@ int FilterBucket::list(const DoutPrefixProvider* dpp, ListParams& params, int ma
   return next->list(dpp, params, max, results, y);
 }
 
-int FilterBucket::remove_bucket(const DoutPrefixProvider* dpp,
-				bool delete_children,
-				bool forward_to_master,
-				req_info* req_info,
-				optional_yield y)
+int FilterBucket::remove(const DoutPrefixProvider* dpp,
+			 bool delete_children,
+			 optional_yield y)
 {
-  return next->remove_bucket(dpp, delete_children, forward_to_master, req_info, y);
+  return next->remove(dpp, delete_children, y);
 }
 
-int FilterBucket::remove_bucket_bypass_gc(int concurrent_max,
-					  bool keep_index_consistent,
-					  optional_yield y,
-					  const DoutPrefixProvider *dpp)
+int FilterBucket::remove_bypass_gc(int concurrent_max,
+				   bool keep_index_consistent,
+				   optional_yield y,
+				   const DoutPrefixProvider *dpp)
 {
-  return next->remove_bucket_bypass_gc(concurrent_max, keep_index_consistent, y, dpp);
+  return next->remove_bypass_gc(concurrent_max, keep_index_consistent, y, dpp);
 }
 
 int FilterBucket::set_acl(const DoutPrefixProvider* dpp,
 			  RGWAccessControlPolicy &acl, optional_yield y)
 {
   return next->set_acl(dpp, acl, y);
+}
+
+int FilterBucket::create(const DoutPrefixProvider* dpp,
+                         const CreateParams& params,
+                         optional_yield y)
+{
+  return next->create(dpp, params, y);
 }
 
 int FilterBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
@@ -688,7 +613,7 @@ int FilterBucket::read_stats(const DoutPrefixProvider *dpp,
 
 int FilterBucket::read_stats_async(const DoutPrefixProvider *dpp,
 				   const bucket_index_layout_generation& idx_layout,
-				   int shard_id, RGWGetBucketStats_CB* ctx)
+				   int shard_id, boost::intrusive_ptr<ReadStatsCB> ctx)
 {
   return next->read_stats_async(dpp, idx_layout, shard_id, ctx);
 }
@@ -705,9 +630,9 @@ int FilterBucket::check_bucket_shards(const DoutPrefixProvider* dpp,
   return next->check_bucket_shards(dpp, num_objs, y);
 }
 
-int FilterBucket::chown(const DoutPrefixProvider* dpp, User& new_user, optional_yield y)
+int FilterBucket::chown(const DoutPrefixProvider* dpp, const rgw_user& new_owner, optional_yield y)
 {
-  return next->chown(dpp, new_user, y);
+  return next->chown(dpp, new_owner, y);
 }
 
 int FilterBucket::put_info(const DoutPrefixProvider* dpp, bool exclusive,
@@ -716,9 +641,9 @@ int FilterBucket::put_info(const DoutPrefixProvider* dpp, bool exclusive,
   return next->put_info(dpp, exclusive, _mtime, y);
 }
 
-bool FilterBucket::is_owner(User* user)
+const rgw_user& FilterBucket::get_owner() const
 {
-  return next->is_owner(nextUser(user));
+  return next->get_owner();
 }
 
 int FilterBucket::check_empty(const DoutPrefixProvider* dpp, optional_yield y)

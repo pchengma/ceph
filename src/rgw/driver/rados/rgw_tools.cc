@@ -1,6 +1,8 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
+#include "auth/AuthRegistry.h"
+
 #include "common/errno.h"
 #include "librados/librados_asio.h"
 
@@ -95,6 +97,24 @@ int rgw_init_ioctx(const DoutPrefixProvider *dpp,
   return 0;
 }
 
+int rgw_get_rados_ref(const DoutPrefixProvider* dpp, librados::Rados* rados,
+		      rgw_raw_obj obj, rgw_rados_ref* ref)
+{
+  ref->obj = std::move(obj);
+
+  int r = rgw_init_ioctx(dpp, rados, ref->obj.pool,
+			 ref->ioctx, true, false);
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: creating ioctx (pool=" << ref->obj.pool
+        << "); r=" << r << dendl;
+    return r;
+  }
+
+  ref->ioctx.locator_set_key(ref->obj.loc);
+  return 0;
+}
+
+
 map<string, bufferlist>* no_change_attrs() {
   static map<string, bufferlist> no_change;
   return &no_change;
@@ -102,7 +122,7 @@ map<string, bufferlist>* no_change_attrs() {
 
 int rgw_put_system_obj(const DoutPrefixProvider *dpp, RGWSI_SysObj* svc_sysobj,
                        const rgw_pool& pool, const string& oid, bufferlist& data, bool exclusive,
-                       RGWObjVersionTracker *objv_tracker, real_time set_mtime, optional_yield y, map<string, bufferlist> *pattrs)
+                       RGWObjVersionTracker *objv_tracker, real_time set_mtime, optional_yield y, const map<string, bufferlist> *pattrs)
 {
   map<string,bufferlist> no_attrs;
   if (!pattrs) {
@@ -285,7 +305,7 @@ int RGWDataAccess::Bucket::finish_init()
 int RGWDataAccess::Bucket::init(const DoutPrefixProvider *dpp, optional_yield y)
 {
   std::unique_ptr<rgw::sal::Bucket> bucket;
-  int ret = sd->driver->get_bucket(dpp, nullptr, tenant, name, &bucket, y);
+  int ret = sd->driver->load_bucket(dpp, rgw_bucket(tenant, name), &bucket, y);
   if (ret < 0) {
     return ret;
   }
@@ -327,8 +347,7 @@ int RGWDataAccess::Object::put(bufferlist& data,
 
   rgw::BlockingAioThrottle aio(driver->ctx()->_conf->rgw_put_obj_min_window_size);
 
-  std::unique_ptr<rgw::sal::Bucket> b;
-  driver->get_bucket(NULL, bucket_info, &b);
+  std::unique_ptr<rgw::sal::Bucket> b = driver->get_bucket(bucket_info);
   std::unique_ptr<rgw::sal::Object> obj = b->get_object(key);
 
   auto& owner = bucket->policy.get_owner();
@@ -336,8 +355,7 @@ int RGWDataAccess::Object::put(bufferlist& data,
   string req_id = driver->zone_unique_id(driver->get_new_req_id());
 
   std::unique_ptr<rgw::sal::Writer> processor;
-  processor = driver->get_atomic_writer(dpp, y, obj.get(),
-				       owner.get_id(),
+  processor = driver->get_atomic_writer(dpp, y, obj.get(), owner.id,
 				       nullptr, olh_epoch, req_id);
 
   int ret = processor->prepare(y);
@@ -394,9 +412,10 @@ int RGWDataAccess::Object::put(bufferlist& data,
   }
 
   if (!aclbl) {
-    RGWAccessControlPolicy_S3 policy(cct);
+    RGWAccessControlPolicy policy;
 
-    policy.create_canned(bucket->policy.get_owner(), bucket->policy.get_owner(), string()); /* default private policy */
+    const auto& owner = bucket->policy.get_owner();
+    policy.create_default(owner.id, owner.display_name); // default private policy
 
     policy.encode(aclbl.emplace());
   }
@@ -435,4 +454,83 @@ void rgw_complete_aio_completion(librados::AioCompletion* c, int r) {
   auto pc = c->pc;
   librados::CB_AioCompleteAndSafe cb(pc);
   cb(r);
+}
+
+bool rgw_check_secure_mon_conn(const DoutPrefixProvider *dpp)
+{
+  AuthRegistry reg(dpp->get_cct());
+
+  reg.refresh_config();
+
+  std::vector<uint32_t> methods;
+  std::vector<uint32_t> modes;
+
+  reg.get_supported_methods(CEPH_ENTITY_TYPE_MON, &methods, &modes);
+  ldpp_dout(dpp, 20) << __func__ << "(): auth registy supported: methods=" << methods << " modes=" << modes << dendl;
+
+  for (auto method : methods) {
+    if (!reg.is_secure_method(method)) {
+      ldpp_dout(dpp, 20) << __func__ << "(): method " << method << " is insecure" << dendl;
+      return false;
+    }
+  }
+
+  for (auto mode : modes) {
+    if (!reg.is_secure_mode(mode)) {
+      ldpp_dout(dpp, 20) << __func__ << "(): mode " << mode << " is insecure" << dendl;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+int rgw_clog_warn(librados::Rados* h, const string& msg)
+{
+  string cmd =
+    "{"
+      "\"prefix\": \"log\", "
+      "\"level\": \"warn\", "
+      "\"logtext\": [\"" + msg + "\"]"
+    "}";
+
+  bufferlist inbl;
+  return h->mon_command(cmd, inbl, nullptr, nullptr);
+}
+
+int rgw_list_pool(const DoutPrefixProvider *dpp,
+		  librados::IoCtx& ioctx,
+		  uint32_t max,
+		  const rgw::AccessListFilter& filter,
+		  std::string& marker,
+		  std::vector<string> *oids,
+		  bool *is_truncated)
+{
+  librados::ObjectCursor oc;
+  if (!oc.from_str(marker)) {
+    ldpp_dout(dpp, 10) << "failed to parse cursor: " << marker << dendl;
+    return -EINVAL;
+  }
+
+  auto iter = ioctx.nobjects_begin(oc);
+  /// Pool_iterate
+  if (iter == ioctx.nobjects_end())
+    return -ENOENT;
+
+  for (; oids->size() < max && iter != ioctx.nobjects_end(); ++iter) {
+    string oid = iter->get_oid();
+    ldpp_dout(dpp, 20) << "RGWRados::pool_iterate: got " << oid << dendl;
+
+    // fill it in with initial values; we may correct later
+    if (filter && !filter(oid, oid))
+      continue;
+
+    oids->push_back(oid);
+  }
+
+  marker = iter.get_cursor().to_str();
+  if (is_truncated)
+    *is_truncated = (iter != ioctx.nobjects_end());
+
+  return oids->size();
 }

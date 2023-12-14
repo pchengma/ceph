@@ -449,17 +449,6 @@ public:
 			"SchedReplica");
   }
 
-  void scrub_send_resources_granted(epoch_t queued, ThreadPool::TPHandle& handle)
-  {
-    forward_scrub_event(&ScrubPgIF::send_remotes_reserved, queued, "RemotesReserved");
-  }
-
-  void scrub_send_resources_denied(epoch_t queued, ThreadPool::TPHandle& handle)
-  {
-    forward_scrub_event(&ScrubPgIF::send_reservation_failure, queued,
-			"ReservationFailure");
-  }
-
   void scrub_send_scrub_resched(epoch_t queued, ThreadPool::TPHandle& handle)
   {
     forward_scrub_event(&ScrubPgIF::send_scrub_resched, queued, "InternalSchedScrub");
@@ -635,6 +624,8 @@ public:
 
   void on_activate(interval_set<snapid_t> snaps) override;
 
+  void on_replica_activate() override;
+
   void on_activate_committed() override;
 
   void on_active_actmap() override;
@@ -776,7 +767,7 @@ public:
 
   virtual void snap_trimmer(epoch_t epoch_queued) = 0;
   virtual void do_command(
-    const std::string_view& prefix,
+    std::string_view prefix,
     const cmdmap_t& cmdmap,
     const ceph::buffer::list& idata,
     std::function<void(int,const std::string&,ceph::buffer::list&)> on_finish) = 0;
@@ -1457,10 +1448,13 @@ public:
  */
 class PGLockWrapper {
  public:
-  explicit PGLockWrapper(PGRef locked_pg) : m_pg{locked_pg} {}
+  template <typename A_PG_REF>
+  explicit PGLockWrapper(A_PG_REF&& locked_pg)
+      : m_pg{std::forward<A_PG_REF>(locked_pg)}
+  {}
   PGRef pg() { return m_pg; }
   ~PGLockWrapper();
-  PGLockWrapper(PGLockWrapper&& rhs) : m_pg(std::move(rhs.m_pg)) {
+  PGLockWrapper(PGLockWrapper&& rhs) noexcept : m_pg(std::move(rhs.m_pg)) {
     rhs.m_pg = nullptr;
   }
   PGLockWrapper(const PGLockWrapper& rhs) = delete;

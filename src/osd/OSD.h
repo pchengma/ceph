@@ -504,12 +504,6 @@ public:
 
   void queue_scrub_after_repair(PG* pg, Scrub::scrub_prio_t with_priority);
 
-  /// queue the message (-> event) that all replicas have reserved scrub resources for us
-  void queue_for_scrub_granted(PG* pg, Scrub::scrub_prio_t with_priority);
-
-  /// queue the message (-> event) that some replicas denied our scrub resources request
-  void queue_for_scrub_denied(PG* pg, Scrub::scrub_prio_t with_priority);
-
   /// Signals either (a) the end of a sleep period, or (b) a recheck of the availability
   /// of the primary map being created by the backend.
   void queue_for_scrub_resched(PG* pg, Scrub::scrub_prio_t with_priority);
@@ -1673,7 +1667,7 @@ protected:
 
   void handle_osd_map(class MOSDMap *m);
   void _committed_osd_maps(epoch_t first, epoch_t last, class MOSDMap *m);
-  void trim_maps(epoch_t oldest, bool skip_maps);
+  void trim_maps(epoch_t oldest);
   void note_down_osd(int osd);
   void note_up_osd(int osd);
   friend struct C_OnMapCommit;

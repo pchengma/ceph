@@ -364,30 +364,18 @@ def is_device(dev):
         return TYPE in ['disk', 'mpath']
 
     # fallback to stat
-    return _stat_is_device(os.lstat(dev).st_mode)
+    return _stat_is_device(os.lstat(dev).st_mode) and not is_partition(dev)
 
 
-def is_partition(dev):
+def is_partition(dev: str) -> bool:
     """
     Boolean to determine if a given device is a partition, like /dev/sda1
     """
     if not os.path.exists(dev):
         return False
-    # use lsblk first, fall back to using stat
-    TYPE = lsblk(dev).get('TYPE')
-    if TYPE:
-        return TYPE == 'part'
 
-    # fallback to stat
-    stat_obj = os.stat(dev)
-    if _stat_is_device(stat_obj.st_mode):
-        return False
-
-    major = os.major(stat_obj.st_rdev)
-    minor = os.minor(stat_obj.st_rdev)
-    if os.path.exists('/sys/dev/block/%d:%d/partition' % (major, minor)):
-        return True
-    return False
+    partitions = get_partitions()
+    return dev.split("/")[-1] in partitions
 
 
 def is_ceph_rbd(dev):
@@ -814,7 +802,7 @@ def get_partitions(_sys_dev_block_path ='/sys/dev/block'):
     result = dict()
     for device in devices:
         device_path = os.path.join(_sys_dev_block_path, device)
-        is_partition = get_file_contents(os.path.join(device_path, 'partition')) == "1"
+        is_partition = int(get_file_contents(os.path.join(device_path, 'partition'), '0')) > 0
         if not is_partition:
             continue
 

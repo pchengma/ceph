@@ -306,6 +306,7 @@ void Server::dispatch(const cref_t<Message> &m)
 	return;
       }
       bool queue_replay = false;
+      dout(5) << "dispatch request in up:reconnect: " << *req << dendl;
       if (req->is_replay() || req->is_async()) {
 	dout(3) << "queuing replayed op" << dendl;
 	queue_replay = true;
@@ -324,10 +325,13 @@ void Server::dispatch(const cref_t<Message> &m)
 	// process completed request in clientreplay stage. The completed request
 	// might have created new file/directorie. This guarantees MDS sends a reply
 	// to client before other request modifies the new file/directorie.
-	if (session->have_completed_request(req->get_reqid().tid, NULL)) {
-	  dout(3) << "queuing completed op" << dendl;
+        bool r = session->have_completed_request(req->get_reqid().tid, NULL);
+	if (r) {
+	  dout(3) << __func__ << ": queuing completed op" << dendl;
 	  queue_replay = true;
-	}
+	} else {
+          dout(20) << __func__  << ": request not complete" << dendl;
+        }
 	// this request was created before the cap reconnect message, drop any embedded
 	// cap releases.
 	req->releases.clear();
@@ -785,6 +789,7 @@ void Server::handle_client_session(const cref_t<MClientSession> &m)
 	mds->locker->resume_stale_caps(session);
 	mds->sessionmap.touch_session(session);
       }
+      trim_completed_request_list(m->oldest_client_tid, session);
       auto reply = make_message<MClientSession>(CEPH_SESSION_RENEWCAPS, m->get_seq());
       mds->send_message_client(reply, session);
     } else {
@@ -2037,12 +2042,15 @@ void Server::journal_and_reply(MDRequestRef& mdr, CInode *in, CDentry *dn, LogEv
   mdr->committing = true;
   submit_mdlog_entry(le, fin, mdr, __func__);
   
-  if (mdr->client_request && mdr->client_request->is_queued_for_replay()) {
-    if (mds->queue_one_replay()) {
-      dout(10) << " queued next replay op" << dendl;
-    } else {
-      dout(10) << " journaled last replay op" << dendl;
-    }
+  if (mdr->is_queued_for_replay()) {
+
+    /* We want to queue the next replay op while waiting for the journaling, so
+     * do it now when the early (unsafe) replay is dispatched. Don't wait until
+     * this request is cleaned up in MDCache.cc.
+     */
+
+    mdr->set_queued_next_replay_op();
+    mds->queue_one_replay();
   } else if (mdr->did_early_reply)
     mds->locker->drop_rdlocks_for_early_reply(mdr.get());
   else
@@ -2350,15 +2358,12 @@ void Server::reply_client_request(MDRequestRef& mdr, const ref_t<MClientReply> &
     mds->send_message(reply, mdr->client_request->get_connection());
   }
 
-  if (req->is_queued_for_replay() &&
-      (mdr->has_completed || reply->get_result() < 0)) {
-    if (reply->get_result() < 0) {
-      int r = reply->get_result();
+  if (req->is_queued_for_replay()) {
+    if (int r = reply->get_result(); r < 0) {
       derr << "reply_client_request: failed to replay " << *req
-	   << " error " << r << " (" << cpp_strerror(r)  << ")" << dendl;
+           << " error " << r << " (" << cpp_strerror(r)  << ")" << dendl;
       mds->clog->warn() << "failed to replay " << req->get_reqid() << " error " << r;
     }
-    mds->queue_one_replay();
   }
 
   // clean up request
@@ -2448,6 +2453,35 @@ void Server::set_trace_dist(const ref_t<MClientReply> &reply,
   reply->set_trace(bl);
 }
 
+// trim completed_request list
+void Server::trim_completed_request_list(ceph_tid_t tid, Session *session)
+{
+  if (tid == UINT64_MAX || !session)
+    return;
+
+  dout(15) << " oldest_client_tid=" << tid << dendl;
+  if (session->trim_completed_requests(tid)) {
+    // Sessions 'completed_requests' was dirtied, mark it to be
+    // potentially flushed at segment expiry.
+    mdlog->get_current_segment()->touched_sessions.insert(session->info.inst.name);
+
+    if (session->get_num_trim_requests_warnings() > 0 &&
+        session->get_num_completed_requests() * 2 < g_conf()->mds_max_completed_requests)
+      session->reset_num_trim_requests_warnings();
+  } else {
+    if (session->get_num_completed_requests() >=
+        (g_conf()->mds_max_completed_requests << session->get_num_trim_requests_warnings())) {
+      session->inc_num_trim_requests_warnings();
+      CachedStackStringStream css;
+      *css << "client." << session->get_client() << " does not advance its oldest_client_tid ("
+         << tid << "), " << session->get_num_completed_requests()
+         << " completed requests recorded in session\n";
+      mds->clog->warn() << css->strv();
+      dout(20) << __func__ << " " << css->strv() << dendl;
+    }
+  }
+}
+
 void Server::handle_client_request(const cref_t<MClientRequest> &req)
 {
   dout(4) << "handle_client_request " << *req << dendl;
@@ -2529,36 +2563,16 @@ void Server::handle_client_request(const cref_t<MClientRequest> &req)
   }
 
   // trim completed_request list
-  if (req->get_oldest_client_tid() > 0) {
-    dout(15) << " oldest_client_tid=" << req->get_oldest_client_tid() << dendl;
-    ceph_assert(session);
-    if (session->trim_completed_requests(req->get_oldest_client_tid())) {
-      // Sessions 'completed_requests' was dirtied, mark it to be
-      // potentially flushed at segment expiry.
-      mdlog->get_current_segment()->touched_sessions.insert(session->info.inst.name);
-
-      if (session->get_num_trim_requests_warnings() > 0 &&
-	  session->get_num_completed_requests() * 2 < g_conf()->mds_max_completed_requests)
-	session->reset_num_trim_requests_warnings();
-    } else {
-      if (session->get_num_completed_requests() >=
-	  (g_conf()->mds_max_completed_requests << session->get_num_trim_requests_warnings())) {
-	session->inc_num_trim_requests_warnings();
-	CachedStackStringStream css;
-	*css << "client." << session->get_client() << " does not advance its oldest_client_tid ("
-	   << req->get_oldest_client_tid() << "), "
-	   << session->get_num_completed_requests()
-	   << " completed requests recorded in session\n";
-	mds->clog->warn() << css->strv();
-	dout(20) << __func__ << " " << css->strv() << dendl;
-      }
-    }
-  }
+  trim_completed_request_list(req->get_oldest_client_tid(), session);
 
   // register + dispatch
   MDRequestRef mdr = mdcache->request_start(req);
-  if (!mdr.get())
+  if (!mdr.get()) {
+    dout(5) << __func__ << ": possibly duplicate op " << *req << dendl;
+    if (req->is_queued_for_replay())
+      mds->queue_one_replay();
     return;
+  }
 
   if (session) {
     mdr->session = session;

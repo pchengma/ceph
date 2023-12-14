@@ -75,6 +75,7 @@ struct persistency_tracker {
 using queues_t = std::set<std::string>;
 using entries_persistency_tracker = ceph::unordered_map<std::string, persistency_tracker>;
 using queues_persistency_tracker = ceph::unordered_map<std::string, entries_persistency_tracker>;
+using rgw::persistent_topic_counters::CountersManager;
 
 // use mmap/mprotect to allocate 128k coroutine stacks
 auto make_stack_allocator() {
@@ -198,7 +199,7 @@ private:
   std::vector<std::string> entryProcessingResultString = {"Failure", "Successful", "Sleeping", "Expired", "Migrating"};
 
   // processing of a specific entry
-  // return whether processing was successfull (true) or not (false)
+  // return whether processing was successful (true) or not (false)
   EntryProcessingResult process_entry(const ConfigProxy& conf, persistency_tracker& entry_persistency_tracker,
                                       const cls_queue_entry& entry, yield_context yield) {
     event_entry_t event_entry;
@@ -313,7 +314,9 @@ private:
     spawn::spawn(io_context, [this, queue_name](yield_context yield) {
             cleanup_queue(queue_name, yield);
             }, make_stack_allocator());
-    
+
+    CountersManager queue_counters_container(queue_name, this->get_cct());
+
     while (true) {
       // if queue was empty the last time, sleep for idle timeout
       if (is_idle) {
@@ -521,6 +524,17 @@ private:
           }
         }
       }
+
+      // updating perfcounters with topic stats
+      uint64_t entries_size;
+      uint32_t entries_number;
+      const auto ret = cls_2pc_queue_get_topic_stats(rados_ioctx, queue_name, entries_number, entries_size);
+      if (ret < 0) {
+        ldpp_dout(this, 1) << "ERROR: topic stats for topic: " << queue_name << ". error: " << ret << dendl;
+      } else {
+        queue_counters_container.set(l_rgw_persistent_topic_len, entries_number);
+        queue_counters_container.set(l_rgw_persistent_topic_size, entries_size);
+      }
     }
   }
 
@@ -563,7 +577,7 @@ private:
 
       for (const auto& queue_name : queues) {
         // try to lock the queue to check if it is owned by this rgw
-        // or if ownershif needs to be taken
+        // or if ownership needs to be taken
         librados::ObjectWriteOperation op;
         op.assert_exists();
         rados::cls::lock::lock(&op, queue_name+"_lock", 
@@ -598,7 +612,7 @@ private:
           // start processing this queue
           spawn::spawn(io_context, [this, &queue_gc, &queue_gc_lock, queue_name](yield_context yield) {
             process_queue(queue_name, yield);
-            // if queue processing ended, it measn that the queue was removed or not owned anymore
+            // if queue processing ended, it means that the queue was removed or not owned anymore
             // mark it for deletion
             std::lock_guard lock_guard(queue_gc_lock);
             queue_gc.push_back(queue_name);
@@ -776,7 +790,7 @@ int remove_persistent_topic(const std::string& topic_name, optional_yield y) {
   return remove_persistent_topic(s_manager, s_manager->rados_store.getRados()->get_notif_pool_ctx(), topic_name, y);
 }
 
-rgw::sal::Object* get_object_with_atttributes(
+rgw::sal::Object* get_object_with_attributes(
   const reservation_t& res, rgw::sal::Object* obj) {
   // in case of copy obj, the tags and metadata are taken from source
   const auto src_obj = res.src_object ? res.src_object : obj;
@@ -806,7 +820,7 @@ static inline void filter_amz_meta(meta_map_t& dest, const meta_map_t& src) {
 static inline void metadata_from_attributes(
   reservation_t& res, rgw::sal::Object* obj) {
   auto& metadata = res.x_meta_map;
-  const auto src_obj = get_object_with_atttributes(res, obj);
+  const auto src_obj = get_object_with_attributes(res, obj);
   if (!src_obj) {
     return;
   }
@@ -824,7 +838,7 @@ static inline void metadata_from_attributes(
 
 static inline void tags_from_attributes(
   const reservation_t& res, rgw::sal::Object* obj, KeyMultiValueMap& tags) {
-  const auto src_obj = get_object_with_atttributes(res, obj);
+  const auto src_obj = get_object_with_attributes(res, obj);
   if (!src_obj) {
     return;
   }
@@ -859,8 +873,7 @@ static inline void populate_event(reservation_t& res,
   event.x_amz_id_2 = res.store->getRados()->host_id; // RGW on which the change was made
   // configurationId is filled from notification configuration
   event.bucket_name = res.bucket->get_name();
-  event.bucket_ownerIdentity = res.bucket->get_owner() ?
-    res.bucket->get_owner()->get_id().id : res.bucket->get_info().owner.id;
+  event.bucket_ownerIdentity = res.bucket->get_owner().id;
   const auto region = res.store->get_zone()->get_zonegroup().get_api_name();
   rgw::ARN bucket_arn(res.bucket->get_key());
   bucket_arn.region = region; 

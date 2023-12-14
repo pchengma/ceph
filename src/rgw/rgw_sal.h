@@ -15,18 +15,22 @@
 
 #pragma once
 
+#include <boost/intrusive_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ref_counter.hpp>
+
 #include "common/tracer.h"
 #include "rgw_sal_fwd.h"
 #include "rgw_lua.h"
-#include "rgw_user.h"
 #include "rgw_notify_event_type.h"
 #include "rgw_req_context.h"
-#include "rgw_datalog_notify.h"
 #include "include/random.h"
+
+// FIXME: following subclass dependencies
+#include "driver/rados/rgw_user.h"
+#include "driver/rados/rgw_datalog_notify.h"
 
 struct RGWBucketEnt;
 class RGWRESTMgr;
-class RGWAccessListFilter;
 class RGWLC;
 struct rgw_user_bucket;
 class RGWUsageBatch;
@@ -39,6 +43,7 @@ typedef std::shared_ptr<RGWSyncModuleInstance> RGWSyncModuleInstanceRef;
 class RGWCompressionInfo;
 struct rgw_pubsub_topics;
 struct rgw_pubsub_bucket_topics;
+class RGWZonePlacementInfo;
 
 
 using RGWBucketListNameFilter = std::function<bool (const std::string&)>;
@@ -76,32 +81,6 @@ struct RGWClusterStat {
   uint64_t kb_avail;
   /// number of objects
   uint64_t num_objects;
-};
-
-class RGWGetBucketStats_CB : public RefCountedObject {
-protected:
-  rgw_bucket bucket;
-  std::map<RGWObjCategory, RGWStorageStats>* stats;
-public:
-  explicit RGWGetBucketStats_CB(const rgw_bucket& _bucket) : bucket(_bucket), stats(NULL) {}
-  ~RGWGetBucketStats_CB() override {}
-  virtual void handle_response(int r) = 0;
-  virtual void set_response(std::map<RGWObjCategory, RGWStorageStats>* _stats) {
-    stats = _stats;
-  }
-};
-
-class RGWGetUserStats_CB : public RefCountedObject {
-protected:
-  rgw_user user;
-  RGWStorageStats stats;
-public:
-  explicit RGWGetUserStats_CB(const rgw_user& _user) : user(_user) {}
-  ~RGWGetUserStats_CB() override {}
-  virtual void handle_response(int r) = 0;
-  virtual void set_response(RGWStorageStats& _stats) {
-    stats = _stats;
-  }
 };
 
 struct RGWObjState {
@@ -290,21 +269,13 @@ class Driver {
      * there is a Bucket, otherwise use the get_object() in the Bucket class. */
     virtual std::unique_ptr<Object> get_object(const rgw_obj_key& k) = 0;
     /** Get a Bucket by info.  Does not query the driver, just uses the give bucket info. */
-    virtual int get_bucket(User* u, const RGWBucketInfo& i, std::unique_ptr<Bucket>* bucket) = 0;
-    /** Lookup a Bucket by key.  Queries driver for bucket info. */
-    virtual int get_bucket(const DoutPrefixProvider* dpp, User* u, const rgw_bucket& b, std::unique_ptr<Bucket>* bucket, optional_yield y) = 0;
-    /** Lookup a Bucket by name.  Queries driver for bucket info. */
-    virtual int get_bucket(const DoutPrefixProvider* dpp, User* u, const std::string& tenant, const std::string& name, std::unique_ptr<Bucket>* bucket, optional_yield y) = 0;
+    virtual std::unique_ptr<Bucket> get_bucket(const RGWBucketInfo& i) = 0;
+    /** Load a Bucket by key.  Queries driver for bucket info.  On -ENOENT, the
+     * bucket must still be allocated to support bucket->create(). */
+    virtual int load_bucket(const DoutPrefixProvider* dpp, const rgw_bucket& b,
+                            std::unique_ptr<Bucket>* bucket, optional_yield y) = 0;
     /** For multisite, this driver is the zone's master */
     virtual bool is_meta_master() = 0;
-    /** For multisite, forward an OP to the zone's master */
-    virtual int forward_request_to_master(const DoutPrefixProvider *dpp, User* user, obj_version* objv,
-					  bufferlist& in_data, JSONParser* jp, req_info& info,
-					  optional_yield y) = 0;
-    virtual int forward_iam_request_to_master(const DoutPrefixProvider *dpp, const RGWAccessKey& key, obj_version* objv,
-					     bufferlist& in_data,
-					     RGWXMLDecoder::XMLParser* parser, req_info& info,
-					     optional_yield y) = 0;
     /** Get zone info for this driver */
     virtual Zone* get_zone() = 0;
     /** Get a unique ID specific to this zone. */
@@ -454,6 +425,14 @@ class Driver {
     virtual void register_admin_apis(RGWRESTMgr* mgr) = 0;
 };
 
+
+/// \brief Ref-counted callback object for User/Bucket read_stats_async().
+class ReadStatsCB : public boost::intrusive_ref_counter<ReadStatsCB> {
+ public:
+  virtual ~ReadStatsCB() {}
+  virtual void handle_response(int r, const RGWStorageStats& stats) = 0;
+};
+
 /**
  * @brief A list of buckets
  *
@@ -487,23 +466,6 @@ class User {
 			     const std::string& marker, const std::string& end_marker,
 			     uint64_t max, bool need_stats, BucketList& buckets,
 			     optional_yield y) = 0;
-    /** Create a new bucket owned by this user.  Creates in the backing store, not just the instantiation. */
-    virtual int create_bucket(const DoutPrefixProvider* dpp,
-                            const rgw_bucket& b,
-                            const std::string& zonegroup_id,
-                            rgw_placement_rule& placement_rule,
-                            std::string& swift_ver_location,
-                            const RGWQuotaInfo* pquota_info,
-                            const RGWAccessControlPolicy& policy,
-			    Attrs& attrs,
-                            RGWBucketInfo& info,
-                            obj_version& ep_objv,
-			    bool exclusive,
-			    bool obj_lock_enabled,
-			    bool* existed,
-			    req_info& req_info,
-			    std::unique_ptr<Bucket>* bucket,
-			    optional_yield y) = 0;
 
     /** Get the display name for this User */
     virtual std::string& get_display_name() = 0;
@@ -552,7 +514,8 @@ class User {
 			   ceph::real_time* last_stats_sync = nullptr,
 			   ceph::real_time* last_stats_update = nullptr) = 0;
     /** Read the User stats from the backing Store, asynchronous */
-    virtual int read_stats_async(const DoutPrefixProvider *dpp, RGWGetUserStats_CB* cb) = 0;
+    virtual int read_stats_async(const DoutPrefixProvider *dpp,
+                                 boost::intrusive_ptr<ReadStatsCB> cb) = 0;
     /** Flush accumulated stat changes for this User to the backing store */
     virtual int complete_flush_stats(const DoutPrefixProvider *dpp, optional_yield y) = 0;
     /** Read detailed usage stats for this User from the backing store */
@@ -618,7 +581,7 @@ class Bucket {
       rgw_obj_key end_marker;
       std::string ns;
       bool enforce_ns{true};
-      RGWAccessListFilter* access_list_filter{nullptr};
+      rgw::AccessListFilter access_list_filter{};
       RGWBucketListNameFilter force_check_filter;
       bool list_versions{false};
       bool allow_unordered{false};
@@ -660,19 +623,38 @@ class Bucket {
     /** Set the cached attributes on this bucket */
     virtual int set_attrs(Attrs a) = 0;
     /** Remove this bucket from the backing store */
-    virtual int remove_bucket(const DoutPrefixProvider* dpp, bool delete_children, bool forward_to_master, req_info* req_info, optional_yield y) = 0;
+    virtual int remove(const DoutPrefixProvider* dpp, bool delete_children, optional_yield y) = 0;
     /** Remove this bucket, bypassing garbage collection.  May be removed */
-    virtual int remove_bucket_bypass_gc(int concurrent_max, bool
-					keep_index_consistent,
-					optional_yield y, const
-					DoutPrefixProvider *dpp) = 0;
+    virtual int remove_bypass_gc(int concurrent_max, bool
+				 keep_index_consistent,
+				 optional_yield y, const
+				 DoutPrefixProvider *dpp) = 0;
     /** Get then ACL for this bucket */
     virtual RGWAccessControlPolicy& get_acl(void) = 0;
     /** Set the ACL for this bucket */
     virtual int set_acl(const DoutPrefixProvider* dpp, RGWAccessControlPolicy& acl, optional_yield y) = 0;
 
-    // XXXX hack
-    virtual void set_owner(rgw::sal::User* _owner) = 0;
+    /// Input parameters for create().
+    struct CreateParams {
+      rgw_user owner;
+      std::string zonegroup_id;
+      rgw_placement_rule placement_rule;
+      // zone placement is optional on buckets created for another zonegroup
+      const RGWZonePlacementInfo* zone_placement;
+      RGWAccessControlPolicy policy;
+      Attrs attrs;
+      bool obj_lock_enabled = false;
+      std::string marker;
+      std::string bucket_id;
+      std::optional<std::string> swift_ver_location;
+      std::optional<RGWQuotaInfo> quota;
+      std::optional<ceph::real_time> creation_time;
+    };
+
+    /// Create this bucket in the backing store.
+    virtual int create(const DoutPrefixProvider* dpp,
+                       const CreateParams& params,
+                       optional_yield y) = 0;
 
     /** Load this bucket from the backing store.  Requires the key to be set, fills other fields. */
     virtual int load_bucket(const DoutPrefixProvider* dpp, optional_yield y) = 0;
@@ -686,7 +668,7 @@ class Bucket {
     /** Read the bucket stats from the backing Store, asynchronous */
     virtual int read_stats_async(const DoutPrefixProvider *dpp,
 				 const bucket_index_layout_generation& idx_layout,
-				 int shard_id, RGWGetBucketStats_CB* ctx) = 0;
+				 int shard_id, boost::intrusive_ptr<ReadStatsCB> cb) = 0;
     /** Sync this bucket's stats to the owning user's stats in the backing store */
     virtual int sync_user_stats(const DoutPrefixProvider *dpp, optional_yield y,
                                 RGWBucketEnt* optional_ent) = 0;
@@ -695,18 +677,14 @@ class Bucket {
                                     uint64_t num_objs, optional_yield y) = 0;
     /** Change the owner of this bucket in the backing store.  Current owner must be set.  Does not
      * change ownership of the objects in the bucket. */
-    virtual int chown(const DoutPrefixProvider* dpp, User& new_user, optional_yield y) = 0;
+    virtual int chown(const DoutPrefixProvider* dpp, const rgw_user& new_owner, optional_yield y) = 0;
     /** Store the cached bucket info into the backing store */
     virtual int put_info(const DoutPrefixProvider* dpp, bool exclusive, ceph::real_time mtime, optional_yield y) = 0;
-    /** Check to see if the given user is the owner of this bucket */
-    virtual bool is_owner(User* user) = 0;
     /** Get the owner of this bucket */
-    virtual User* get_owner(void) = 0;
-    /** Get the owner of this bucket in the form of an ACLOwner object */
-    virtual ACLOwner get_acl_owner(void) = 0;
+    virtual const rgw_user& get_owner() const = 0;
     /** Check in the backing store if this bucket is empty */
     virtual int check_empty(const DoutPrefixProvider* dpp, optional_yield y) = 0;
-    /** Chec k if the given size fits within the quota */
+    /** Check if the given size fits within the quota */
     virtual int check_quota(const DoutPrefixProvider *dpp, RGWQuota& quota, uint64_t obj_size, optional_yield y, bool check_size_only = false) = 0;
     /** Set the attributes in attrs, leaving any other existing attrs set, and
      * write them to the backing store; a merge operation */
@@ -850,6 +828,12 @@ class Object {
         const char* if_nomatch{nullptr};
         ceph::real_time* lastmod{nullptr};
         rgw_obj* target_obj{nullptr}; // XXX dang remove?
+
+        /// If non-null, read data/attributes from the given multipart part.
+        int* part_num{nullptr};
+        /// If part_num is specified and the object is multipart, the total
+        /// number of multipart parts is assigned to this output parameter.
+        std::optional<int> parts_count;
       } params;
 
       virtual ~ReadOp() = default;
@@ -1426,8 +1410,6 @@ public:
   virtual const std::string& get_name() const = 0;
   /** Determine if two zonegroups are the same */
   virtual int equals(const std::string& other_zonegroup) const = 0;
-  /** Get the endpoint from zonegroup, or from master zone if not set */
-  virtual const std::string& get_endpoint() const = 0;
   /** Check if a placement target (by name) exists in this zonegroup */
   virtual bool placement_target_exists(std::string& target) const = 0;
   /** Check if this is the master zonegroup */

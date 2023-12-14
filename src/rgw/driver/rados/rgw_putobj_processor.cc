@@ -126,8 +126,8 @@ void RadosWriter::add_write_hint(librados::ObjectWriteOperation& op) {
 
 int RadosWriter::set_stripe_obj(const rgw_raw_obj& raw_obj)
 {
-  stripe_obj = store->svc.rados->obj(raw_obj);
-  return stripe_obj.open(dpp);
+  return rgw_get_rados_ref(dpp, store->get_rados_handle(), raw_obj,
+			   &stripe_obj);
 }
 
 int RadosWriter::process(bufferlist&& bl, uint64_t offset)
@@ -145,8 +145,9 @@ int RadosWriter::process(bufferlist&& bl, uint64_t offset)
     op.write(offset, data);
   }
   constexpr uint64_t id = 0; // unused
-  auto& ref = stripe_obj.get_ref();
-  auto c = aio->get(ref.obj, Aio::librados_op(ref.pool.ioctx(), std::move(op), y), cost, id);
+  auto c = aio->get(stripe_obj.obj, Aio::librados_op(stripe_obj.ioctx,
+						     std::move(op), y),
+		    cost, id);
   return process_completed(c, &written);
 }
 
@@ -160,8 +161,9 @@ int RadosWriter::write_exclusive(const bufferlist& data)
   op.write_full(data);
 
   constexpr uint64_t id = 0; // unused
-  auto& ref = stripe_obj.get_ref();
-  auto c = aio->get(ref.obj, Aio::librados_op(ref.pool.ioctx(), std::move(op), y), cost, id);
+  auto c = aio->get(stripe_obj.obj, Aio::librados_op(stripe_obj.ioctx,
+						     std::move(op), y),
+		    cost, id);
   auto d = aio->drain();
   c.splice(c.end(), d);
   return process_completed(c, &written);
@@ -189,7 +191,7 @@ RadosWriter::~RadosWriter()
    * Such race condition is caused by the fact that the multipart object is the gatekeeper of a multipart
    * upload, when it is deleted, a second upload would start with the same suffix("2/"), therefore, objects
    * written by the second upload may be deleted by the first upload.
-   * details is describled on #11749
+   * details is described on #11749
    *
    * The above comment still stands, but instead of searching for a specific object in the multipart
    * namespace, we just make sure that we remove the object that is marked as the head object after
@@ -553,7 +555,7 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
 
   librados::ObjectWriteOperation op;
   cls_rgw_mp_upload_part_info_update(op, p, info);
-  r = rgw_rados_operate(rctx.dpp, meta_obj_ref.pool.ioctx(), meta_obj_ref.obj.oid, &op, rctx.y);
+  r = rgw_rados_operate(rctx.dpp, meta_obj_ref.ioctx, meta_obj_ref.obj.oid, &op, rctx.y);
   ldpp_dout(rctx.dpp, 20) << "Update meta: " << meta_obj_ref.obj.oid << " part " << p << " prefix " << info.manifest.get_prefix() << " return " << r << dendl;
 
   if (r == -EOPNOTSUPP) {
@@ -567,7 +569,7 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
     op = librados::ObjectWriteOperation{};
     op.assert_exists(); // detect races with abort
     op.omap_set(m);
-    r = rgw_rados_operate(rctx.dpp, meta_obj_ref.pool.ioctx(), meta_obj_ref.obj.oid, &op, rctx.y);
+    r = rgw_rados_operate(rctx.dpp, meta_obj_ref.ioctx, meta_obj_ref.obj.oid, &op, rctx.y);
   }
   if (r < 0) {
     return r == -ENOENT ? -ERR_NO_SUCH_UPLOAD : r;
@@ -595,9 +597,10 @@ int AppendObjectProcessor::process_first_chunk(bufferlist &&data, rgw::sal::Data
 
 int AppendObjectProcessor::prepare(optional_yield y)
 {
-  RGWObjState *astate;
+  RGWObjState *astate = nullptr;
+  constexpr bool follow_olh = true;
   int r = store->get_obj_state(dpp, &obj_ctx, bucket_info, head_obj,
-                               &astate, &cur_manifest, y);
+                               &astate, &cur_manifest, follow_olh, y);
   if (r < 0) {
     return r;
   }

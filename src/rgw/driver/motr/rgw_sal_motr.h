@@ -70,11 +70,11 @@ protected:
   // of RGW instances under heavy use. If you would like to turn off cache expiry,
   // set this value to zero.
   //
-  // Currently POC hasn't implemented the watch-notify menchanism yet. So the
+  // Currently POC hasn't implemented the watch-notify mechanism yet. So the
   // current implementation is similar to cortx-s3server which is based on expiry
   // time. TODO: see comments on distribute_cache).
   //
-  // Beaware: Motr object data is not cached in current POC as RGW!
+  // Beware: Motr object data is not cached in current POC as RGW!
   // RGW caches the first chunk (4MB by default).
   ObjectCache cache;
 
@@ -222,8 +222,8 @@ class MotrUser : public StoreUser {
     virtual int create_bucket(const DoutPrefixProvider* dpp,
                             const rgw_bucket& b,
                             const std::string& zonegroup_id,
-                            rgw_placement_rule& placement_rule,
-                            std::string& swift_ver_location,
+                            const rgw_placement_rule& placement_rule,
+                            const std::string& swift_ver_location,
                             const RGWQuotaInfo* pquota_info,
                             const RGWAccessControlPolicy& policy,
                             Attrs& attrs,
@@ -241,7 +241,7 @@ class MotrUser : public StoreUser {
         optional_yield y, RGWStorageStats* stats,
         ceph::real_time *last_stats_sync = nullptr,
         ceph::real_time *last_stats_update = nullptr) override;
-    virtual int read_stats_async(const DoutPrefixProvider *dpp, RGWGetUserStats_CB* cb) override;
+    virtual int read_stats_async(const DoutPrefixProvider *dpp, boost::intrusive_ptr<ReadStatsCB> cb) override;
     virtual int complete_flush_stats(const DoutPrefixProvider *dpp, optional_yield y) override;
     virtual int read_usage(const DoutPrefixProvider *dpp, uint64_t start_epoch, uint64_t end_epoch, uint32_t max_entries,
         bool* is_truncated, RGWUsageIter& usage_iter,
@@ -352,8 +352,8 @@ class MotrBucket : public StoreBucket {
 
     virtual std::unique_ptr<Object> get_object(const rgw_obj_key& k) override;
     virtual int list(const DoutPrefixProvider *dpp, ListParams&, int, ListResults&, optional_yield y) override;
-    virtual int remove_bucket(const DoutPrefixProvider *dpp, bool delete_children, bool forward_to_master, req_info* req_info, optional_yield y) override;
-    virtual int remove_bucket_bypass_gc(int concurrent_max, bool
+    virtual int remove(const DoutPrefixProvider *dpp, bool delete_children, optional_yield y) override;
+    virtual int remove_bypass_gc(int concurrent_max, bool
         keep_index_consistent,
         optional_yield y, const
         DoutPrefixProvider *dpp) override;
@@ -372,7 +372,7 @@ class MotrBucket : public StoreBucket {
         bool *syncstopped = nullptr) override;
     virtual int read_stats_async(const DoutPrefixProvider *dpp,
                                  const bucket_index_layout_generation& idx_layout,
-                                 int shard_id, RGWGetBucketStats_CB* ctx) override;
+                                 int shard_id, boost::intrusive_ptr<ReadStatsCB> ctx) override;
     int sync_user_stats(const DoutPrefixProvider *dpp, optional_yield y,
                         RGWBucketEnt* ent) override;
     int check_bucket_shards(const DoutPrefixProvider *dpp,
@@ -440,8 +440,6 @@ public:
   virtual int equals(const std::string& other_zonegroup) const override {
     return group.equals(other_zonegroup);
   };
-  /** Get the endpoint from zonegroup, or from master zone if not set */
-  virtual const std::string& get_endpoint() const override;
   virtual bool placement_target_exists(std::string& target) const override;
   virtual bool is_master_zonegroup() const override {
     return group.is_master_zonegroup();
@@ -879,7 +877,7 @@ public:
 // object part index and for each part an entry is created in extended index.
 // The entry for the object is created in bucket (object list) index. The part
 // index is deleted and an entry removed from bucket_nnn_multipart_index. Like
-// bucket multipart index, bucket part extened metadata index is created during
+// bucket multipart index, bucket part extend metadata index is created during
 // bucket creation.
 //
 // The extended metadata index is used mainly due to fault tolerant
@@ -992,17 +990,10 @@ class MotrStore : public StoreDriver {
     virtual int get_user_by_email(const DoutPrefixProvider *dpp, const std::string& email, optional_yield y, std::unique_ptr<User>* user) override;
     virtual int get_user_by_swift(const DoutPrefixProvider *dpp, const std::string& user_str, optional_yield y, std::unique_ptr<User>* user) override;
     virtual std::unique_ptr<Object> get_object(const rgw_obj_key& k) override;
-    virtual int get_bucket(const DoutPrefixProvider *dpp, User* u, const rgw_bucket& b, std::unique_ptr<Bucket>* bucket, optional_yield y) override;
-    virtual int get_bucket(User* u, const RGWBucketInfo& i, std::unique_ptr<Bucket>* bucket) override;
-    virtual int get_bucket(const DoutPrefixProvider *dpp, User* u, const std::string& tenant, const std::string&name, std::unique_ptr<Bucket>* bucket, optional_yield y) override;
+    std::unique_ptr<Bucket> get_bucket(User* u, const RGWBucketInfo& i) override;
+    int load_bucket(const DoutPrefixProvider *dpp, User* u, const rgw_bucket& b,
+                    std::unique_ptr<Bucket>* bucket, optional_yield y) override;
     virtual bool is_meta_master() override;
-    virtual int forward_request_to_master(const DoutPrefixProvider *dpp, User* user, obj_version* objv,
-        bufferlist& in_data, JSONParser *jp, req_info& info,
-        optional_yield y) override;
-    virtual int forward_iam_request_to_master(const DoutPrefixProvider *dpp, const RGWAccessKey& key, obj_version* objv,
-					     bufferlist& in_data,
-					     RGWXMLDecoder::XMLParser* parser, req_info& info,
-					     optional_yield y) override;
     virtual Zone* get_zone() { return &zone; }
     virtual std::string zone_unique_id(uint64_t unique_num) override;
     virtual std::string zone_unique_trans_id(const uint64_t unique_num) override;

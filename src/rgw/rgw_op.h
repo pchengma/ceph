@@ -66,24 +66,21 @@ class RGWRados;
 class RGWMultiCompleteUpload;
 class RGWPutObj_Torrent;
 
+namespace rgw::auth::registry { class StrategyRegistry; }
 
-namespace rgw {
-namespace auth {
-namespace registry {
-
-class StrategyRegistry;
-
-}
-}
-}
+int rgw_forward_request_to_master(const DoutPrefixProvider* dpp,
+                                  const rgw::SiteConfig& site,
+                                  const rgw_user& uid,
+                                  bufferlist* indata, JSONParser* jp,
+                                  req_info& req, optional_yield y);
 
 int rgw_op_get_bucket_policy_from_attr(const DoutPrefixProvider *dpp,
                                        CephContext *cct,
-				       rgw::sal::Driver* driver,
-                                       RGWBucketInfo& bucket_info,
+                                       rgw::sal::Driver* driver,
+                                       const rgw_user& bucket_owner,
                                        std::map<std::string, bufferlist>& bucket_attrs,
-                                       RGWAccessControlPolicy *policy,
-				       optional_yield y);
+                                       RGWAccessControlPolicy& policy,
+                                       optional_yield y);
 
 class RGWHandler {
 protected:
@@ -374,6 +371,11 @@ protected:
   bool get_retention;
   bool get_legal_hold;
 
+  // optional partNumber param for s3
+  std::optional<int> multipart_part_num;
+  // PartsCount response when partNumber is specified
+  std::optional<int> multipart_parts_count;
+
   int init_common();
 public:
   RGWGetObj() {
@@ -418,7 +420,7 @@ public:
   int read_user_manifest_part(
     rgw::sal::Bucket* bucket,
     const rgw_bucket_dir_entry& ent,
-    RGWAccessControlPolicy * const bucket_acl,
+    const RGWAccessControlPolicy& bucket_acl,
     const boost::optional<rgw::IAM::Policy>& bucket_policy,
     const off_t start_ofs,
     const off_t end_ofs,
@@ -1076,37 +1078,26 @@ public:
 };
 
 class RGWCreateBucket : public RGWOp {
-protected:
+ protected:
+  rgw::sal::Bucket::CreateParams createparams;
   RGWAccessControlPolicy policy;
   std::string location_constraint;
-  rgw_placement_rule placement_rule;
-  RGWBucketInfo info;
-  obj_version ep_objv;
-  bool has_cors;
-  bool relaxed_region_enforcement;
-  bool obj_lock_enabled;
+  bool has_cors = false;
+  bool relaxed_region_enforcement = false;
   RGWCORSConfiguration cors_config;
-  boost::optional<std::string> swift_ver_location;
-  std::map<std::string, buffer::list> attrs;
   std::set<std::string> rmattr_names;
-
-  bufferlist in_data;
 
   virtual bool need_metadata_upload() const { return false; }
 
-public:
-  RGWCreateBucket() : has_cors(false), relaxed_region_enforcement(false), obj_lock_enabled(false) {}
-
+ public:
   void emplace_attr(std::string&& key, buffer::list&& bl) {
-    attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
+    createparams.attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
   }
-
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
   void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
     RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
     relaxed_region_enforcement =
 	s->cct->_conf.get_val<bool>("rgw_relaxed_region_enforcement");
   }
@@ -1257,11 +1248,6 @@ public:
     delete obj_legal_hold;
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
-
   virtual int init_processing(optional_yield y) override;
 
   void emplace_attr(std::string&& key, buffer::list&& bl) {
@@ -1336,11 +1322,6 @@ public:
     attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
-
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1375,10 +1356,6 @@ public:
       has_policy(false) {
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
   int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override { }
@@ -1403,7 +1380,7 @@ protected:
   RGWAccessControlPolicy policy;
   RGWCORSConfiguration cors_config;
   rgw_placement_rule placement_rule;
-  boost::optional<std::string> swift_ver_location;
+  std::optional<std::string> swift_ver_location;
 
 public:
   RGWPutMetadataBucket()
@@ -1412,11 +1389,6 @@ public:
 
   void emplace_attr(std::string&& key, buffer::list&& bl) {
     attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
-  }
-
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
   }
 
   int verify_permission(optional_yield y) override;
@@ -1441,10 +1413,6 @@ public:
     : dlo_manifest(NULL)
   {}
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1568,10 +1536,6 @@ public:
     attrs.emplace(std::move(key), std::move(bl));
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    dest_policy.set_ctx(s->cct);
-  }
   int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
@@ -1612,7 +1576,6 @@ public:
 class RGWPutACLs : public RGWOp {
 protected:
   bufferlist data;
-  ACLOwner owner;
 
 public:
   RGWPutACLs() {}
@@ -1622,7 +1585,8 @@ public:
   void pre_exec() override;
   void execute(optional_yield y) override;
 
-  virtual int get_policy_from_state(rgw::sal::Driver* driver, req_state *s, std::stringstream& ss) { return 0; }
+  virtual int get_policy_from_state(const ACLOwner& owner,
+                                    RGWAccessControlPolicy& p) { return 0; }
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "put_acls"; }
@@ -1672,7 +1636,6 @@ public:
   void pre_exec() override;
   void execute(optional_yield y) override;
 
-//  virtual int get_policy_from_state(RGWRados* driver, req_state *s, std::stringstream& ss) { return 0; }
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "put_lifecycle"; }
@@ -1852,10 +1815,6 @@ protected:
 public:
   RGWInitMultipart() {}
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1927,10 +1886,6 @@ public:
     truncated = false;
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy = RGWAccessControlPolicy(s->cct);
-  }
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -2206,7 +2161,7 @@ inline int rgw_get_request_metadata(const DoutPrefixProvider *dpp,
         return -ENAMETOOLONG;
       }
 
-      /* Similar remarks apply to the check for value size. We're veryfing
+      /* Similar remarks apply to the check for value size. We're verifying
        * it early at the RGW's side as it's being claimed in /info. */
       const auto max_attr_size = cct->_conf->rgw_max_attr_size;
       if (max_attr_size && xattr.length() > max_attr_size) {

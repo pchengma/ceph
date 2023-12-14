@@ -416,11 +416,18 @@ public:
     return is_mutable() || state == extent_state_t::EXIST_CLEAN;
   }
 
-  /// Returns true if extent is stable and shared among transactions
-  bool is_stable() const {
+  /// Returns true if extent is stable, written and shared among transactions
+  bool is_stable_written() const {
     return state == extent_state_t::CLEAN_PENDING ||
       state == extent_state_t::CLEAN ||
       state == extent_state_t::DIRTY;
+  }
+
+  /// Returns true if extent is stable and shared among transactions
+  bool is_stable() const {
+    return is_stable_written() ||
+           (is_mutation_pending() &&
+            is_pending_io());
   }
 
   /// Returns true if extent has a pending delta
@@ -595,7 +602,7 @@ public:
 
   // a rewrite extent has an invalid prior_instance,
   // and a mutation_pending extent has a valid prior_instance
-  CachedExtentRef get_prior_instance() {
+  CachedExtentRef get_prior_instance() const {
     return prior_instance;
   }
 
@@ -1044,6 +1051,12 @@ public:
   void link_child(ChildableCachedExtent *c) {
     ceph_assert(child_pos);
     child_pos->link_child(c);
+  }
+
+  virtual bool is_stable() const = 0;
+  virtual bool is_clone() const = 0;
+  bool is_zero_reserved() const {
+    return !get_val().is_real();
   }
 
   virtual ~PhysicalNodeMapping() {}

@@ -359,7 +359,7 @@ void PG::clear_primary_state()
   release_pg_backoffs();
 
   if (m_scrubber) {
-    m_scrubber->discard_replica_reservations();
+    m_scrubber->on_new_interval();
   }
   scrub_after_recovery = false;
 
@@ -1490,7 +1490,7 @@ std::optional<requested_scrub_t> PG::validate_initiated_scrub(
 
   upd_flags.time_for_deep = time_for_deep;
   upd_flags.deep_scrub_on_error = false;
-  upd_flags.auto_repair = false;  // will only be considered for periodic scrubs
+  upd_flags.auto_repair = false;
 
   if (upd_flags.must_deep_scrub) {
     upd_flags.calculated_to_deep = true;
@@ -1503,6 +1503,25 @@ std::optional<requested_scrub_t> PG::validate_initiated_scrub(
 	"osd.{} pg {} Regular scrub request, deep-scrub details will be lost",
 	osd->whoami,
 	info.pgid);
+    }
+  }
+
+  if (try_to_auto_repair) {
+    // for shallow scrubs: rescrub if errors found
+    // for deep: turn 'auto-repair' on
+    if (upd_flags.calculated_to_deep) {
+      dout(10) << fmt::format(
+                      "{}: performing an auto-repair deep scrub",
+                      __func__)
+               << dendl;
+      upd_flags.auto_repair = true;
+    } else {
+      dout(10) << fmt::format(
+		      "{}: will perform an auto-repair deep scrub if errors "
+		      "are found",
+		      __func__)
+	       << dendl;
+      upd_flags.deep_scrub_on_error = true;
     }
   }
 
@@ -1708,7 +1727,8 @@ void PG::on_scrub_schedule_input_change()
 void PG::scrub_requested(scrub_level_t scrub_level, scrub_type_t scrub_type)
 {
   ceph_assert(m_scrubber);
-  m_scrubber->scrub_requested(scrub_level, scrub_type, m_planned_scrub);
+  std::ignore =
+      m_scrubber->scrub_requested(scrub_level, scrub_type, m_planned_scrub);
 }
 
 void PG::clear_ready_to_merge() {
@@ -1820,6 +1840,11 @@ void PG::on_activate(interval_set<snapid_t> snaps)
   release_pg_backoffs();
   projected_last_update = info.last_update;
   m_scrubber->on_pg_activate(m_planned_scrub);
+}
+
+void PG::on_replica_activate()
+{
+  m_scrubber->on_replica_activate();
 }
 
 void PG::on_active_exit()

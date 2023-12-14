@@ -7254,7 +7254,9 @@ void Client::renew_caps(MetaSession *session)
   ldout(cct, 10) << "renew_caps mds." << session->mds_num << dendl;
   session->last_cap_renew_request = ceph_clock_now();
   uint64_t seq = ++session->cap_renew_seq;
-  session->con->send_message2(make_message<MClientSession>(CEPH_SESSION_REQUEST_RENEWCAPS, seq));
+  auto m = make_message<MClientSession>(CEPH_SESSION_REQUEST_RENEWCAPS, seq);
+  m->oldest_client_tid = oldest_tid;
+  session->con->send_message2(std::move(m));
 }
 
 
@@ -8016,6 +8018,20 @@ int Client::_getvxattr(
   return res;
 }
 
+bool Client::make_absolute_path_string(Inode *in, std::string& path)
+{
+  if (!metadata.count("root") || !in)
+    return false;
+
+  path = metadata["root"].data();
+  if (!in->make_path_string(path)) {
+    path.clear();
+    return false;
+  }
+
+  return true;
+}
+
 int Client::_do_setattr(Inode *in, struct ceph_statx *stx, int mask,
 			const UserPerm& perms, InodeRef *inp,
 			std::vector<uint8_t>* aux)
@@ -8058,8 +8074,7 @@ int Client::_do_setattr(Inode *in, struct ceph_statx *stx, int mask,
   int res;
   {
     std::string path;
-    res = in->make_path_string(path);
-    if (res) {
+    if (make_absolute_path_string(in, path)) {
       ldout(cct, 20) << " absolute path: " << path << dendl;
       if (path.length())
         path = path.substr(1);    // drop leading /
@@ -10288,8 +10303,7 @@ int Client::_open(Inode *in, int flags, mode_t mode, Fh **fhp,
     }
 
     std::string path;
-    int result = in->make_path_string(path);
-    if (result) {
+    if (make_absolute_path_string(in, path)) {
       ldout(cct, 20) << __func__ << " absolute path: " << path << dendl;
       if (path.length())
         path = path.substr(1);    // drop leading /
@@ -13716,7 +13730,9 @@ int Client::_getxattr(Inode *in, const char *name, void *value, size_t size,
 
   if (!strncmp(name, "ceph.", 5)) {
     r = _getvxattr(in, perms, name, size, value, MDS_RANK_NONE);
-    goto out;
+    if (r != -ENODATA) {
+      goto out;
+    }
   }
 
   if (acl_type == NO_ACL && !strncmp(name, "system.", 7)) {

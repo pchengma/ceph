@@ -5983,10 +5983,11 @@ int BlueStore::_set_cache_sizes()
     return -EINVAL;
   }
 
-  if (cache_meta_ratio + cache_kv_ratio > 1.0) {
+  if (cache_meta_ratio + cache_kv_ratio + cache_kv_onode_ratio > 1.0) {
     derr << __func__ << " bluestore_cache_meta_ratio (" << cache_meta_ratio
          << ") + bluestore_cache_kv_ratio (" << cache_kv_ratio
-         << ") = " << cache_meta_ratio + cache_kv_ratio << "; must be <= 1.0"
+         << ") + bluestore_cache_kv_onode_ratio (" << cache_kv_onode_ratio
+         << ") = " << cache_meta_ratio + cache_kv_ratio + cache_kv_onode_ratio << "; must be <= 1.0"
          << dendl;
     return -EINVAL;
   }
@@ -6003,6 +6004,7 @@ int BlueStore::_set_cache_sizes()
   dout(1) << __func__ << " cache_size " << cache_size
           << " meta " << cache_meta_ratio
 	  << " kv " << cache_kv_ratio
+	  << " kv_onode " << cache_kv_onode_ratio
 	  << " data " << cache_data_ratio
 	  << dendl;
   return 0;
@@ -7394,7 +7396,7 @@ int BlueStore::_open_bluefs(bool create, bool read_only)
           bluefs->get_block_device_size(BlueFS::BDEV_WAL) * 95 / 100,
           bluefs->get_block_device_size(BlueFS::BDEV_DB) * 95 / 100,
           bluefs->get_block_device_size(BlueFS::BDEV_SLOW) * 95 / 100,
-          1024 * 1024 * 1024, //FIXME: set expected l0 size here
+	  rocks_opts.write_buffer_size * rocks_opts.max_write_buffer_number,
           rocks_opts.max_bytes_for_level_base,
           rocks_opts.max_bytes_for_level_multiplier,
           reserved_factor,
@@ -19264,7 +19266,13 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
   auto max_x = per_level_per_dev_usage.get_max_x();
   auto max_y = per_level_per_dev_usage.get_max_y();
 
-  sout << "RocksDBBlueFSVolumeSelector Usage Matrix:" << std::endl;
+  sout << "RocksDBBlueFSVolumeSelector " << std::endl;
+  sout << ">>Settings<<"
+       << " extra=" << byte_u_t(db_avail4slow)
+       << ", l0_size=" << byte_u_t(level0_size)
+       << ", l_base=" << byte_u_t(level_base)
+       << ", l_multi=" << byte_u_t(level_multiplier)
+       << std::endl;
   constexpr std::array<const char*, 8> names{ {
     "DEV/LEV",
     "WAL",

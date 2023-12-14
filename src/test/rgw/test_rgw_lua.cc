@@ -78,10 +78,6 @@ public:
     return 0;
   }
 
-  virtual int create_bucket(const DoutPrefixProvider* dpp, const rgw_bucket& b, const std::string& zonegroup_id, rgw_placement_rule& placement_rule, std::string& swift_ver_location, const RGWQuotaInfo* pquota_info, const RGWAccessControlPolicy& policy, sal::Attrs& attrs, RGWBucketInfo& info, obj_version& ep_objv, bool exclusive, bool obj_lock_enabled, bool* existed, req_info& req_info, std::unique_ptr<sal::Bucket>* bucket, optional_yield y) override {
-    return 0;
-  }
-
   virtual int read_attrs(const DoutPrefixProvider *dpp, optional_yield y) override {
     return 0;
   }
@@ -90,7 +86,7 @@ public:
     return 0;
   }
 
-  virtual int read_stats_async(const DoutPrefixProvider *dpp, RGWGetUserStats_CB *cb) override {
+  virtual int read_stats_async(const DoutPrefixProvider *dpp, boost::intrusive_ptr<sal::ReadStatsCB> cb) override {
     return 0;
   }
 
@@ -342,13 +338,14 @@ TEST(TestRGWLua, Bucket)
 
   DEFINE_REQ_STATE;
 
-  rgw_bucket b;
-  b.tenant = "mytenant";
-  b.name = "myname";
-  b.marker = "mymarker";
-  b.bucket_id = "myid"; 
-  s.bucket.reset(new sal::RadosBucket(nullptr, b));
-  s.bucket->set_owner(new sal::RadosUser(nullptr, rgw_user("mytenant", "myuser")));
+  RGWBucketInfo info;
+  info.bucket.tenant = "mytenant";
+  info.bucket.name = "myname";
+  info.bucket.marker = "mymarker";
+  info.bucket.bucket_id = "myid";
+  info.owner.id = "myuser";
+  info.owner.tenant = "mytenant";
+  s.bucket.reset(new sal::RadosBucket(nullptr, info));
 
   const auto rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
   ASSERT_EQ(rc, 0);
@@ -638,8 +635,12 @@ TEST(TestRGWLua, Acl)
     function print_grant(k, g)
       print("Grant Key: " .. tostring(k))
       print("Grant Type: " .. g.Type)
-      print("Grant Group Type: " .. g.GroupType)
-      print("Grant Referer: " .. g.Referer)
+      if (g.GroupType) then
+        print("Grant Group Type: " .. g.GroupType)
+      end
+      if (g.Referer) then
+        print("Grant Referer: " .. g.Referer)
+      end
       if (g.User) then
         print("Grant User.Tenant: " .. g.User.Tenant)
         print("Grant User.Id: " .. g.User.Id)
@@ -665,11 +666,11 @@ TEST(TestRGWLua, Acl)
   )";
 
   DEFINE_REQ_STATE;
-  ACLOwner owner;
-  owner.set_id(rgw_user("jack", "black"));
-  owner.set_name("jack black");
-  s.user_acl.reset(new RGWAccessControlPolicy(g_cct));
-  s.user_acl->set_owner(owner);
+  const ACLOwner owner{
+    .id = rgw_user("jack", "black"),
+    .display_name = "jack black"
+  };
+  s.user_acl.set_owner(owner);
   ACLGrant grant1, grant2, grant3, grant4, grant5, grant6_1, grant6_2;
   grant1.set_canon(rgw_user("jane", "doe"), "her grant", 1);
   grant2.set_group(ACL_GROUP_ALL_USERS ,2);
@@ -678,13 +679,13 @@ TEST(TestRGWLua, Acl)
   grant5.set_group(ACL_GROUP_AUTHENTICATED_USERS, 5);
   grant6_1.set_canon(rgw_user("kill", "bill"), "his grant", 6);
   grant6_2.set_canon(rgw_user("kill", "bill"), "her grant", 7);
-  s.user_acl->get_acl().add_grant(&grant1);
-  s.user_acl->get_acl().add_grant(&grant2);
-  s.user_acl->get_acl().add_grant(&grant3);
-  s.user_acl->get_acl().add_grant(&grant4);
-  s.user_acl->get_acl().add_grant(&grant5);
-  s.user_acl->get_acl().add_grant(&grant6_1);
-  s.user_acl->get_acl().add_grant(&grant6_2);
+  s.user_acl.get_acl().add_grant(grant1);
+  s.user_acl.get_acl().add_grant(grant2);
+  s.user_acl.get_acl().add_grant(grant3);
+  s.user_acl.get_acl().add_grant(grant4);
+  s.user_acl.get_acl().add_grant(grant5);
+  s.user_acl.get_acl().add_grant(grant6_1);
+  s.user_acl.get_acl().add_grant(grant6_2);
   const auto rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
   ASSERT_EQ(rc, 0);
 }
@@ -709,7 +710,7 @@ TEST(TestRGWLua, UseFunction)
 {
 	const std::string script = R"(
 		function print_owner(owner)
-  		print("Owner Dispaly Name: " .. owner.DisplayName)
+  		print("Owner Display Name: " .. owner.DisplayName)
   		print("Owner Id: " .. owner.User.Id)
   		print("Owner Tenanet: " .. owner.User.Tenant)
 		end
@@ -733,17 +734,14 @@ TEST(TestRGWLua, UseFunction)
 	)";
 
   DEFINE_REQ_STATE;
-  s.owner.set_name("user two");
-  s.owner.set_id(rgw_user("tenant2", "user2"));
-  s.user_acl.reset(new RGWAccessControlPolicy());
-  s.user_acl->get_owner().set_name("user three");
-  s.user_acl->get_owner().set_id(rgw_user("tenant3", "user3"));
-  s.bucket_acl.reset(new RGWAccessControlPolicy());
-  s.bucket_acl->get_owner().set_name("user four");
-  s.bucket_acl->get_owner().set_id(rgw_user("tenant4", "user4"));
-  s.object_acl.reset(new RGWAccessControlPolicy());
-  s.object_acl->get_owner().set_name("user five");
-  s.object_acl->get_owner().set_id(rgw_user("tenant5", "user5"));
+  s.owner.display_name = "user two";
+  s.owner.id = rgw_user("tenant2", "user2");
+  s.user_acl.get_owner().display_name = "user three";
+  s.user_acl.get_owner().id = rgw_user("tenant3", "user3");
+  s.bucket_acl.get_owner().display_name = "user four";
+  s.bucket_acl.get_owner().id = rgw_user("tenant4", "user4");
+  s.object_acl.get_owner().display_name = "user five";
+  s.object_acl.get_owner().id = rgw_user("tenant5", "user5");
 
   const auto rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
   ASSERT_EQ(rc, 0);
@@ -924,7 +922,7 @@ TEST(TestRGWLuaBackground, RequestScript)
 
   pe.lua.background = &lua_background;
 
-  // to make sure test is consistent we have to puase the background
+  // to make sure test is consistent we have to pause the background
   lua_background.pause();
   const auto rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, request_script);
   ASSERT_EQ(rc, 0);
@@ -1562,10 +1560,11 @@ TEST(TestRGWLua, DifferentContextUser)
   DEFINE_REQ_STATE;
 
   s.user.reset(new sal::RadosUser(nullptr, rgw_user("tenant1", "user1")));
-  rgw_bucket b;
-  b.name = "bucket1";
-  s.bucket.reset(new sal::RadosBucket(nullptr, b));
-  s.bucket->set_owner(new sal::RadosUser(nullptr, rgw_user("tenant2", "user2")));
+  RGWBucketInfo info;
+  info.bucket.name = "bucket1";
+  info.owner.id = "user2";
+  info.owner.tenant = "tenant2";
+  s.bucket.reset(new sal::RadosBucket(nullptr, info));
 
   const auto rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
   ASSERT_EQ(rc, 0);

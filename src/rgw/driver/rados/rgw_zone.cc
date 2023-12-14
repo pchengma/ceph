@@ -516,7 +516,6 @@ int create_realm(const DoutPrefixProvider* dpp, optional_yield y,
     period->period_map.id = period->id;
     period->epoch = FIRST_EPOCH;
     period->realm_id = info.id;
-    period->realm_name = info.name;
 
     r = cfgstore->create_period(dpp, y, true, *period);
     if (r < 0) {
@@ -1094,6 +1093,27 @@ int delete_zone(const DoutPrefixProvider* dpp, optional_yield y,
   return writer.remove(dpp, y);
 }
 
+auto find_zone_placement(const DoutPrefixProvider* dpp,
+                         const RGWZoneParams& info,
+                         const rgw_placement_rule& rule)
+    -> const RGWZonePlacementInfo*
+{
+  auto i = info.placement_pools.find(rule.name);
+  if (i == info.placement_pools.end()) {
+    ldpp_dout(dpp, 0) << "ERROR: This zone does not contain placement rule "
+        << rule.name << dendl;
+    return nullptr;
+  }
+
+  const std::string& storage_class = rule.get_storage_class();
+  if (!i->second.storage_class_exists(storage_class)) {
+    ldpp_dout(dpp, 5) << "ERROR: The zone placement for rule " << rule.name
+        << " does not contain storage class " << storage_class << dendl;
+    return nullptr;
+  }
+
+  return &i->second;
+}
 
 static int read_or_create_default_zone(const DoutPrefixProvider* dpp,
                                        optional_yield y,
