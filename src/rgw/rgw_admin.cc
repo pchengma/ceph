@@ -62,6 +62,7 @@ extern "C" {
 #include "rgw_lua.h"
 #include "rgw_sal.h"
 #include "rgw_sal_config.h"
+#include "rgw_data_access.h"
 
 #include "services/svc_sync_modules.h"
 #include "services/svc_cls.h"
@@ -3291,6 +3292,9 @@ void init_realm_param(CephContext *cct, string& var, std::optional<string>& opt_
   }
 }
 
+// This has an uncaught exception. Even if the exception is caught, the program
+// would need to be terminated, so the warning is simply suppressed.
+// coverity[root_function:SUPPRESS]
 int main(int argc, const char **argv)
 {
   auto args = argv_to_vec(argc, argv);

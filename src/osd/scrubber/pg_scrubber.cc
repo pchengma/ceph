@@ -587,16 +587,17 @@ void PgScrubber::request_rescrubbing(requested_scrub_t& request_flags)
 bool PgScrubber::reserve_local()
 {
   // try to create the reservation object (which translates into asking the
-  // OSD for the local scrub resource). If failing - undo it immediately
-
-  m_local_osd_resource.emplace(m_osds);
-  if (m_local_osd_resource->is_reserved()) {
+  // OSD for a local scrub resource). The object returned is a
+  // a wrapper around the actual reservation, and that object releases
+  // the local resource automatically when reset.
+  m_local_osd_resource = m_osds->get_scrub_services().inc_scrubs_local(
+      m_scrub_job->is_high_priority());
+  if (m_local_osd_resource) {
     dout(15) << __func__ << ": local resources reserved" << dendl;
     return true;
   }
 
-  dout(10) << __func__ << ": failed to reserve local scrub resources" << dendl;
-  m_local_osd_resource.reset();
+  dout(15) << __func__ << ": failed to reserve local scrub resources" << dendl;
   return false;
 }
 
@@ -925,6 +926,8 @@ bool PgScrubber::select_range()
 
 void PgScrubber::select_range_n_notify()
 {
+  get_counters_set().inc(scrbcnt_chunks_selected);
+
   if (select_range()) {
     // the next chunk to handle is not blocked
     dout(20) << __func__ << ": selection OK" << dendl;
@@ -934,6 +937,7 @@ void PgScrubber::select_range_n_notify()
     // we will wait for the objects range to become available for scrubbing
     dout(10) << __func__ << ": selected chunk is busy" << dendl;
     m_osds->queue_scrub_chunk_busy(m_pg, Scrub::scrub_prio_t::low_priority);
+    get_counters_set().inc(scrbcnt_chunks_busy);
   }
 }
 
@@ -943,6 +947,7 @@ bool PgScrubber::write_blocked_by_scrub(const hobject_t& soid)
     return false;
   }
 
+  get_counters_set().inc(scrbcnt_write_blocked);
   dout(20) << __func__ << " " << soid << " can preempt? "
 	   << preemption_data.is_preemptable() << " already preempted? "
 	   << preemption_data.was_preempted() << dendl;
@@ -1059,6 +1064,11 @@ void PgScrubber::update_op_mode_text()
 	   << ": repair: visible: " << (visible_repair ? "true" : "false")
 	   << ", internal: " << (m_is_repair ? "true" : "false")
 	   << ". Displayed: " << m_mode_desc << dendl;
+}
+
+std::string_view PgScrubber::get_op_mode_text() const
+{
+  return m_mode_desc;
 }
 
 void PgScrubber::_request_scrub_map(pg_shard_t replica,
@@ -1220,14 +1230,15 @@ int PgScrubber::build_replica_map_chunk()
     break;
 
     default:
-      // negative retval: build_scrub_map_chunk() signalled an error
+      // build_scrub_map_chunk() signalled an error
       // Pre-Pacific code ignored this option, treating it as a success.
-      // \todo Add an error flag in the returning message.
-      // \todo: must either abort, send a reply, or return some error message
+      // Now: "regular" I/O errors were already handled by the backend (by
+      // setting the error flag in the scrub-map). We are left with the
+      // "unknown" error case - and we have no mechanism to handle it.
+      // Thus - we must abort.
       dout(1) << "Error! Aborting. ActiveReplica::react(SchedReplica) Ret: "
 	      << ret << dendl;
-      // only in debug mode for now:
-      assert(false && "backend error");
+      ceph_abort_msg("backend error");
       break;
   };
 
@@ -2076,14 +2087,15 @@ pg_scrubbing_status_t PgScrubber::get_schedule() const
 	false};
 
     } else {
-      int32_t duration = (utime_t{now_is} - scrub_begin_stamp).sec();
+      int32_t dur_seconds =
+	  duration_cast<seconds>(m_fsm->get_time_scrubbing()).count();
       return pg_scrubbing_status_t{
-	utime_t{},
-	duration,
-	pg_scrub_sched_status_t::active,
-	true,  // active
-	(m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow),
-	false /* is periodic? unknown, actually */};
+	  utime_t{},
+	  dur_seconds,
+	  pg_scrub_sched_status_t::active,
+	  true,	 // active
+	  (m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow),
+	  false /* is periodic? unknown, actually */};
     }
   }
   if (m_scrub_job->state != Scrub::qu_state_t::registered) {
@@ -2174,24 +2186,23 @@ PgScrubber::PgScrubber(PG* pg)
       m_osds->cct, m_pg->pg_id, m_osds->get_nodeid());
 }
 
-void PgScrubber::set_scrub_begin_time()
+void PgScrubber::set_scrub_duration(std::chrono::milliseconds duration)
 {
-  scrub_begin_stamp = ceph_clock_now();
-  m_osds->clog->debug() << fmt::format(
-    "{} {} starts",
-    m_pg->info.pgid.pgid,
-    m_mode_desc);
-}
-
-void PgScrubber::set_scrub_duration()
-{
-  utime_t stamp = ceph_clock_now();
-  utime_t duration = stamp - scrub_begin_stamp;
+  dout(20) << fmt::format("{}: to {}", __func__, duration) << dendl;
+  double dur_ms = double(duration.count());
   m_pg->recovery_state.update_stats([=](auto& history, auto& stats) {
-    stats.last_scrub_duration = ceill(duration.to_msec() / 1000.0);
-    stats.scrub_duration = double(duration);
+    stats.last_scrub_duration = ceill(dur_ms / 1000.0);
+    stats.scrub_duration = dur_ms;
     return true;
   });
+}
+
+PerfCounters& PgScrubber::get_counters_set() const
+{
+  return *m_osds->get_scrub_services().get_perf_counters(
+      (m_pg->pool.info.is_replicated() ? pg_pool_t::TYPE_REPLICATED
+				       : pg_pool_t::TYPE_ERASURE),
+      (m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow));
 }
 
 void PgScrubber::cleanup_on_finish()
@@ -2445,27 +2456,7 @@ void PgScrubber::preemption_data_t::reset()
   m_size_divisor = 1;
 }
 
-
-// ///////////////////// LocalReservation //////////////////////////////////
-
 namespace Scrub {
-
-// note: no dout()s in LocalReservation functions. Client logs interactions.
-LocalReservation::LocalReservation(OSDService* osds) : m_osds{osds}
-{
-  if (m_osds->get_scrub_services().inc_scrubs_local()) {
-    // a failure is signalled by not having m_holding_local_reservation set
-    m_holding_local_reservation = true;
-  }
-}
-
-LocalReservation::~LocalReservation()
-{
-  if (m_holding_local_reservation) {
-    m_holding_local_reservation = false;
-    m_osds->get_scrub_services().dec_scrubs_local();
-  }
-}
 
 // ///////////////////// MapsCollectionStatus ////////////////////////////////
 

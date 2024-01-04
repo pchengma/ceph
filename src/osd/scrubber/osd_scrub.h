@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "osd/osd_types_fmt.h"
+#include "osd/osd_perf_counters.h"
 #include "osd/scrubber/osd_scrub_sched.h"
 #include "osd/scrubber/scrub_resources.h"
 #include "osd/scrubber_common.h"
@@ -26,7 +27,7 @@ class OsdScrub {
       Scrub::ScrubSchedListener& osd_svc,
       const ceph::common::ConfigProxy& config);
 
-  ~OsdScrub() = default;
+  ~OsdScrub();
 
   // note: public, as accessed by the dout macros
   std::ostream& gen_prefix(std::ostream& out, std::string_view fn) const;
@@ -65,7 +66,8 @@ class OsdScrub {
   // ---------------------------------------------------------------
 
   // updating the resource counters
-  bool inc_scrubs_local();
+  std::unique_ptr<Scrub::LocalResourceWrapper> inc_scrubs_local(
+      bool is_high_priority);
   void dec_scrubs_local();
   bool inc_scrubs_remote(pg_t pgid);
   void dec_scrubs_remote(pg_t pgid);
@@ -161,6 +163,10 @@ class OsdScrub {
    */
   std::optional<double> update_load_average();
 
+   // the scrub performance counters collections
+   // ---------------------------------------------------------------
+  PerfCounters* get_perf_counters(int pool_type, scrub_level_t level);
+
  private:
   CephContext* cct;
   Scrub::ScrubSchedListener& m_osd_svc;
@@ -168,20 +174,17 @@ class OsdScrub {
 
   /**
    * check the OSD-wide environment conditions (scrub resources, time, etc.).
-   * These may restrict the type of scrubs we are allowed to start, or just
-   * prevent us from starting any scrub at all.
+   * These may restrict the type of scrubs we are allowed to start, maybe
+   * down to allowing only high-priority scrubs
    *
    * Specifically:
-   * a nullopt is returned if we are not allowed to scrub at all, for either of
+   * 'only high priority' flag is set for either of
    * the following reasons: no local resources (too many scrubs on this OSD);
    * a dice roll says we will not scrub in this tick;
    * a recovery is in progress, and we are not allowed to scrub while recovery;
    * a PG is trying to acquire replica resources.
-   *
-   * If we are allowed to scrub, the returned value specifies whether the only
-   * high priority scrubs or only overdue ones are allowed to go on.
    */
-  std::optional<Scrub::OSDRestrictions> restrictions_on_scrubbing(
+  Scrub::OSDRestrictions restrictions_on_scrubbing(
       bool is_recovery_active,
       utime_t scrub_clock_now) const;
 
@@ -196,7 +199,7 @@ class OsdScrub {
    */
   Scrub::schedule_result_t initiate_a_scrub(
       spg_t pgid,
-      bool allow_requested_repair_only);
+      Scrub::OSDRestrictions restrictions);
 
   /// resource reservation management
   Scrub::ScrubResources m_resource_bookkeeper;
@@ -240,4 +243,45 @@ class OsdScrub {
     std::ostream& gen_prefix(std::ostream& out, std::string_view fn) const;
   };
   LoadTracker m_load_tracker;
+
+  // the scrub performance counters collections
+  // ---------------------------------------------------------------
+
+  // indexed by scrub level & pool type
+
+  using pc_index_t = std::pair<scrub_level_t, int /*pool type*/>;
+  // easy way to loop over the counter sets. Order must match the
+  // perf_labels vector
+  static inline std::array<pc_index_t, 4> perf_counters_indices = {
+      pc_index_t{scrub_level_t::shallow, pg_pool_t::TYPE_REPLICATED},
+      pc_index_t{scrub_level_t::deep, pg_pool_t::TYPE_REPLICATED},
+      pc_index_t{scrub_level_t::shallow, pg_pool_t::TYPE_ERASURE},
+      pc_index_t{scrub_level_t::deep, pg_pool_t::TYPE_ERASURE}};
+
+  std::map<pc_index_t, ceph::common::PerfCounters*> m_perf_counters;
+
+  // the labels matrix is: <shallow/deep>  X  <replicated/EC>
+  static inline std::vector<std::string> perf_labels = {
+      ceph::perf_counters::key_create(
+	  "osd_scrub_sh_repl",
+	  {{"level", "shallow"}, {"pooltype", "replicated"}}),
+      ceph::perf_counters::key_create(
+	  "osd_scrub_dp_repl",
+	  {{"level", "deep"}, {"pooltype", "replicated"}}),
+      ceph::perf_counters::key_create(
+	  "osd_scrub_sh_ec",
+	  {{"level", "shallow"}, {"pooltype", "ec"}}),
+      ceph::perf_counters::key_create(
+	  "osd_scrub_dp_ec",
+	  {{"level", "deep"}, {"pooltype", "ec"}})};
+
+  /**
+   * create 4 sets of performance counters (for shallow vs. deep,
+   * replicated vs. erasure pools). Add them to the cct, but also maintain
+   * a separate map of the counters, indexed by the pool type and scrub level.
+   */
+  void create_scrub_perf_counters();
+
+  // 'remove' the counters from the cct, and delete them
+  void destroy_scrub_perf_counters();
 };

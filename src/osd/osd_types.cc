@@ -1528,6 +1528,11 @@ void pool_opts_t::decode(ceph::buffer::list::const_iterator& bl)
   DECODE_FINISH(bl);
 }
 
+void pool_opts_t::generate_test_instances(std::list<pool_opts_t*>& o)
+{
+  o.push_back(new pool_opts_t);
+}
+
 ostream& operator<<(ostream& out, const pool_opts_t& opts)
 {
   for (auto i = opt_mapping.begin(); i != opt_mapping.end(); ++i) {
@@ -1755,19 +1760,13 @@ void pg_pool_t::remove_snap(snapid_t s)
 {
   ceph_assert(snaps.count(s));
   snaps.erase(s);
-  snap_seq = snap_seq + 1;
 }
 
 void pg_pool_t::remove_unmanaged_snap(snapid_t s, bool preoctopus_compat)
 {
   ceph_assert(is_unmanaged_snaps_mode());
-  ++snap_seq;
   if (preoctopus_compat) {
     removed_snaps.insert(s);
-    // try to add in the new seq, just to try to keep the interval_set contiguous
-    if (!removed_snaps.contains(get_snap_seq())) {
-      removed_snaps.insert(get_snap_seq());
-    }
   }
 }
 
@@ -3614,6 +3613,7 @@ void pg_info_t::decode(ceph::buffer::list::const_iterator &bl)
 void pg_info_t::dump(Formatter *f) const
 {
   f->dump_stream("pgid") << pgid;
+  f->dump_stream("shared") << pgid.shard;
   f->dump_stream("last_update") << last_update;
   f->dump_stream("last_complete") << last_complete;
   f->dump_stream("log_tail") << log_tail;
@@ -3714,10 +3714,11 @@ void pg_notify_t::dump(Formatter *f) const
 
 void pg_notify_t::generate_test_instances(list<pg_notify_t*>& o)
 {
+  o.push_back(new pg_notify_t);
   o.push_back(new pg_notify_t(shard_id_t(3), shard_id_t::NO_SHARD, 1, 1,
-			      pg_info_t(), PastIntervals()));
-  o.push_back(new pg_notify_t(shard_id_t(0), shard_id_t(0), 3, 10,
-			      pg_info_t(), PastIntervals()));
+            pg_info_t(spg_t(pg_t(0,10), shard_id_t(-1))), PastIntervals()));
+  o.push_back(new pg_notify_t(shard_id_t(0), shard_id_t(2), 3, 10,
+            pg_info_t(spg_t(pg_t(10,10), shard_id_t(2))), PastIntervals()));
 }
 
 ostream &operator<<(ostream &lhs, const pg_notify_t &notify)
@@ -3811,9 +3812,6 @@ void PastIntervals::pg_interval_t::generate_test_instances(list<pg_interval_t*>&
   o.back()->last = 5;
   o.back()->maybe_went_rw = true;
 }
-
-WRITE_CLASS_ENCODER(PastIntervals::pg_interval_t)
-
 
 /**
  * pi_compact_rep
@@ -6059,6 +6057,14 @@ void chunk_info_t::dump(Formatter *f) const
   f->dump_unsigned("flags", flags);
 }
 
+void chunk_info_t::generate_test_instances(std::list<chunk_info_t*>& o)
+{
+  o.push_back(new chunk_info_t);
+  o.push_back(new chunk_info_t);
+  o.back()->length = 123;
+  o.back()->oid = hobject_t(object_t("foo"), "", 123, 456, -1, "");
+  o.back()->flags = cflag_t::FLAG_DIRTY;
+}
 
 bool chunk_info_t::operator==(const chunk_info_t& cit) const
 {
@@ -7403,4 +7409,32 @@ bool PGLSPlainFilter::filter(const hobject_t& obj,
                              const ceph::bufferlist& xattr_data) const
 {
   return xattr_data.contents_equal(val.c_str(), val.size());
+}
+
+std::string_view get_op_queue_type_name(const op_queue_type_t &q)
+{
+  switch (q) {
+    case op_queue_type_t::WeightedPriorityQueue:
+      return "wpq";
+    case op_queue_type_t::mClockScheduler:
+      return "mclock_scheduler";
+    case op_queue_type_t::PrioritizedQueue:
+      return "PrioritizedQueue";
+    default:
+      return "unknown";
+  }
+}
+
+std::optional<op_queue_type_t> get_op_queue_type_by_name(
+  const std::string_view &s)
+{
+  if (s == "wpq") {
+    return op_queue_type_t::WeightedPriorityQueue;
+  } else if (s == "mclock_scheduler") {
+    return op_queue_type_t::mClockScheduler;
+  } else if (s == "PrioritizedQueue") {
+    return op_queue_type_t::PrioritizedQueue;
+  } else {
+    return std::nullopt;
+  }
 }

@@ -87,20 +87,8 @@ Main Scrubber interfaces:
 namespace Scrub {
 class ScrubMachine;
 struct BuildMap;
+class LocalResourceWrapper;
 
-
-/**
- *  wraps the local OSD scrub resource reservation in an RAII wrapper
- */
-class LocalReservation {
-  OSDService* m_osds;
-  bool m_holding_local_reservation{false};
-
- public:
-  explicit LocalReservation(OSDService* osds);
-  ~LocalReservation();
-  bool is_reserved() const { return m_holding_local_reservation; }
-};
 
 /**
  * Once all replicas' scrub maps are received, we go on to compare the maps.
@@ -375,6 +363,7 @@ class PgScrubber : public ScrubPgIF,
   int get_whoami() const final;
   spg_t get_spgid() const final { return m_pg->get_pgid(); }
   PG* get_pg() const final { return m_pg; }
+  PerfCounters& get_counters_set() const final;
 
   // temporary interface (to be discarded in a follow-up PR)
   /// set the 'resources_failure' flag in the scrub-job object
@@ -482,11 +471,8 @@ class PgScrubber : public ScrubPgIF,
 
   std::string dump_awaited_maps() const final;
 
-  void set_scrub_begin_time() final;
+  void set_scrub_duration(std::chrono::milliseconds duration) final;
 
-  void set_scrub_duration() final;
-
-  utime_t scrub_begin_stamp;
   std::ostream& gen_prefix(std::ostream& out) const final;
 
   /// facilitate scrub-backend access to SnapMapper mappings
@@ -628,9 +614,11 @@ class PgScrubber : public ScrubPgIF,
 
   epoch_t m_last_aborted{};  // last time we've noticed a request to abort
 
-  // 'optional', as 'LocalReservation' is
-  // 'RAII-designed' to guarantee un-reserving when deleted.
-  std::optional<Scrub::LocalReservation> m_local_osd_resource;
+  /**
+   * once we acquire the local OSD resource, this is set to a wrapper that
+   * guarantees that the resource will be released when the scrub is done
+   */
+  std::unique_ptr<Scrub::LocalResourceWrapper> m_local_osd_resource;
 
   void cleanup_on_finish();  // scrub_clear_state() as called for a Primary when
 			     // Active->NotActive
@@ -777,6 +765,8 @@ class PgScrubber : public ScrubPgIF,
   std::string_view m_mode_desc;
 
   void update_op_mode_text();
+
+  std::string_view get_op_mode_text() const final;
 
  private:
   /**

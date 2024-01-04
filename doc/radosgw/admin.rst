@@ -2,25 +2,23 @@
  Admin Guide
 =============
 
-Once you have your Ceph Object Storage service up and running, you may
-administer the service with user management, access controls, quotas 
-and usage tracking among other features.
-
+After the Ceph Object Storage service is up and running, it can be administered
+with user management, access controls, quotas, and usage tracking.
 
 User Management
 ===============
 
-Ceph Object Storage user management refers to users of the Ceph Object Storage
-service (i.e., not the Ceph Object Gateway as a user of the Ceph Storage
-Cluster). You must create a user, access key and secret to enable end users to
-interact with Ceph Object Gateway services.
+Ceph Object Storage user management refers only to users of the Ceph Object
+Storage service and not to the Ceph Object Gateway as a user of the Ceph
+Storage Cluster. Create a user, access key, and secret key to enable end users
+to interact with Ceph Object Gateway services.
 
-There are two user types: 
+There are two types of user: 
 
-- **User:** The term 'user' reflects a user of the S3 interface.
+- **User:** The term "user" refers to  user of the S3 interface.
 
-- **Subuser:** The term 'subuser' reflects a user of the Swift interface. A subuser
-  is associated to a user .
+- **Subuser:** The term "subuser" refers to a user of the Swift interface. A
+  subuser is associated with a user. 
   
 .. ditaa::
            +---------+
@@ -31,24 +29,30 @@ There are two user types:
                 +-----+  Subuser  |
                       +-----------+
 
-You can create, modify, view, suspend and remove users and subusers. In addition
-to user and subuser IDs, you may add a display name and an email address for a
-user.  You can specify a key and secret, or generate a key and secret
-automatically. When generating or specifying keys, note that user IDs correspond
-to an S3 key type and subuser IDs correspond to a swift key type. Swift keys
-also have access levels of ``read``, ``write``, ``readwrite`` and ``full``.
+Users and subusers can be created, modified, viewed, suspended and removed.
+you may add a Display names and an email addresses can be added to user
+profiles. Keys and secrets can either be specified or generated automatically.
+When generating or specifying keys, remember that user IDs correspond to S3 key
+types and subuser IDs correspond to Swift key types. 
+
+Swift keys have access levels of ``read``, ``write``, ``readwrite`` and
+``full``.
 
 
 Create a User
 -------------
 
-To create a user (S3 interface), execute the following::
+To create a user (S3 interface), run a command of the following form:
 
-	radosgw-admin user create --uid={username} --display-name="{display-name}" [--email={email}]
+.. prompt:: bash
 
-For example:: 	
+   radosgw-admin user create --uid={username} --display-name="{display-name}" [--email={email}]
+
+For example:
+
+.. prompt:: bash
 	
-  radosgw-admin user create --uid=johndoe --display-name="John Doe" --email=john@example.com
+   radosgw-admin user create --uid=johndoe --display-name="John Doe" --email=john@example.com
   
 .. code-block:: javascript
   
@@ -75,32 +79,37 @@ For example::
         "max_objects": -1},
     "temp_url_keys": []}
 
-Creating a user also creates an ``access_key`` and ``secret_key`` entry for use
-with any S3 API-compatible client.  
+The creation of a user entails the creation of an ``access_key`` and a
+``secret_key`` entry, which can be used with any S3 API-compatible client.  
 
-.. important:: Check the key output. Sometimes ``radosgw-admin``
-   generates a JSON escape (``\``) character, and some clients
-   do not know how to handle JSON escape characters. Remedies include 
-   removing the JSON escape character (``\``), encapsulating the string
-   in quotes, regenerating the key and ensuring that it 
-   does not have a JSON escape character or specify the key and secret 
-   manually.
+.. important:: Check the key output. Sometimes ``radosgw-admin`` generates a
+   JSON escape (``\``) character, and some clients do not know how to handle
+   JSON escape characters. Remedies include removing the JSON escape character
+   (``\``), encapsulating the string in quotes, regenerating the key and
+   ensuring that it does not have a JSON escape character, or specifying the
+   key and secret manually.
 
 
 Create a Subuser
 ----------------
 
-To create a subuser (Swift interface) for the user, you must specify the user ID
-(``--uid={username}``), a subuser ID and the access level for the subuser. ::
+To create a subuser (a user of the Swift interface) for the user, specify the
+user ID (``--uid={username}``), a subuser ID, and the subuser's access level:
 
-  radosgw-admin subuser create --uid={uid} --subuser={uid} --access=[ read | write | readwrite | full ]
+.. prompt:: bash
 
-For example::
+   radosgw-admin subuser create --uid={uid} --subuser={uid} --access=[ read | write | readwrite | full ]
 
-  radosgw-admin subuser create --uid=johndoe --subuser=johndoe:swift --access=full
+For example:
+
+.. prompt:: bash
+
+   radosgw-admin subuser create --uid=johndoe --subuser=johndoe:swift --access=full
 
 
-.. note:: ``full`` is not ``readwrite``, as it also includes the access control policy.
+.. note:: ``full`` is not the same as ``readwrite``. The ``full`` access level
+   includes ``read`` and ``write``, but it also includes the access control
+   policy.
 
 .. code-block:: javascript
 
@@ -133,102 +142,128 @@ For example::
 Get User Info
 -------------
 
-To get information about a user, you must specify ``user info`` and the user ID
-(``--uid={username}``) . :: 
+To get information about a user, specify ``user info`` and the user ID
+(``--uid={username}``). Use a command of the following form: 
 
-	radosgw-admin user info --uid=johndoe
+.. prompt:: bash
 
+   radosgw-admin user info --uid=johndoe
 
 
 Modify User Info
 ----------------
 
-To modify information about a user, you must specify the user ID (``--uid={username}``)
-and the attributes you want to modify. Typical modifications are to keys and secrets,
-email addresses, display names and access levels. For example:: 
+To modify information about a user, specify the user ID (``--uid={username}``)
+and the attributes that you want to modify. Typical modifications are made to
+keys and secrets, email addresses, display names, and access levels. Use a
+command of the following form: 
 
-	radosgw-admin user modify --uid=johndoe --display-name="John E. Doe"
+.. prompt:: bash
 
-To modify subuser values, specify ``subuser modify``, user ID and the subuser ID. For example::
+   radosgw-admin user modify --uid=johndoe --display-name="John E. Doe"
 
-	radosgw-admin subuser modify --uid=johndoe --subuser=johndoe:swift --access=full
+To modify subuser values, specify ``subuser modify``, user ID and the subuser
+ID. Use a command of the following form:
+
+.. prompt:: bash
+
+   radosgw-admin subuser modify --uid=johndoe --subuser=johndoe:swift --access=full
 
 
-User Enable/Suspend
--------------------
+User Suspend
+------------
 
-When you create a user, the user is enabled by default. However, you may suspend
-user  privileges and re-enable them at a later time. To suspend a user, specify
-``user suspend`` and the user ID. ::
+When a user is created, the user is enabled by default. However, it is possible
+to suspend user privileges and to re-enable them at a later time. To suspend a
+user, specify ``user suspend`` and the user ID in a command of the following
+form:
 
-	radosgw-admin user suspend --uid=johndoe
+.. prompt:: bash
 
-To re-enable a suspended user, specify ``user enable`` and the user ID. :: 
+   radosgw-admin user suspend --uid=johndoe
 
-	radosgw-admin user enable --uid=johndoe
+User Enable
+-----------
+To re-enable a suspended user, provide ``user enable`` and specify the user ID
+in a command of the following form:
+
+.. prompt:: bash
+
+   radosgw-admin user enable --uid=johndoe
 	
-.. note:: Disabling the user disables the subuser.
+.. note:: Disabling the user also disables any subusers.
 
 
 Remove a User
 -------------
 
-When you remove a user, the user and subuser are removed from the system.
-However, you may remove just the subuser if you wish. To remove a user (and
-subuser), specify ``user rm`` and the user ID. ::
+When you remove a user, you also remove any subusers associated with the user.
 
-	radosgw-admin user rm --uid=johndoe
+It is possible to remove a subuser without removing its associated user. This
+is covered in the section called :ref:`Remove a Subuser <radosgw-admin-remove-a-subuser>`.
 
-To remove the subuser only, specify ``subuser rm`` and the subuser ID. ::
+To remove a user and any subusers associated with it, use the ``user rm``
+command and provide the user ID of the user to be removed. Use a command of the
+following form: 
 
-	radosgw-admin subuser rm --subuser=johndoe:swift
+.. prompt:: bash
 
+   radosgw-admin user rm --uid=johndoe
 
 Options include:
 
 - **Purge Data:** The ``--purge-data`` option purges all data associated 
-  to the UID.
+  with the UID.
   
 - **Purge Keys:** The ``--purge-keys`` option purges all keys associated 
-  to the UID.
+  with the UID.
 
+.. _radosgw-admin-remove-a-subuser:
 
 Remove a Subuser
 ----------------
 
-When you remove a sub user, you are removing access to the Swift interface. 
-The user will remain in the system. To remove the subuser, specify 
-``subuser rm`` and the subuser ID. ::
+Removing a subuser removes access to the Swift interface or to S3. The user
+associated with the removed subuser remains in the system after the subuser's
+removal. 
 
-	radosgw-admin subuser rm --subuser=johndoe:swift
+To remove the subuser, use the command ``subuser rm`` and provide the subuser
+ID of the subuser to be removed. Use a command of the following form: 
 
+.. prompt:: bash
 
+   radosgw-admin subuser rm --subuser=johndoe:swift
 
 Options include:
   
 - **Purge Keys:** The ``--purge-keys`` option purges all keys associated 
-  to the UID.
+  with the UID.
 
 
-Add / Remove a Key
-------------------------
+Add or  Remove a Key
+--------------------
 
-Both users and subusers require the key to access the S3 or Swift interface. To
-use S3, the user needs a key pair which is composed of an access key and a 
-secret key. On the other hand, to use Swift, the user typically needs a secret 
-key (password), and use it together with the associated user ID. You may create
-a key and either specify or generate the access key and/or secret key. You may 
-also remove a key. Options include:
+Both users and subusers require a key to access the S3 or Swift interface. To
+use S3, the user needs a key pair which is composed of an access key and a
+secret key. To use Swift, the user needs a secret key (password), which is used
+together with its associated user ID. You can create a key and either specify
+or generate the access key or secret key. You can also remove a key. Options
+include:
 
-- ``--key-type=<type>`` specifies the key type. The options are: s3, swift
+- ``--key-type=<type>`` specifies the key type. The options are: ``s3``, ``swift``
 - ``--access-key=<key>`` manually specifies an S3 access key.
 - ``--secret-key=<key>`` manually specifies a S3 secret key or a Swift secret key.
 - ``--gen-access-key`` automatically generates a random S3 access key.
 - ``--gen-secret`` automatically generates a random S3 secret key or a random Swift secret key.
 
-An example how to add a specified S3 key pair for a user. ::
+Adding S3 keys
+~~~~~~~~~~~~~~
 
-	radosgw-admin key create --uid=foo --key-type=s3 --access-key fooAccessKey --secret-key fooSecretKey
+To add a specific S3 key pair for a user, run a command of the following form:
+
+.. prompt:: bash
+
+   radosgw-admin key create --uid=foo --key-type=s3 --access-key fooAccessKey --secret-key fooSecretKey
 
 .. code-block:: javascript
 
@@ -243,11 +278,17 @@ An example how to add a specified S3 key pair for a user. ::
         "secret_key": "fooSecretKey"}],
   }
 
-Note that you may create multiple S3 key pairs for a user.
+.. note:: You can create multiple S3 key pairs for a user.
 
-To attach a specified swift secret key for a subuser. ::
+Adding Swift secret keys
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-	radosgw-admin key create --subuser=foo:bar --key-type=swift --secret-key barSecret
+To attach a specific Swift secret key for a subuser, run a command of the
+following form:
+
+.. prompt:: bash
+
+   radosgw-admin key create --subuser=foo:bar --key-type=swift --secret-key barSecret
 
 .. code-block:: javascript
 
@@ -263,11 +304,18 @@ To attach a specified swift secret key for a subuser. ::
       { "user": "foo:bar",
         "secret_key": "asfghjghghmgm"}]}
 
-Note that a subuser can have only one swift secret key.
+.. note:: A subuser can have only one Swift secret key.
 
-Subusers can also be used with S3 APIs if the subuser is associated with a S3 key pair. ::	
+Associating subusers with S3 key pairs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-	radosgw-admin key create --subuser=foo:bar --key-type=s3 --access-key barAccessKey --secret-key barSecretKey
+Subusers can also be used with S3 APIs if the subuser is associated with a S3
+key pair. To associate a subuser with an S3 key pair, run a command of the
+following form:
+
+.. prompt:: bash
+
+   radosgw-admin key create --subuser=foo:bar --key-type=s3 --access-key barAccessKey --secret-key barSecretKey
 	
 .. code-block:: javascript
 
@@ -286,13 +334,23 @@ Subusers can also be used with S3 APIs if the subuser is associated with a S3 ke
   }
 
 
-To remove a S3 key pair, specify the access key. :: 
+Removing S3 key pairs
+~~~~~~~~~~~~~~~~~~~~~
 
-	radosgw-admin key rm --uid=foo --key-type=s3 --access-key=fooAccessKey 
+To remove a S3 key pair, specify the access key to be removed. Run a command of the following form: 
 
-To remove the swift secret key. ::
+.. prompt:: bash
 
-	radosgw-admin key rm --subuser=foo:bar --key-type=swift
+   radosgw-admin key rm --uid=foo --key-type=s3 --access-key=fooAccessKey 
+
+Removing Swift secret keys
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To remove a Swift secret key, run a command of the following form: 
+
+.. prompt:: bash
+
+   radosgw-admin key rm --subuser=foo:bar --key-type=swift
 
 
 Add / Remove Admin Capabilities
@@ -434,9 +492,9 @@ Default Quotas
 You can set default quotas in the config.  These defaults are used when
 creating a new user and have no effect on existing users. If the
 relevant default quota is set in config, then that quota is set on the
-new user, and that quota is enabled.  See ``rgw bucket default quota max objects``,
-``rgw bucket default quota max size``, ``rgw user default quota max objects``, and
-``rgw user default quota max size`` in `Ceph Object Gateway Config Reference`_
+new user, and that quota is enabled.  See ``rgw_bucket_default_quota_max_objects``,
+``rgw_bucket_default_quota_max_size``, ``rgw_user_default_quota_max_objects``, and
+``rgw_user_default_quota_max_size`` in `Ceph Object Gateway Config Reference`_
 
 Quota Cache
 -----------
@@ -444,8 +502,8 @@ Quota Cache
 Quota statistics are cached on each RGW instance.  If there are multiple
 instances, then the cache can keep quotas from being perfectly enforced, as
 each instance will have a different view of quotas.  The options that control
-this are ``rgw bucket quota ttl``, ``rgw user quota bucket sync interval`` and
-``rgw user quota sync interval``.  The higher these values are, the more
+this are ``rgw_bucket_quota_ttl``, ``rgw_user_quota_bucket_sync_interval`` and
+``rgw_user_quota_sync_interval``.  The higher these values are, the more
 efficient quota operations are, but the more out-of-sync multiple instances
 will be.  The lower these values are, the closer to perfect enforcement
 multiple instances will achieve.  If all three are 0, then quota caching is
@@ -664,7 +722,7 @@ Usage
 The Ceph Object Gateway logs usage for each user. You can track
 user usage within date ranges too.
 
-- Add ``rgw enable usage log = true`` in [client.rgw] section of ceph.conf and restart the radosgw service. 
+- Add ``rgw_enable_usage_log = true`` in [client.rgw] section of ceph.conf and restart the radosgw service. 
 
 Options include: 
 

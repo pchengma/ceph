@@ -674,16 +674,16 @@ void OSDMonitor::create_initial()
   if (newmap.nearfull_ratio > 1.0) newmap.nearfull_ratio /= 100;
 
   // new cluster should require latest by default
-  if (g_conf().get_val<bool>("mon_debug_no_require_reef")) {
-    if (g_conf().get_val<bool>("mon_debug_no_require_quincy")) {
-      derr << __func__ << " mon_debug_no_require_reef and quincy=true" << dendl;
-      newmap.require_osd_release = ceph_release_t::pacific;
-    } else {
-      derr << __func__ << " mon_debug_no_require_reef=true" << dendl;
+  if (g_conf().get_val<bool>("mon_debug_no_require_squid")) {
+    if (g_conf().get_val<bool>("mon_debug_no_require_reef")) {
+      derr << __func__ << " mon_debug_no_require_squid and reef=true" << dendl;
       newmap.require_osd_release = ceph_release_t::quincy;
+    } else {
+      derr << __func__ << " mon_debug_no_require_squid=true" << dendl;
+      newmap.require_osd_release = ceph_release_t::reef;
     }
   } else {
-    newmap.require_osd_release = ceph_release_t::reef;
+    newmap.require_osd_release = ceph_release_t::squid;
   }
 
   ceph_release_t r = ceph_release_from_name(g_conf()->mon_osd_initial_require_min_compat_client);
@@ -1162,7 +1162,6 @@ void OSDMonitor::create_pending()
   pending_inc.fsid = mon.monmap->fsid;
   pending_metadata.clear();
   pending_metadata_rm.clear();
-  pending_pseudo_purged_snaps.clear();
 
   dout(10) << "create_pending e " << pending_inc.epoch << dendl;
 
@@ -2062,13 +2061,6 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
 	 q != i.second.end();
 	 ++q) {
       insert_purged_snap_update(i.first, q.get_start(), q.get_end(),
-				pending_inc.epoch,
-				t);
-    }
-  }
-  for (auto& [pool, snaps] : pending_pseudo_purged_snaps) {
-    for (auto snap : snaps) {
-      insert_purged_snap_update(pool, snap, snap + 1,
 				pending_inc.epoch,
 				t);
     }
@@ -3486,26 +3478,26 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
   ceph_assert(m->get_orig_source_inst().name.is_osd());
 
   // lower bound of N-2
-  if (!HAVE_FEATURE(m->osd_features, SERVER_PACIFIC)) {
+  if (!HAVE_FEATURE(m->osd_features, SERVER_QUINCY)) {
     mon.clog->info() << "disallowing boot of OSD "
 		     << m->get_orig_source_inst()
-		     << " because the osd lacks CEPH_FEATURE_SERVER_PACIFIC";
+		     << " because the osd lacks CEPH_FEATURE_SERVER_QUINCY";
     goto ignore;
   }
 
   // make sure osd versions do not span more than 3 releases
-  if (HAVE_FEATURE(m->osd_features, SERVER_QUINCY) &&
-      osdmap.require_osd_release < ceph_release_t::octopus) {
-    mon.clog->info() << "disallowing boot of quincy+ OSD "
-		      << m->get_orig_source_inst()
-		      << " because require_osd_release < octopus";
-    goto ignore;
-  }
   if (HAVE_FEATURE(m->osd_features, SERVER_REEF) &&
       osdmap.require_osd_release < ceph_release_t::pacific) {
     mon.clog->info() << "disallowing boot of reef+ OSD "
 		      << m->get_orig_source_inst()
 		      << " because require_osd_release < pacific";
+    goto ignore;
+  }
+  if (HAVE_FEATURE(m->osd_features, SERVER_SQUID) &&
+      osdmap.require_osd_release < ceph_release_t::quincy) {
+    mon.clog->info() << "disallowing boot of squid+ OSD "
+		      << m->get_orig_source_inst()
+		      << " because require_osd_release < quincy";
     goto ignore;
   }
 
@@ -11669,7 +11661,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       err = 0;
       goto reply_no_propose;
     }
-    if (osdmap.require_osd_release < ceph_release_t::pacific && !sure) {
+    if (osdmap.require_osd_release < ceph_release_t::quincy && !sure) {
       ss << "Not advisable to continue since current 'require_osd_release' "
          << "refers to a very old Ceph release. Pass "
 	 << "--yes-i-really-mean-it if you really wish to continue.";
@@ -11682,20 +11674,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       err = -EPERM;
       goto reply_no_propose;
     }
-    if (rel == ceph_release_t::pacific) {
-      if (!mon.monmap->get_required_features().contains_all(
-	    ceph::features::mon::FEATURE_PACIFIC)) {
-	ss << "not all mons are pacific";
-	err = -EPERM;
-	goto reply_no_propose;
-      }
-      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_PACIFIC))
-           && !sure) {
-	ss << "not all up OSDs have CEPH_FEATURE_SERVER_PACIFIC feature";
-	err = -EPERM;
-	goto reply_no_propose;
-      }
-    } else if (rel == ceph_release_t::quincy) {
+    if (rel == ceph_release_t::quincy) {
       if (!mon.monmap->get_required_features().contains_all(
 	    ceph::features::mon::FEATURE_QUINCY)) {
 	ss << "not all mons are quincy";
@@ -11718,6 +11697,19 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_REEF))
            && !sure) {
 	ss << "not all up OSDs have CEPH_FEATURE_SERVER_REEF feature";
+	err = -EPERM;
+	goto reply_no_propose;
+      }
+    } else if (rel == ceph_release_t::squid) {
+      if (!mon.monmap->get_required_features().contains_all(
+	    ceph::features::mon::FEATURE_SQUID)) {
+	ss << "not all mons are squid";
+	err = -EPERM;
+	goto reply_no_propose;
+      }
+      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_SQUID))
+           && !sure) {
+	ss << "not all up OSDs have CEPH_FEATURE_SERVER_SQUID feature";
 	err = -EPERM;
 	goto reply_no_propose;
       }
@@ -14303,10 +14295,6 @@ bool OSDMonitor::prepare_pool_op(MonOpRequestRef op)
 	m->snapid,
 	osdmap.require_osd_release < ceph_release_t::octopus);
       pending_inc.new_removed_snaps[m->pool].insert(m->snapid);
-      // also record the new seq as purged: this avoids a discontinuity
-      // after all of the snaps have been purged, since the seq assigned
-      // during removal lives in the same namespace as the actual snaps.
-      pending_pseudo_purged_snaps[m->pool].insert(pp.get_snap_seq());
       changed = true;
     }
     break;

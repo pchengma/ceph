@@ -934,6 +934,10 @@ void OSDMap::Incremental::decode(ceph::buffer::list::const_iterator& bl)
       decode(new_last_up_change, bl);
       decode(new_last_in_change, bl);
     }
+    if (struct_v >= 9) {
+      decode(new_pg_upmap_primary, bl);
+      decode(old_pg_upmap_primary, bl);
+    }
     DECODE_FINISH(bl); // client-usable data
   }
 
@@ -7410,6 +7414,14 @@ unsigned OSDMap::get_device_class_flags(int id) const
 
 std::optional<std::string> OSDMap::pending_require_osd_release() const
 {
+  if (HAVE_FEATURE(get_up_osd_features(), SERVER_SQUID) &&
+      require_osd_release < ceph_release_t::squid) {
+    return "squid";
+  }
+  if (HAVE_FEATURE(get_up_osd_features(), SERVER_REEF) &&
+      require_osd_release < ceph_release_t::reef) {
+    return "reef";
+  }
   if (HAVE_FEATURE(get_up_osd_features(), SERVER_QUINCY) &&
       require_osd_release < ceph_release_t::quincy) {
     return "quincy";

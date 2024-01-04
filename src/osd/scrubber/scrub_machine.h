@@ -156,8 +156,6 @@ MEV(GotReplicas)
 /// internal - BuildMap preempted. Required, as detected within the ctor
 MEV(IntBmPreempted)
 
-MEV(InternalError)
-
 MEV(IntLocalMapDone)
 
 /// external. called upon success of a MODIFY op. See
@@ -231,6 +229,8 @@ class ScrubMachine : public sc::state_machine<ScrubMachine, NotActive> {
   [[nodiscard]] bool is_reserving() const;
   [[nodiscard]] bool is_accepting_updates() const;
 
+  // elapsed time for the currently active scrub.session
+  ceph::timespan get_time_scrubbing() const;
 
 // ///////////////// aux declarations & functions //////////////////////// //
 
@@ -420,6 +420,13 @@ struct Session : sc::state<Session, ScrubMachine, ReservingReplicas>,
   /// managing the scrub session's reservations (optional, as
   /// it's an RAII wrapper around the state of 'holding reservations')
   std::optional<ReplicaReservations> m_reservations{std::nullopt};
+
+  /// the relevant set of performance counters for this session
+  /// (relevant, i.e. for this pool type X scrub level)
+  PerfCounters* m_perf_set{nullptr};
+
+  /// the time when the session was initiated
+  ScrubTimePoint m_session_started_at{ScrubClock::now()};
 };
 
 struct ReservingReplicas : sc::state<ReservingReplicas, Session>,
@@ -431,8 +438,7 @@ struct ReservingReplicas : sc::state<ReservingReplicas, Session>,
 			      sc::transition<RemotesReserved, ActiveScrubbing>,
 			      sc::custom_reaction<ReservationTimeout>>;
 
-  ceph::coarse_real_clock::time_point entered_at =
-    ceph::coarse_real_clock::now();
+  ScrubTimePoint entered_at = ScrubClock::now();
   ScrubMachine::timer_event_token_t m_timeout_token;
 
   /// a "raw" event carrying a peer's grant response
@@ -473,10 +479,6 @@ struct ActiveScrubbing
 
   explicit ActiveScrubbing(my_context ctx);
   ~ActiveScrubbing();
-
-  using reactions = mpl::list<sc::custom_reaction<InternalError>>;
-
-  sc::result react(const InternalError&);
 };
 
 struct RangeBlocked : sc::state<RangeBlocked, ActiveScrubbing>, NamedSimply {
@@ -485,10 +487,9 @@ struct RangeBlocked : sc::state<RangeBlocked, ActiveScrubbing>, NamedSimply {
     sc::custom_reaction<RangeBlockedAlarm>,
     sc::transition<Unblocked, PendingTimer>>;
 
-  ceph::coarse_real_clock::time_point entered_at =
-    ceph::coarse_real_clock::now();
+  ScrubTimePoint entered_at = ScrubClock::now();
   ScrubMachine::timer_event_token_t m_timeout_token;
-  sc::result react(const RangeBlockedAlarm &);
+  sc::result react(const RangeBlockedAlarm&);
 };
 
 /**
@@ -506,8 +507,7 @@ struct PendingTimer : sc::state<PendingTimer, ActiveScrubbing>, NamedSimply {
     sc::transition<InternalSchedScrub, NewChunk>,
     sc::custom_reaction<SleepComplete>>;
 
-  ceph::coarse_real_clock::time_point entered_at =
-    ceph::coarse_real_clock::now();
+  ScrubTimePoint entered_at = ScrubClock::now();
   ScrubMachine::timer_event_token_t m_sleep_timer;
   sc::result react(const SleepComplete&);
 };
@@ -560,12 +560,13 @@ struct BuildMap : sc::state<BuildMap, ActiveScrubbing>, NamedSimply {
   explicit BuildMap(my_context ctx);
 
   // possible error scenarios:
-  // - an error reported by the backend will trigger an 'InternalError' event,
-  //   handled by our parent state;
+  // - an error reported by the backend will cause the scrubber to
+  //   ceph_abort() the OSD. No need to handle it here.
   // - if preempted, we switch to DrainReplMaps, where we will wait for all
   //   replicas to send their maps before acknowledging the preemption;
   // - an interval change will be handled by the relevant 'send-event'
-  //   functions, and will translated into a 'FullReset' event.
+  //   functions, translated into an IntervalChanged event (handled by
+  //   the 'Session' state).
   using reactions = mpl::list<sc::transition<IntBmPreempted, DrainReplMaps>,
 			      // looping, waiting for the backend to finish:
 			      sc::transition<InternalSchedScrub, BuildMap>,

@@ -770,12 +770,14 @@ PGBackend::write_iertr::future<> PGBackend::writefull(
 
 PGBackend::rollback_iertr::future<> PGBackend::rollback(
   ObjectState& os,
+  const SnapSet &ss,
   const OSDOp& osd_op,
   ceph::os::Transaction& txn,
   osd_op_params_t& osd_op_params,
   object_stat_sum_t& delta_stats,
   crimson::osd::ObjectContextRef head,
-  crimson::osd::ObjectContextLoader& obc_loader)
+  crimson::osd::ObjectContextLoader& obc_loader,
+  const SnapContext &snapc)
 {
   const ceph_osd_op& op = osd_op.op;
   snapid_t snapid = (uint64_t)op.snap.snapid;
@@ -833,12 +835,12 @@ PGBackend::rollback_iertr::future<> PGBackend::rollback(
     // if there's no snapshot, we delete the object;
     // otherwise, do nothing.
     crimson::ct_error::enoent::handle(
-    [this, &os, &snapid, &txn, &delta_stats] {
+    [this, &os, &snapid, &txn, &delta_stats, &snapc, &ss] {
       logger().debug("PGBackend::rollback: deleting head on {}"
                      " with snap_id of {}"
                      " because got ENOENT|whiteout on obc lookup",
                      os.oi.soid, snapid);
-      return remove(os, txn, delta_stats, false);
+      return remove(os, txn, delta_stats, should_whiteout(ss, snapc));
     }),
     rollback_ertr::pass_further{},
     crimson::ct_error::assert_all{"unexpected error in rollback"}
@@ -990,6 +992,12 @@ PGBackend::remove(ObjectState& os, ceph::os::Transaction& txn,
   txn.remove(coll->get_cid(),
 	     ghobject_t{os.oi.soid, ghobject_t::NO_GEN, shard});
   delta_stats.num_bytes -= os.oi.size;
+
+  if (os.oi.is_omap()) {
+    os.oi.clear_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap--;
+  }
+
   os.oi.size = 0;
   os.oi.new_object();
 
@@ -1599,7 +1607,10 @@ PGBackend::omap_set_vals(
   osd_op_params.clean_regions.mark_omap_dirty();
   delta_stats.num_wr++;
   delta_stats.num_wr_kb += shift_round_up(to_set_bl.length(), 10);
-  os.oi.set_flag(object_info_t::FLAG_OMAP);
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
   os.oi.clear_omap_digest();
   return seastar::now();
 }
@@ -1616,7 +1627,10 @@ PGBackend::omap_set_header(
   txn.omap_setheader(coll->get_cid(), ghobject_t{os.oi.soid}, osd_op.indata);
   osd_op_params.clean_regions.mark_omap_dirty();
   delta_stats.num_wr++;
-  os.oi.set_flag(object_info_t::FLAG_OMAP);
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
   os.oi.clear_omap_digest();
   return seastar::now();
 }

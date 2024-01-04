@@ -1,20 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(ceph
-  VERSION 18.0.0
+  VERSION 19.0.0
   LANGUAGES CXX C ASM)
 
-cmake_policy(SET CMP0028 NEW)
-cmake_policy(SET CMP0046 NEW)
-cmake_policy(SET CMP0048 NEW)
-cmake_policy(SET CMP0051 NEW)
-cmake_policy(SET CMP0054 NEW)
-cmake_policy(SET CMP0056 NEW)
-cmake_policy(SET CMP0065 NEW)
-cmake_policy(SET CMP0074 NEW)
-cmake_policy(SET CMP0075 NEW)
-cmake_policy(SET CMP0093 NEW)
-cmake_policy(SET CMP0094 NEW)
 foreach(policy CMP0127 CMP0135)
   if(POLICY ${policy})
     cmake_policy(SET ${policy} NEW)
@@ -703,7 +692,7 @@ else()
 endif()
 include_directories(BEFORE SYSTEM ${Boost_INCLUDE_DIRS})
 
-if(Boost_VERSION VERSION_EQUAL 1.81 OR Boost_VERSION VERSION_EQUAL 1.82)
+if(Boost_VERSION VERSION_LESS 1.84)
   # This is a workaround for https://github.com/boostorg/phoenix/issues/111
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-DBOOST_PHOENIX_STL_TUPLE_H_>)
 endif()
