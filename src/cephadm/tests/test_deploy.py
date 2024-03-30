@@ -49,6 +49,7 @@ def test_deploy_nfs_container(cephadm_fs, funkypatch):
             'pool': 'foo',
             'files': {
                 'ganesha.conf': 'FAKE',
+                'idmap.conf': 'FAKE',
             },
             'config': 'BALONEY',
             'keyring': 'BUNKUS',
@@ -305,6 +306,7 @@ def test_deploy_a_monitoring_container(cephadm_fs, funkypatch):
             'files': {
                 'prometheus.yml': 'bettercallherc',
             },
+            'ip_to_bind_to': '1.2.3.4'
         }
         _cephadm._common_deploy(ctx)
 
@@ -314,7 +316,7 @@ def test_deploy_a_monitoring_container(cephadm_fs, funkypatch):
         runfile_lines = f.read().splitlines()
     assert 'podman' in runfile_lines[-1]
     assert runfile_lines[-1].endswith(
-        'quay.io/titans/prometheus:latest --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=:9095 --storage.tsdb.retention.time=15d --storage.tsdb.retention.size=0 --web.external-url=http://10.10.10.10:9095'
+        'quay.io/titans/prometheus:latest --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d --storage.tsdb.retention.size=0 --web.external-url=http://10.10.10.10:9095 --web.listen-address=1.2.3.4:9095'
     )
     assert '--user 8765' in runfile_lines[-1]
     assert f'-v /var/lib/ceph/{fsid}/prometheus.fire/etc/prometheus:/etc/prometheus:Z' in runfile_lines[-1]
@@ -488,3 +490,77 @@ def test_deploy_ceph_exporter_container(cephadm_fs, funkypatch):
         assert f.read() == 'XXXXXXX'
     with open(basedir / 'keyring') as f:
         assert f.read() == 'YYYYYY'
+
+
+def test_deploy_and_rm_iscsi(cephadm_fs, funkypatch):
+    # Test that the deploy and remove paths for iscsi (which has sidecar container)
+    # create and remove the correct unit files.
+    mocks = _common_patches(funkypatch)
+    _firewalld = mocks['Firewalld']
+    fsid = 'b01dbeef-701d-9abe-0000-e1e5a47004a7'
+    with with_cephadm_ctx([]) as ctx:
+        ctx.container_engine = mock_podman()
+        ctx.fsid = fsid
+        ctx.name = 'iscsi.wuzzy'
+        ctx.image = 'quay.io/ayeaye/iscsi:latest'
+        ctx.reconfig = False
+        ctx.config_blobs = {
+            'config': 'XXXXXXX',
+            'keyring': 'YYYYYY',
+            'files': {
+                'iscsi-gateway.cfg': 'portal',
+            },
+        }
+        _cephadm._common_deploy(ctx)
+
+    unit_dir = pathlib.Path('/etc/systemd/system')
+    assert unit_dir.is_dir()
+    assert (unit_dir / f'ceph-{fsid}@.service').exists()
+    drop_in = unit_dir / f'ceph-{fsid}@iscsi.wuzzy.service.d/99-cephadm.conf'
+    assert drop_in.parent.is_dir()
+    assert drop_in.exists()
+    assert 'tcmu' in drop_in.read_text()
+    tcmu_sidecar = unit_dir / f'ceph-{fsid}-sidecar@iscsi.wuzzy:tcmu.service'
+    assert tcmu_sidecar.exists()
+    assert 'sidecar-tcmu.run' in tcmu_sidecar.read_text()
+
+    with with_cephadm_ctx([]) as ctx:
+        ctx.container_engine = mock_podman()
+        ctx.fsid = fsid
+        ctx.name = 'iscsi.wuzzy'
+        ctx.image = 'quay.io/ayeaye/iscsi:latest'
+        _cephadm.command_rm_daemon(ctx)
+
+    assert not drop_in.exists()
+    assert not drop_in.parent.exists()
+    assert not tcmu_sidecar.exists()
+
+
+def test_deploy_smb_container(cephadm_fs, funkypatch):
+    mocks = _common_patches(funkypatch)
+    fsid = 'b01dbeef-701d-9abe-0000-e1e5a47004a7'
+    with with_cephadm_ctx([]) as ctx:
+        ctx.container_engine = mock_podman()
+        ctx.fsid = fsid
+        ctx.name = 'smb.b01s'
+        ctx.image = 'quay.io/essembee/samba-server:latest'
+        ctx.reconfig = False
+        ctx.config_blobs = {
+            'cluster_id': 'smb1',
+            'config_uri': 'http://localhost:9876/smb.json',
+            'config': 'SAMPLE',
+            'keyring': 'SOMETHING',
+        }
+        _cephadm._common_deploy(ctx)
+
+    basedir = pathlib.Path(f'/var/lib/ceph/{fsid}/smb.b01s')
+    assert basedir.is_dir()
+    with open(basedir / 'unit.run') as f:
+        runfile_lines = f.read().splitlines()
+    assert 'podman' in runfile_lines[-1]
+    assert runfile_lines[-1].endswith('quay.io/essembee/samba-server:latest --samba-debug-level=6 run smbd')
+    assert f'-v {basedir}/etc-samba-container:/etc/samba/container:z' in runfile_lines[-1]
+    assert f'-v {basedir}/lib-samba:/var/lib/samba:z' in runfile_lines[-1]
+    assert '-e SAMBA_CONTAINER_ID=smb1' in runfile_lines[-1]
+    assert '-e \'SAMBACC_CONFIG=["http://localhost:9876/smb.json"]\'' in runfile_lines[-1]
+    assert '--publish' in runfile_lines[-1]

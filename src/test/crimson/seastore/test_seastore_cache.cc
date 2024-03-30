@@ -76,7 +76,7 @@ struct cache_test_t : public seastar_test_suite_t {
     return with_trans_intr(
       t,
       [this](auto &&... args) {
-	return cache->get_extent<T>(args...);
+	return cache->get_caching_extent<T>(args...);
       },
       std::forward<Args>(args)...);
   }
@@ -129,7 +129,7 @@ TEST_F(cache_test_t, test_addr_fixup)
     int csum = 0;
     {
       auto t = get_transaction();
-      auto extent = cache->alloc_new_extent<TestBlockPhysical>(
+      auto extent = cache->alloc_new_non_data_extent<TestBlockPhysical>(
 	*t,
 	TestBlockPhysical::SIZE,
 	placement_hint_t::HOT,
@@ -160,7 +160,7 @@ TEST_F(cache_test_t, test_dirty_extent)
     {
       // write out initial test block
       auto t = get_transaction();
-      auto extent = cache->alloc_new_extent<TestBlockPhysical>(
+      auto extent = cache->alloc_new_non_data_extent<TestBlockPhysical>(
 	*t,
 	TestBlockPhysical::SIZE,
 	placement_hint_t::HOT,

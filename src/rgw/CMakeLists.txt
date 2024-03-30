@@ -193,7 +193,8 @@ set(librgw_common_srcs
   driver/rados/rgw_trim_mdlog.cc
   driver/rados/rgw_user.cc
   driver/rados/rgw_zone.cc
-  driver/rados/sync_fairness.cc)
+  driver/rados/sync_fairness.cc
+  driver/rados/topic.cc)
 
 list(APPEND librgw_common_srcs
   driver/immutable_config/store.cc
@@ -270,6 +271,7 @@ target_link_libraries(rgw_common
     cls_user_client
     cls_version_client
     librados
+    libneorados
     rt
     ICU::uc
     OATH::OATH

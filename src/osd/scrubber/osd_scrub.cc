@@ -57,6 +57,14 @@ void OsdScrub::dump_scrubs(ceph::Formatter* f) const
   m_queue.dump_scrubs(f);
 }
 
+void OsdScrub::dump_scrub_reservations(ceph::Formatter* f) const
+{
+  m_resource_bookkeeper.dump_scrub_reservations(f);
+  f->open_array_section("remote_scrub_reservations");
+  m_osd_svc.get_scrub_reserver().dump(f);
+  f->close_section();
+}
+
 void OsdScrub::log_fwd(std::string_view text)
 {
   dout(20) << text << dendl;
@@ -419,20 +427,23 @@ PerfCounters* OsdScrub::get_perf_counters(int pool_type, scrub_level_t level)
 // ////////////////////////////////////////////////////////////////////////// //
 // forwarders to the queue
 
-Scrub::sched_params_t OsdScrub::determine_scrub_time(
-    const requested_scrub_t& request_flags,
-    const pg_info_t& pg_info,
-    const pool_opts_t& pool_conf) const
-{
-  return m_queue.determine_scrub_time(request_flags, pg_info, pool_conf);
-}
-
 void OsdScrub::update_job(
     Scrub::ScrubJobRef sjob,
-    const Scrub::sched_params_t& suggested)
+    const Scrub::sched_params_t& suggested,
+    bool reset_notbefore)
 {
-  m_queue.update_job(sjob, suggested);
+  m_queue.update_job(sjob, suggested, reset_notbefore);
 }
+
+void OsdScrub::delay_on_failure(
+      Scrub::ScrubJobRef sjob,
+      std::chrono::seconds delay,
+      Scrub::delay_cause_t delay_cause,
+      utime_t now_is)
+{
+  m_queue.delay_on_failure(sjob, delay, delay_cause, now_is);
+}
+
 
 void OsdScrub::register_with_osd(
     Scrub::ScrubJobRef sjob,
@@ -455,16 +466,6 @@ std::unique_ptr<Scrub::LocalResourceWrapper> OsdScrub::inc_scrubs_local(
 void OsdScrub::dec_scrubs_local()
 {
   m_resource_bookkeeper.dec_scrubs_local();
-}
-
-bool OsdScrub::inc_scrubs_remote(pg_t pgid)
-{
-  return m_resource_bookkeeper.inc_scrubs_remote(pgid);
-}
-
-void OsdScrub::dec_scrubs_remote(pg_t pgid)
-{
-  m_resource_bookkeeper.dec_scrubs_remote(pgid);
 }
 
 void OsdScrub::mark_pg_scrub_blocked(spg_t blocked_pg)

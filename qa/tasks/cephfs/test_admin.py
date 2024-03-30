@@ -7,6 +7,7 @@ from os.path import join as os_path_join
 from time import sleep
 
 from teuthology.exceptions import CommandFailedError
+from teuthology.contextutil import safe_while
 
 from tasks.cephfs.cephfs_test_case import CephFSTestCase, classhook
 from tasks.cephfs.filesystem import FileLayout, FSMissing
@@ -15,6 +16,58 @@ from tasks.cephfs.caps_helper import (CapTester, gen_mon_cap_str,
                                       gen_osd_cap_str, gen_mds_cap_str)
 
 log = logging.getLogger(__name__)
+
+class TestLabeledPerfCounters(CephFSTestCase):
+    CLIENTS_REQUIRED = 2
+    MDSS_REQUIRED = 1
+
+    def test_per_client_labeled_perf_counters(self):
+        """
+        That the per-client labelled perf counters depict the clients
+        performaing IO.
+        """
+        def get_counters_for(filesystem, client_id):
+            dump = self.fs.rank_tell(["counter", "dump"])
+            per_client_metrics_key = f'mds_client_metrics-{filesystem}'
+            counters = [c["counters"] for \
+                        c in dump[per_client_metrics_key] if c["labels"]["client"] == client_id]
+            return counters[0]
+
+        # sleep a bit so that we get updated clients...
+        sleep(10)
+
+        # lookout for clients...
+        dump = self.fs.rank_tell(["counter", "dump"])
+
+        fs_suffix = dump["mds_client_metrics"][0]["labels"]["fs_name"]
+        self.assertGreaterEqual(dump["mds_client_metrics"][0]["counters"]["num_clients"], 2)
+
+        per_client_metrics_key = f'mds_client_metrics-{fs_suffix}'
+        mount_a_id = f'client.{self.mount_a.get_global_id()}'
+        mount_b_id = f'client.{self.mount_b.get_global_id()}'
+
+        clients = [c["labels"]["client"] for c in dump[per_client_metrics_key]]
+        self.assertIn(mount_a_id, clients)
+        self.assertIn(mount_b_id, clients)
+
+        # write workload
+        self.mount_a.create_n_files("test_dir/test_file", 1000, sync=True)
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
+            counters_dump_a = get_counters_for(fs_suffix, mount_a_id)
+            while proceed():
+                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0:
+                    return True
+
+        # read from the other client
+        for i in range(100):
+            self.mount_b.open_background(basename=f'test_dir/test_file_{i}', write=False)
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_b_id}') as proceed:
+            counters_dump_b = get_counters_for(fs_suffix, mount_b_id)
+            while proceed():
+                if counters_dump_b["total_read_ops"] > 0 and counters_dump_b["total_read_size"] > 0:
+                    return True
+
+        self.fs.teardown()
 
 class TestAdminCommands(CephFSTestCase):
     """
@@ -1314,6 +1367,8 @@ class TestMirroringCommands(CephFSTestCase):
 class TestFsAuthorize(CephFSTestCase):
     client_id = 'testuser'
     client_name = 'client.' + client_id
+    CLIENTS_REQUIRED = 2
+    MDSS_REQUIRED = 3
 
     def test_single_path_r(self):
         PERM = 'r'
@@ -1352,6 +1407,46 @@ class TestFsAuthorize(CephFSTestCase):
         self.captester.conduct_neg_test_for_write_caps(sudo_write=True)
         self.captester.conduct_neg_test_for_chown_caps()
         self.captester.conduct_neg_test_for_truncate_caps()
+
+    def test_multifs_single_path_rootsquash(self):
+        """
+        Test root_squash with multi fs
+        """
+        self.fs1 = self.fs
+        self.fs2 = self.mds_cluster.newfs('testcephfs2')
+        self.mount_b.remount(cephfs_name=self.fs2.name)
+        self.captesters = (CapTester(self.mount_a), CapTester(self.mount_b))
+
+        if not isinstance(self.mount_a, FuseMount):
+            self.skipTest("only FUSE client has CEPHFS_FEATURE_MDS_AUTH_CAPS "
+                          "needed to enforce root_squash MDS caps")
+
+        # Authorize client to fs1
+        PERM = 'rw'
+        FS_AUTH_CAPS = (('/', PERM, 'root_squash'),)
+        self.captester = CapTester(self.mount_a, '/')
+        self.fs1.authorize(self.client_id, FS_AUTH_CAPS)
+
+        # Authorize client to fs2
+        self.fs2.authorize(self.client_id, FS_AUTH_CAPS)
+        keyring = self.fs.mon_manager.get_keyring(self.client_id)
+
+        self._remount(self.mount_a, self.fs1.name, keyring)
+        self._remount(self.mount_b, self.fs2.name, keyring)
+        # testing MDS caps...
+        # Since root_squash is set in client caps, client can read but not
+        # write even though access level is set to "rw" on both fses
+        self.captester[0].conduct_pos_test_for_read_caps()
+        self.captester[0].conduct_pos_test_for_open_caps()
+        self.captester[0].conduct_neg_test_for_write_caps(sudo_write=True)
+        self.captester[0].conduct_neg_test_for_chown_caps()
+        self.captester[0].conduct_neg_test_for_truncate_caps()
+
+        self.captester[1].conduct_pos_test_for_read_caps()
+        self.captester[1].conduct_pos_test_for_open_caps()
+        self.captester[1].conduct_neg_test_for_write_caps(sudo_write=True)
+        self.captester[1].conduct_neg_test_for_chown_caps()
+        self.captester[1].conduct_neg_test_for_truncate_caps()
 
     def test_single_path_rootsquash_issue_56067(self):
         """

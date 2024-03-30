@@ -107,6 +107,15 @@ struct ScrubMachineListener {
 
   [[nodiscard]] virtual bool is_primary() const = 0;
 
+  /// dequeue this PG from the OSD's scrub-queue
+  virtual void rm_from_osd_scrubbing() = 0;
+
+  /**
+   * the FSM has entered the PrimaryActive state. That happens when
+   * peered as a Primary, and achieving the 'active' state.
+   */
+  virtual void schedule_scrub_with_osd() = 0;
+
   virtual void select_range_n_notify() = 0;
 
   /// walk the log to find the latest update that affects our chunk
@@ -126,8 +135,15 @@ struct ScrubMachineListener {
 
   virtual void replica_handling_done() = 0;
 
-  /// the version of 'scrub_clear_state()' that does not try to invoke FSM
-  /// services (thus can be called from FSM reactions)
+  /**
+   * clears both internal scrub state, and some PG-visible flags:
+   * - the two scrubbing PG state flags;
+   * - primary/replica scrub position (chunk boundaries);
+   * - primary/replica interaction state;
+   * - the backend state;
+   * Also runs pending callbacks, and clears the active flags.
+   * Does not try to invoke FSM events.
+   */
   virtual void clear_pgscrub_state() = 0;
 
   /// Get time to sleep before next scrub
@@ -145,6 +161,10 @@ struct ScrubMachineListener {
 
   /// the part that actually finalizes a scrub
   virtual void scrub_finish() = 0;
+
+  /// notify the scrubber about a scrub failure
+  /// (note: temporary implementation)
+  virtual void penalize_next_scrub(Scrub::delay_cause_t cause) = 0;
 
   /**
    * Prepare a MOSDRepScrubMap message carrying the requested scrub map
@@ -203,6 +223,9 @@ struct ScrubMachineListener {
   virtual void set_queued_or_active() = 0;
   virtual void clear_queued_or_active() = 0;
 
+  /// note the epoch when the scrub session started
+  virtual void reset_epoch() = 0;
+
   /**
    * Our scrubbing is blocked, waiting for an excessive length of time for
    * our target chunk to be unlocked. We will set the corresponding flags,
@@ -233,8 +256,7 @@ struct ScrubMachineListener {
   /// sending cluster-log warnings
   virtual void log_cluster_warning(const std::string& msg) const = 0;
 
-  // temporary interface (to be discarded in a follow-up PR)
-  /// set the 'resources_failure' flag in the scrub-job object
+  /// delay next retry of this PG after a replica reservation failure
   virtual void flag_reservations_failure() = 0;
 
   /// is this scrub more than just regular periodic scrub?

@@ -15,6 +15,10 @@
 
 #pragma once
 
+#include "include/neorados/RADOS.hpp"
+
+#include <boost/asio/io_context.hpp>
+
 #include "rgw_sal_store.h"
 #include "rgw_rados.h"
 #include "rgw_notify.h"
@@ -112,19 +116,22 @@ class RadosZone : public StoreZone {
 
 class RadosStore : public StoreDriver {
   private:
+    boost::asio::io_context& io_context;
     RGWRados* rados;
     RGWUserCtl* user_ctl;
     std::unique_ptr<RadosZone> zone;
+    std::optional<neorados::RADOS> neorados;
     std::string topics_oid(const std::string& tenant) const;
 
   public:
-    RadosStore()
-      : rados(nullptr) {
+    RadosStore(boost::asio::io_context& io_context)
+      : io_context(io_context), rados(nullptr) {
       }
     ~RadosStore() {
       delete rados;
     }
 
+    int init_neorados(const DoutPrefixProvider* dpp);
     virtual int initialize(CephContext *cct, const DoutPrefixProvider *dpp) override;
     virtual const std::string get_name() const override {
       return "rados";
@@ -148,15 +155,51 @@ class RadosStore : public StoreDriver {
     virtual std::unique_ptr<Lifecycle> get_lifecycle(void) override;
     virtual std::unique_ptr<Notification> get_notification(rgw::sal::Object* obj, rgw::sal::Object* src_obj, req_state* s, rgw::notify::EventType event_type, optional_yield y, const std::string* object_name=nullptr) override;
     virtual std::unique_ptr<Notification> get_notification(
-    const DoutPrefixProvider* dpp, rgw::sal::Object* obj, rgw::sal::Object* src_obj, 
-    rgw::notify::EventType event_type, rgw::sal::Bucket* _bucket, std::string& _user_id, std::string& _user_tenant,
-    std::string& _req_id, optional_yield y) override;
+        const DoutPrefixProvider* dpp,
+        rgw::sal::Object* obj,
+        rgw::sal::Object* src_obj,
+        const rgw::notify::EventTypeList& event_types,
+        rgw::sal::Bucket* _bucket,
+        std::string& _user_id,
+        std::string& _user_tenant,
+        std::string& _req_id,
+        optional_yield y) override;
     int read_topics(const std::string& tenant, rgw_pubsub_topics& topics, RGWObjVersionTracker* objv_tracker,
         optional_yield y, const DoutPrefixProvider *dpp) override;
+    int stat_topics_v1(const std::string& tenant, optional_yield y, const DoutPrefixProvider *dpp) override;
     int write_topics(const std::string& tenant, const rgw_pubsub_topics& topics, RGWObjVersionTracker* objv_tracker,
 	optional_yield y, const DoutPrefixProvider *dpp) override;
     int remove_topics(const std::string& tenant, RGWObjVersionTracker* objv_tracker,
         optional_yield y, const DoutPrefixProvider *dpp) override;
+    int read_topic_v2(const std::string& topic_name,
+                      const std::string& tenant,
+                      rgw_pubsub_topic& topic,
+                      RGWObjVersionTracker* objv_tracker,
+                      optional_yield y,
+                      const DoutPrefixProvider* dpp) override;
+    int write_topic_v2(const rgw_pubsub_topic& topic, bool exclusive,
+                       RGWObjVersionTracker& objv_tracker,
+                       optional_yield y,
+                       const DoutPrefixProvider* dpp) override;
+    int remove_topic_v2(const std::string& topic_name,
+                        const std::string& tenant,
+                        RGWObjVersionTracker& objv_tracker,
+                        optional_yield y,
+                        const DoutPrefixProvider* dpp) override;
+    int update_bucket_topic_mapping(const rgw_pubsub_topic& topic,
+                                    const std::string& bucket_key,
+                                    bool add_mapping,
+                                    optional_yield y,
+                                    const DoutPrefixProvider* dpp) override;
+    int remove_bucket_mapping_from_topics(
+        const rgw_pubsub_bucket_topics& bucket_topics,
+        const std::string& bucket_key,
+        optional_yield y,
+        const DoutPrefixProvider* dpp) override;
+    int get_bucket_topic_mapping(const rgw_pubsub_topic& topic,
+                                 std::set<std::string>& bucket_keys,
+                                 optional_yield y,
+                                 const DoutPrefixProvider* dpp) override;
     virtual RGWLC* get_rgwlc(void) override { return rados->get_lc(); }
     virtual RGWCoroutinesManagerRegistry* get_cr_registry() override { return rados->get_cr_registry(); }
 
@@ -240,6 +283,8 @@ class RadosStore : public StoreDriver {
 
     void setRados(RGWRados * st) { rados = st; }
     RGWRados* getRados(void) { return rados; }
+    boost::asio::io_context& get_io_context() { return io_context; }
+    neorados::RADOS& get_neorados() { return *neorados; }
 
     RGWServices* svc() { return &rados->svc; }
     const RGWServices* svc() const { return &rados->svc; }
@@ -332,7 +377,7 @@ class RadosObject : public StoreObject {
     public:
       RadosDeleteOp(RadosObject* _source);
 
-      virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y) override;
+      virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y, uint32_t flags) override;
     };
 
     RadosObject(RadosStore *_st, const rgw_obj_key& _k)
@@ -364,7 +409,7 @@ class RadosObject : public StoreObject {
       rados_ctx->invalidate(get_obj());
     }
     virtual int delete_object(const DoutPrefixProvider* dpp,
-			      optional_yield y, bool prevent_versioning) override;
+			      optional_yield y, uint32_t flags) override;
     virtual int copy_object(User* user,
                req_info* info, const rgw_zone_id& source_zone,
                rgw::sal::Object* dest_object, rgw::sal::Bucket* dest_bucket,
@@ -413,7 +458,8 @@ class RadosObject : public StoreObject {
 			   const real_time& mtime,
 			   uint64_t olh_epoch,
 			   const DoutPrefixProvider* dpp,
-			   optional_yield y) override;
+			   optional_yield y,
+                           uint32_t flags) override;
     virtual int transition_to_cloud(Bucket* bucket,
 			   rgw::sal::PlacementTier* tier,
 			   rgw_bucket_dir_entry& o,
@@ -589,6 +635,7 @@ class RadosMultipartUpload : public StoreMultipartUpload {
   ceph::real_time mtime;
   rgw_placement_rule placement;
   RGWObjManifest manifest;
+  multipart_upload_info upload_information;
 
 public:
   RadosMultipartUpload(RadosStore* _store, Bucket* _bucket, const std::string& oid,
@@ -692,13 +739,41 @@ class RadosNotification : public StoreNotification {
   rgw::notify::reservation_t res;
 
   public:
-    RadosNotification(const DoutPrefixProvider* _dpp, RadosStore* _store, Object* _obj, Object* _src_obj, req_state* _s, rgw::notify::EventType _type, optional_yield y, const std::string* object_name) :
-      StoreNotification(_obj, _src_obj, _type), store(_store), res(_dpp, _store, _s, _obj, _src_obj, object_name, y) { }
+  RadosNotification(const DoutPrefixProvider* _dpp,
+                    RadosStore* _store,
+                    Object* _obj,
+                    Object* _src_obj,
+                    req_state* _s,
+                    rgw::notify::EventType _type,
+                    optional_yield y,
+                    const std::string* object_name)
+      : StoreNotification(_obj, _src_obj, {_type}),
+        store(_store),
+        res(_dpp, _store, _s, _obj, _src_obj, object_name, y) {}
 
-    RadosNotification(const DoutPrefixProvider* _dpp, RadosStore* _store, Object* _obj, Object* _src_obj, rgw::notify::EventType _type, rgw::sal::Bucket* _bucket, std::string& _user_id, std::string& _user_tenant, std::string& _req_id, optional_yield y) :
-      StoreNotification(_obj, _src_obj, _type), store(_store), res(_dpp, _store, _obj, _src_obj, _bucket, _user_id, _user_tenant, _req_id, y) {}
+   RadosNotification(const DoutPrefixProvider* _dpp,
+                     RadosStore* _store,
+                     Object* _obj,
+                     Object* _src_obj,
+                     const rgw::notify::EventTypeList& _types,
+                     rgw::sal::Bucket* _bucket,
+                     std::string& _user_id,
+                     std::string& _user_tenant,
+                     std::string& _req_id,
+                     optional_yield y)
+       : StoreNotification(_obj, _src_obj, _types),
+         store(_store),
+         res(_dpp,
+             _store,
+             _obj,
+             _src_obj,
+             _bucket,
+             _user_id,
+             _user_tenant,
+             _req_id,
+             y) {}
 
-    ~RadosNotification() = default;
+   ~RadosNotification() = default;
 
     rgw::notify::reservation_t& get_reservation(void) {
       return res;
@@ -726,7 +801,8 @@ public:
 		    const rgw_user& owner,
 		    const rgw_placement_rule *ptail_placement_rule,
 		    uint64_t olh_epoch,
-		    const std::string& unique_tag) :
+		    const std::string& unique_tag,
+                    jspan_context& trace) :
 			StoreWriter(dpp, y),
 			store(_store),
 			aio(std::move(_aio)),
@@ -734,7 +810,7 @@ public:
 			processor(&*aio, store->getRados(), bucket_info,
 				  ptail_placement_rule, owner, obj_ctx,
 				  obj, olh_epoch, unique_tag,
-				  dpp, y)
+				  dpp, y, trace)
   {}
   ~RadosAtomicWriter() = default;
 
@@ -752,7 +828,8 @@ public:
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       const req_context& rctx) override;
+                       const req_context& rctx,
+                       uint32_t flags) override;
 };
 
 class RadosAppendWriter : public StoreWriter {
@@ -773,7 +850,8 @@ public:
 		    const rgw_placement_rule *ptail_placement_rule,
 		    const std::string& unique_tag,
 		    uint64_t position,
-		    uint64_t *cur_accounted_size) :
+		    uint64_t *cur_accounted_size,
+                    jspan_context& trace) :
 			StoreWriter(dpp, y),
 			store(_store),
 			aio(std::move(_aio)),
@@ -781,7 +859,7 @@ public:
 			processor(&*aio, store->getRados(), bucket_info,
 				  ptail_placement_rule, owner, obj_ctx,
 				  obj, unique_tag, position,
-				  cur_accounted_size, dpp, y)
+				  cur_accounted_size, dpp, y, trace)
   {}
   ~RadosAppendWriter() = default;
 
@@ -799,7 +877,8 @@ public:
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       const req_context& rctx) override;
+                       const req_context& rctx,
+                       uint32_t flags) override;
 };
 
 class RadosMultipartWriter : public StoreWriter {
@@ -818,7 +897,7 @@ public:
 		       RadosStore* _store, std::unique_ptr<Aio> _aio,
 		       const rgw_user& owner,
 		       const rgw_placement_rule *ptail_placement_rule,
-		       uint64_t part_num, const std::string& part_num_str) :
+		       uint64_t part_num, const std::string& part_num_str, jspan_context& trace) :
 			StoreWriter(dpp, y),
 			store(_store),
 			aio(std::move(_aio)),
@@ -826,7 +905,7 @@ public:
 			processor(&*aio, store->getRados(), bucket_info,
 				  ptail_placement_rule, owner, obj_ctx,
 				  obj, upload_id,
-				  part_num, part_num_str, dpp, y)
+				  part_num, part_num_str, dpp, y, trace)
   {}
   ~RadosMultipartWriter() = default;
 
@@ -844,7 +923,8 @@ public:
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       const req_context& rctx) override;
+                       const req_context& rctx,
+                       uint32_t flags) override;
 };
 
 class RadosLuaManager : public StoreLuaManager {

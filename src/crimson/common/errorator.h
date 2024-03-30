@@ -11,6 +11,8 @@
 #include "crimson/common/utility.h"
 #include "include/ceph_assert.h"
 
+class transaction_manager_test_t;
+
 namespace crimson::interruptible {
 
 template <typename, typename>
@@ -200,6 +202,23 @@ struct unthrowable_wrapper : error_t<unthrowable_wrapper<ErrorT, ErrorV>> {
     }
   };
 
+  class assert_failure {
+    const char* const msg = nullptr;
+  public:
+    template <std::size_t N>
+    assert_failure(const char (&msg)[N])
+      : msg(msg) {
+    }
+    assert_failure() = default;
+
+    void operator()(const unthrowable_wrapper&) {
+      if (msg) {
+        ceph_abort(msg);
+      } else {
+        ceph_abort();
+      }
+    }
+  };
 
 private:
   // can be used only to initialize the `instance` member
@@ -335,17 +354,10 @@ public:
         // to throwing an exception by the handler.
         std::invoke(std::forward<ErrorVisitorT>(errfunc),
                     ErrorT::error_t::from_exception_ptr(std::move(ep)));
-      } else if constexpr (seastar::Future<decltype(result)>) {
-        // result is seastar::future but return_t is e.g. int. If so,
-        // the else clause cannot be used as seastar::future lacks
-        // errorator_type member.
-        result = seastar::make_ready_future<return_t>(
-          std::invoke(std::forward<ErrorVisitorT>(errfunc),
-                      ErrorT::error_t::from_exception_ptr(std::move(ep))));
       } else {
-        result = FuturatorT::type::errorator_type::template make_ready_future<return_t>(
-          std::invoke(std::forward<ErrorVisitorT>(errfunc),
-                      ErrorT::error_t::from_exception_ptr(std::move(ep))));
+        result = FuturatorT::invoke(
+	  std::forward<ErrorVisitorT>(errfunc),
+	  ErrorT::error_t::from_exception_ptr(std::move(ep)));
       }
     }
   }
@@ -510,8 +522,9 @@ private:
     }
 
   protected:
-    using base_t::get_exception;
+    friend class ::transaction_manager_test_t;
   public:
+    using base_t::get_exception;
     using errorator_type = ::crimson::errorator<AllowedErrors...>;
     using promise_type = seastar::promise<ValueT>;
 
@@ -592,6 +605,10 @@ private:
             errorator_type::make_exception_ptr(e))) {
       static_assert(errorator_type::contains_once_v<DecayedT>,
                     "ErrorT is not enlisted in errorator");
+    }
+
+    void set_coroutine(seastar::task& coroutine) noexcept {
+      base_t::set_coroutine(coroutine);
     }
 
     template <class ValueFuncT, class ErrorVisitorT>
@@ -690,6 +707,9 @@ private:
     }
     auto unsafe_get0() {
       return seastar::future<ValueT>::get0();
+    }
+    void unsafe_wait() {
+      seastar::future<ValueT>::wait();
     }
 
     template <class FuncT>

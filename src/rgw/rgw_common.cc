@@ -127,10 +127,12 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_INTERNAL_ERROR, {500, "InternalError" }},
     { ERR_NOT_IMPLEMENTED, {501, "NotImplemented" }},
     { ERR_SERVICE_UNAVAILABLE, {503, "ServiceUnavailable"}},
+    { EBUSY, {503, "ServiceUnavailable"}},
     { ERR_RATE_LIMITED, {503, "SlowDown"}},
     { ERR_ZERO_IN_URL, {400, "InvalidRequest" }},
     { ERR_NO_SUCH_TAG_SET, {404, "NoSuchTagSet"}},
     { ERR_NO_SUCH_BUCKET_ENCRYPTION_CONFIGURATION, {404, "ServerSideEncryptionConfigurationNotFoundError"}},
+    { ERR_NO_SUCH_PUBLIC_ACCESS_BLOCK_CONFIGURATION, {404, "NoSuchPublicAccessBlockConfiguration"}},
 });
 
 rgw_http_errors rgw_http_swift_errors({
@@ -2091,6 +2093,7 @@ bool RGWUserCaps::is_valid_cap_type(const string& tp)
                                     "user-policy",
                                     "amz-cache",
                                     "oidc-provider",
+                                    "user-info-without-keys",
 				                            "ratelimit"};
 
   for (unsigned int i = 0; i < sizeof(cap_type) / sizeof(char *); ++i) {
@@ -2157,7 +2160,7 @@ int rgw_parse_op_type_list(const string& str, uint32_t *perm)
   return rgw_parse_list_of_flags(op_type_mapping, str, perm);
 }
 
-bool match_policy(std::string_view pattern, std::string_view input,
+bool match_policy(const std::string& pattern, const std::string& input,
                   uint32_t flag)
 {
   const uint32_t flag2 = flag & (MATCH_POLICY_ACTION|MATCH_POLICY_ARN) ?
@@ -2912,6 +2915,7 @@ void RGWAccessKey::dump(Formatter *f) const
   encode_json("access_key", id, f);
   encode_json("secret_key", key, f);
   encode_json("subuser", subuser, f);
+  encode_json("active", active, f);
 }
 
 void RGWAccessKey::dump_plain(Formatter *f) const
@@ -2932,6 +2936,7 @@ void RGWAccessKey::dump(Formatter *f, const string& user, bool swift) const
     encode_json("access_key", id, f);
   }
   encode_json("secret_key", key, f);
+  encode_json("active", active, f);
 }
 
 void RGWAccessKey::decode_json(JSONObj *obj) {
@@ -2945,6 +2950,7 @@ void RGWAccessKey::decode_json(JSONObj *obj) {
       subuser = user.substr(pos + 1);
     }
   }
+  JSONDecoder::decode_json("active", active, obj);
 }
 
 void RGWAccessKey::decode_json(JSONObj *obj, bool swift) {
@@ -2961,6 +2967,7 @@ void RGWAccessKey::decode_json(JSONObj *obj, bool swift) {
     }
   }
   JSONDecoder::decode_json("secret_key", key, obj, true);
+  JSONDecoder::decode_json("active", active, obj);
 }
 
 void RGWStorageStats::dump(Formatter *f) const

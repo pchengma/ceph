@@ -29,6 +29,7 @@
         <cd-cephfs-subvolume-list
           [fsName]="selection.mdsmap.fs_name"
           [pools]="details.pools"
+          [id]="id"
         ></cd-cephfs-subvolume-list>
       </ng-template>
     </ng-container>
@@ -59,6 +60,7 @@
       <ng-template ngbNavContent>
         <cd-cephfs-snapshotschedule-list
           [fsName]="selection.mdsmap.fs_name"
+          [id]="id"
         ></cd-cephfs-snapshotschedule-list>
       </ng-template>
     </ng-container>

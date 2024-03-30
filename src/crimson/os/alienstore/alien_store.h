@@ -33,6 +33,9 @@ public:
   mount_ertr::future<> mount() final;
   seastar::future<> umount() final;
 
+  base_errorator::future<bool> exists(
+    CollectionRef c,
+    const ghobject_t& oid) final;
   mkfs_ertr::future<> mkfs(uuid_d new_osd_fsid) final;
   read_errorator::future<ceph::bufferlist> read(CollectionRef c,
                                    const ghobject_t& oid,
@@ -117,9 +120,6 @@ private:
     });
   }
 
-  // number of cores that are PREVENTED from being scheduled
-  // to run alien store threads.
-  static constexpr int N_CORES_FOR_SEASTAR = 3;
   mutable std::unique_ptr<crimson::os::ThreadPool> tp;
   const std::string type;
   const std::string path;

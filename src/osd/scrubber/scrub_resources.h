@@ -23,8 +23,8 @@ class LocalResourceWrapper;
 /**
  * The number of concurrent scrub operations performed on an OSD is limited
  * by a configuration parameter. The 'ScrubResources' class is responsible for
- * maintaining a count of the number of scrubs currently performed, both
- * acting as primary and acting as a replica, and for enforcing the limit.
+ * maintaining a count of the number of scrubs currently performed by primary
+ * PGs on this OSD, and for enforcing the limit.
  */
 class ScrubResources {
   friend class LocalResourceWrapper;
@@ -37,10 +37,6 @@ class ScrubResources {
    * regular scrubs will be allowed to start.
    */
   int scrubs_local{0};
-
-  /// the set of PGs that have active scrub reservations as replicas
-  /// \todo come C++23 - consider std::flat_set<pg_t>
-  std::set<pg_t> granted_reservations;
 
   mutable ceph::mutex resource_lock =
       ceph::make_mutex("ScrubQueue::resource_lock");
@@ -69,12 +65,6 @@ class ScrubResources {
 
   /// decrements the number of scrubs acting as a Primary
   void dec_scrubs_local();
-
-  /// increments the number of scrubs acting as a Replica
-  bool inc_scrubs_remote(pg_t pgid);
-
-  /// decrements the number of scrubs acting as a Replica
-  void dec_scrubs_remote(pg_t pgid);
 
   void dump_scrub_reservations(ceph::Formatter* f) const;
 };

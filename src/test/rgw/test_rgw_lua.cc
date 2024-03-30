@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "common/async/context_pool.h"
 #include "common/ceph_context.h"
 #include "rgw_common.h"
 #include "rgw_auth_registry.h"
@@ -7,6 +8,7 @@
 #include "rgw_lua_request.h"
 #include "rgw_lua_background.h"
 #include "rgw_lua_data_filter.h"
+#include "rgw_sal_config.h"
 
 using namespace std;
 using namespace rgw;
@@ -159,11 +161,24 @@ CctCleaner cleaner(g_cct);
 
 tracing::Tracer tracer;
 
-#define MAKE_STORE auto store = std::unique_ptr<sal::RadosStore>(new sal::RadosStore); \
-                        store->setRados(new RGWRados);
+inline std::unique_ptr<sal::RadosStore> make_store() {
+  auto context_pool = std::make_unique<ceph::async::io_context_pool>(
+    g_cct->_conf->rgw_thread_pool_size);
+
+  struct StoreBundle : public sal::RadosStore {
+    std::unique_ptr<ceph::async::io_context_pool> context_pool;
+    StoreBundle(std::unique_ptr<ceph::async::io_context_pool> context_pool_)
+      : sal::RadosStore(*context_pool_.get()),
+        context_pool(std::move(context_pool_)) {
+      setRados(new RGWRados);
+    }
+    virtual ~StoreBundle() = default;
+  };
+  return std::make_unique<StoreBundle>(std::move(context_pool));
+};
 
 #define DEFINE_REQ_STATE RGWProcessEnv pe; \
-  MAKE_STORE; \
+  auto store = make_store();                   \
   pe.lua.manager = store->get_lua_manager(""); \
   RGWEnv e; \
   req_state s(g_cct, pe, &e, 0);
@@ -858,7 +873,7 @@ public:
 
 TEST(TestRGWLuaBackground, Start)
 {
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   {
     // ctr and dtor without running
@@ -892,7 +907,7 @@ TEST(TestRGWLuaBackground, Script)
     RGW[key] = value
   )";
 
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   TestBackground lua_background(store.get(), script, manager.get());
   lua_background.start();
@@ -945,7 +960,7 @@ TEST(TestRGWLuaBackground, Pause)
     end
   )";
 
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   TestBackground lua_background(store.get(), script, manager.get());
   lua_background.start();
@@ -971,7 +986,7 @@ TEST(TestRGWLuaBackground, PauseWhileReading)
     end
   )";
 
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   TestBackground lua_background(store.get(), script, manager.get(), 2);
   lua_background.start();
@@ -993,7 +1008,7 @@ TEST(TestRGWLuaBackground, ReadWhilePaused)
     RGW[key] = value
   )";
 
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   TestBackground lua_background(store.get(), script, manager.get());
   lua_background.pause();
@@ -1017,7 +1032,7 @@ TEST(TestRGWLuaBackground, PauseResume)
     end
   )";
 
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   TestBackground lua_background(store.get(), script, manager.get());
   lua_background.start();
@@ -1046,7 +1061,7 @@ TEST(TestRGWLuaBackground, MultipleStarts)
     end
   )";
 
-  MAKE_STORE;
+  auto store = make_store();
   auto manager = store->get_lua_manager("");
   TestBackground lua_background(store.get(), script, manager.get());
   lua_background.start();

@@ -4,6 +4,10 @@ set -ex
 parallel=1
 [ "$1" = "--serial" ] && parallel=0
 
+# let crimson run in serial mode
+crimson=0
+[ "$1" = "--crimson" ] && parallel=0 && crimson=1
+
 color=""
 [ -t 1 ] && color="--gtest_color=yes"
 
@@ -12,7 +16,8 @@ function cleanup() {
 }
 trap cleanup EXIT ERR HUP INT QUIT
 
-GTEST_OUTPUT="xml:/home/ubuntu/cephtest/archive/gtest_xml_report"
+GTEST_OUTPUT_DIR=${TESTDIR:-$(mktemp -d)}/archive/unit_test_xml_report
+mkdir -p $GTEST_OUTPUT_DIR
 
 declare -A pids
 
@@ -39,7 +44,7 @@ do
     if [ $parallel -eq 1 ]; then
 	r=`printf '%25s' $f`
 	ff=`echo $f | awk '{print $1}'`
-	bash -o pipefail -exc "ceph_test_rados_$f --gtest_output=$GTEST_OUTPUT-$f.xml $color 2>&1 | tee ceph_test_rados_$ff.log | sed \"s/^/$r: /\"" &
+	bash -o pipefail -exc "ceph_test_rados_$f --gtest_output=xml:$GTEST_OUTPUT_DIR/$f.xml $color 2>&1 | tee ceph_test_rados_$ff.log | sed \"s/^/$r: /\"" &
 	pid=$!
 	echo "test $f on pid $pid"
 	pids[$f]=$pid
@@ -49,7 +54,7 @@ do
 done
 
 for f in \
-    cls cmd handler_error io list misc pool read_operations snapshots \
+    cls cmd handler_error io ec_io list ec_list misc pool read_operations snapshots \
     watch_notify write_operations
 do
     if [ $parallel -eq 1 ]; then
@@ -60,6 +65,12 @@ do
 	echo "test $f on pid $pid"
 	pids[$f]=$pid
     else
+	if [ $crimson -eq 1 ]; then
+		if [ $f = "ec_io" ] || [ $f = "ec_list" ]; then
+			echo "Skipping EC with Crimson"
+			continue
+		fi
+	fi
 	ceph_test_neorados_$f
     fi
 done

@@ -17,6 +17,8 @@ extern "C" {
 #include "auth/Crypto.h"
 #include "compressor/Compressor.h"
 
+#include "common/async/context_pool.h"
+
 #include "common/armor.h"
 #include "common/ceph_json.h"
 #include "common/config.h"
@@ -84,7 +86,6 @@ using namespace std;
 
 static rgw::sal::Driver* driver = NULL;
 static constexpr auto dout_subsys = ceph_subsys_rgw;
-
 
 static const DoutPrefixProvider* dpp() {
   struct GlobalPrefix : public DoutPrefixProvider {
@@ -335,6 +336,7 @@ void usage()
   cout << "   --gen-access-key                  generate random access key (for S3)\n";
   cout << "   --gen-secret                      generate random secret key\n";
   cout << "   --key-type=<type>                 key type, options are: swift, s3\n";
+  cout << "   --key-active=<bool>               activate or deactivate a key\n";
   cout << "   --temp-url-key[-2]=<key>          temp url key\n";
   cout << "   --access=<access>                 Set access permissions for sub-user, should be one\n";
   cout << "                                     of read, write, readwrite, full\n";
@@ -489,6 +491,9 @@ void usage()
   cout << "\nradoslist options:\n";
   cout << "   --rgw-obj-fs                  the field separator that will separate the rados object name from the rgw object name;\n";
   cout << "                                 additionally rados objects for incomplete multipart uploads will not be output\n";
+  cout << "\nBucket list objects options:\n";
+  cout << "   --max-entries                 max number of entries listed (default 1000)\n";
+  cout << "   --marker                      the marker used to specify on which entry the listing begins, default none (i.e., very first entry)\n";
   cout << "\n";
   generic_client_usage();
 }
@@ -681,6 +686,7 @@ enum class OPT {
   OBJECT_RM,
   OBJECT_UNLINK,
   OBJECT_STAT,
+  OBJECT_MANIFEST,
   OBJECT_REWRITE,
   OBJECT_REINDEX,
   OBJECTS_EXPIRE,
@@ -902,6 +908,7 @@ static SimpleCmd::Commands all_cmds = {
   { "object rm", OPT::OBJECT_RM },
   { "object unlink", OPT::OBJECT_UNLINK },
   { "object stat", OPT::OBJECT_STAT },
+  { "object manifest", OPT::OBJECT_MANIFEST },
   { "object rewrite", OPT::OBJECT_REWRITE },
   { "object reindex", OPT::OBJECT_REINDEX },
   { "objects expire", OPT::OBJECTS_EXPIRE },
@@ -1162,6 +1169,15 @@ static void show_reshard_status(
   }
   formatter->close_section();
   formatter->flush(cout);
+}
+
+static void show_topics_info_v2(const rgw_pubsub_topic& topic,
+                                const std::set<std::string>& subscribed_buckets,
+                                Formatter* formatter) {
+  formatter->open_object_section("topic");
+  topic.dump(formatter);
+  encode_json("subscribed_buckets", subscribed_buckets, formatter);
+  formatter->close_section();
 }
 
 class StoreDestructor {
@@ -3309,6 +3325,7 @@ int main(int argc, const char **argv)
 
   auto cct = rgw_global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
 			     CODE_ENVIRONMENT_UTILITY, 0);
+  ceph::async::io_context_pool context_pool(cct->_conf->rgw_thread_pool_size);
 
   // for region -> zonegroup conversion (must happen before common_init_finish())
   if (!g_conf()->rgw_region.empty() && g_conf()->rgw_zonegroup.empty()) {
@@ -3355,6 +3372,8 @@ int main(int argc, const char **argv)
   int commit = false;
   int staging = false;
   int key_type = KEY_TYPE_UNDEFINED;
+  int key_active = true;
+  bool key_active_specified = false;
   std::unique_ptr<rgw::sal::Bucket> bucket;
   uint32_t perm_mask = 0;
   RGWUserInfo info;
@@ -3608,6 +3627,8 @@ int main(int argc, const char **argv)
         cerr << "bad key type: " << key_type_str << std::endl;
         exit(1);
       }
+    } else if (ceph_argparse_binary_flag(args, i, &key_active, NULL, "--key-active", (char*)NULL)) {
+      key_active_specified = true;
     } else if (ceph_argparse_witharg(args, i, &val, "--job-id", (char*)NULL)) {
       job_id = val;
     } else if (ceph_argparse_binary_flag(args, i, &gen_access_key, NULL, "--gen-access-key", (char*)NULL)) {
@@ -4075,6 +4096,7 @@ int main(int argc, const char **argv)
   common_init_finish(g_ceph_context);
 
   std::unique_ptr<rgw::sal::ConfigStore> cfgstore;
+  std::unique_ptr<rgw::SiteConfig> site;
 
   if (args.empty()) {
     usage();
@@ -4127,6 +4149,11 @@ int main(int argc, const char **argv)
     // not a raw op if 'period pull' needs to read zone/period configuration
     bool raw_period_pull = opt_cmd == OPT::PERIOD_PULL && !url.empty();
 
+    // Before a period commit or pull, our zonegroup may not be in the
+    // period, causing `load_period_zonegroup` to fail.
+    bool localzonegroup_op = ((opt_cmd == OPT::PERIOD_UPDATE && commit) ||
+			      (opt_cmd == OPT::PERIOD_PULL && url.empty()));
+
     std::set<OPT> raw_storage_ops_list = {OPT::ZONEGROUP_ADD, OPT::ZONEGROUP_CREATE,
 			 OPT::ZONEGROUP_DELETE,
 			 OPT::ZONEGROUP_GET, OPT::ZONEGROUP_LIST,
@@ -4173,6 +4200,7 @@ int main(int argc, const char **argv)
 			 OPT::LOG_SHOW,
 			 OPT::USAGE_SHOW,
 			 OPT::OBJECT_STAT,
+			 OPT::OBJECT_MANIFEST,
 			 OPT::BI_GET,
 			 OPT::BI_LIST,
 			 OPT::OLH_GET,
@@ -4256,13 +4284,22 @@ int main(int argc, const char **argv)
     }
 
     if (raw_storage_op) {
-      driver = DriverManager::get_raw_storage(dpp(),
-					    g_ceph_context,
-					    cfg);
+      site = rgw::SiteConfig::make_fake();
+      driver = DriverManager::get_raw_storage(dpp(), g_ceph_context,
+					      cfg, context_pool, *site);
     } else {
+      site = std::make_unique<rgw::SiteConfig>();
+      auto r = site->load(dpp(), null_yield, cfgstore.get(), localzonegroup_op);
+      if (r < 0) {
+	std::cerr << "Unable to initialize site config." << std::endl;
+	exit(1);
+      }
+
       driver = DriverManager::get_storage(dpp(),
 					g_ceph_context,
 					cfg,
+					context_pool,
+					*site,
 					false,
 					false,
 					false,
@@ -6425,6 +6462,10 @@ int main(int argc, const char **argv)
   if (key_type != KEY_TYPE_UNDEFINED)
     user_op.set_key_type(key_type);
 
+  if (key_active_specified) {
+    user_op.access_key_active = key_active;
+  }
+
   // set suspension operation parameters
   if (opt_cmd == OPT::USER_ENABLE)
     user_op.set_suspension(false);
@@ -8309,7 +8350,7 @@ next:
       bufferlist& bl = iter->second;
       bool handled = false;
       if (iter->first == RGW_ATTR_MANIFEST) {
-        handled = decode_dump<RGWObjManifest>("manifest", bl, formatter.get());
+	handled = decode_dump<RGWObjManifest>("manifest", bl, formatter.get());
       } else if (iter->first == RGW_ATTR_ACL) {
         handled = decode_dump<RGWAccessControlPolicy>("policy", bl, formatter.get());
       } else if (iter->first == RGW_ATTR_ID_TAG) {
@@ -8337,12 +8378,107 @@ next:
 
     formatter->open_object_section("attrs");
     for (iter = other_attrs.begin(); iter != other_attrs.end(); ++iter) {
-      dump_string(iter->first.c_str(), iter->second, formatter.get());
+      bufferlist& bl = iter->second;
+      if (iter->first == RGW_ATTR_OBJ_REPLICATION_TIMESTAMP) {
+        decode_dump<ceph::real_time>("user.rgw.replicated-at", bl, formatter.get());
+      } else {
+        dump_string(iter->first.c_str(), iter->second, formatter.get());
+      }
     }
     formatter->close_section();
     formatter->close_section();
     formatter->flush(cout);
-  }
+  } // OPT::OBJECT_STAT
+
+  if (opt_cmd == OPT::OBJECT_MANIFEST) {
+    int ret = init_bucket(tenant, bucket_name, bucket_id, &bucket);
+    if (ret < 0) {
+      cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) <<
+	std::endl;
+      return -ret;
+    }
+
+    std::unique_ptr<rgw::sal::Object> obj = bucket->get_object(object);
+    obj->set_instance(object_version);
+
+    ret = obj->get_obj_attrs(null_yield, dpp());
+    if (ret < 0) {
+      cerr << "ERROR: failed to retrieve object metadata, returned error: " <<
+	cpp_strerror(-ret) << std::endl;
+      return -ret;
+    }
+
+    formatter->open_object_section("outer");  // name not displayed since top level
+    formatter->dump_unsigned("size", obj->get_obj_size());
+
+    auto attr_iter = obj->get_attrs().find(RGW_ATTR_MANIFEST);
+    if (attr_iter == obj->get_attrs().end()) {
+      cerr << "ERROR: unable to find object manifest" << std::endl;
+      return ENOENT;
+    }
+
+    RGWObjManifest m;
+    try {
+      auto part_iter = attr_iter->second.cbegin();
+      decode(m, part_iter);
+    } catch (buffer::error& err) {
+      cerr << "ERROR: unable to decode manifest" << std::endl;
+      return EIO;
+    }
+
+    rgw::sal::RadosStore* store =
+      dynamic_cast<rgw::sal::RadosStore*>(driver);
+    if (!store) {
+      cerr << "ERROR: this command (currently) only works with "
+	"RADOS back-ends" << std::endl;
+      return EINVAL;
+    }
+
+    RGWRados* rados = store->getRados();
+
+    rgw_obj head_obj = obj->get_obj();
+    rgw_raw_obj raw_head_obj;
+    store->get_raw_obj(m.get_head_placement_rule(), head_obj, &raw_head_obj);
+    
+    formatter->open_array_section("objects");
+    unsigned index = 0;
+    for (auto p = m.obj_begin(dpp()); p != m.obj_end(dpp()); ++p, ++index) {
+      rgw_raw_obj raw_obj =  p.get_location().get_raw_obj(rados);
+
+      if (index == 0 && raw_obj != raw_head_obj) {
+	// we have a head object without data, so let's include it
+	formatter->open_object_section("object"); // name not displayed since in array
+
+	formatter->dump_int("index", -1);
+	formatter->dump_unsigned("offset", 0);
+	formatter->dump_unsigned("size", 0);
+	
+	formatter->open_object_section("raw_obj");
+	raw_head_obj.dump(formatter.get());
+	formatter->close_section(); // raw_obj
+
+	formatter->close_section(); // object
+      }
+
+      formatter->open_object_section("object"); // name not displayed since in array
+
+      formatter->dump_unsigned("index", index);
+      formatter->dump_unsigned("part_id", p.get_cur_part_id());
+      formatter->dump_unsigned("stripe_id", p.get_cur_stripe());
+      formatter->dump_unsigned("offset", p.get_ofs());
+      formatter->dump_unsigned("size", p.get_stripe_size());
+
+      formatter->open_object_section("raw_obj");
+      raw_obj.dump(formatter.get());
+      formatter->close_section(); // raw_obj
+
+      formatter->close_section(); // object
+    }
+    formatter->close_section(); // objects array
+
+    formatter->close_section(); // outer
+    formatter->flush(cout);
+  } // OPT::OBJECT_MANIFEST
 
   if (opt_cmd == OPT::BUCKET_CHECK) {
     if (check_head_obj_locator) {
@@ -10494,45 +10630,77 @@ next:
       return EINVAL;
     }
 
-    RGWPubSub ps(driver, tenant);
-
     rgw_pubsub_bucket_topics result;
     int ret = init_bucket(tenant, bucket_name, bucket_id, &bucket);
     if (ret < 0) {
       cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
-
-    const RGWPubSub::Bucket b(ps, bucket.get());
-    ret = b.get_topics(dpp(), result, null_yield);
-    if (ret < 0 && ret != -ENOENT) {
-      cerr << "ERROR: could not get topics: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
+    if (rgw::all_zonegroups_support(*site, rgw::zone_features::notification_v2) &&
+        driver->stat_topics_v1(tenant, null_yield, dpp()) == -ENOENT) {
+      ret = get_bucket_notifications(dpp(), bucket.get(), result);
+      if (ret < 0) {
+        cerr << "ERROR: could not get topics: " << cpp_strerror(-ret)
+             << std::endl;
+        return -ret;
+      }
+    } else {
+      RGWPubSub ps(driver, tenant, *site);
+      const RGWPubSub::Bucket b(ps, bucket.get());
+      ret = b.get_topics(dpp(), result, null_yield);
+      if (ret < 0 && ret != -ENOENT) {
+        cerr << "ERROR: could not get topics: " << cpp_strerror(-ret) << std::endl;
+        return -ret;
+      }
     }
     encode_json("result", result, formatter.get());
     formatter->flush(cout);
   }
 
   if (opt_cmd == OPT::PUBSUB_TOPIC_LIST) {
-    RGWPubSub ps(driver, tenant);
+    RGWPubSub ps(driver, tenant, *site);
+    std::string next_token = marker;
 
-    rgw_pubsub_topics result;
-    int ret = ps.get_topics(dpp(), result, null_yield);
-    if (ret < 0 && ret != -ENOENT) {
-      cerr << "ERROR: could not get topics: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
-    }
-    if (!rgw::sal::User::empty(user)) {
-      for (auto it = result.topics.cbegin(); it != result.topics.cend();) {
-        const auto& topic = it->second;
-        if (user->get_id() != topic.user) {
-          result.topics.erase(it++);
+    formatter->open_object_section("result");
+    formatter->open_array_section("topics");
+    do {
+      rgw_pubsub_topics result;
+      int ret = ps.get_topics(dpp(), next_token, max_entries,
+                              result, next_token, null_yield);
+      if (ret < 0 && ret != -ENOENT) {
+        cerr << "ERROR: could not get topics: " << cpp_strerror(-ret) << std::endl;
+        return -ret;
+      }
+      for (const auto& [_, topic] : result.topics) {
+        if (!rgw::sal::User::empty(user) && user->get_id() != topic.user) {
+          continue;
+        }
+        std::set<std::string> subscribed_buckets;
+        if (rgw::all_zonegroups_support(*site, rgw::zone_features::notification_v2) &&
+            driver->stat_topics_v1(tenant, null_yield, dpp()) == -ENOENT) {
+          ret = driver->get_bucket_topic_mapping(topic, subscribed_buckets,
+                                                 null_yield, dpp());
+          if (ret < 0) {
+            cerr << "failed to fetch bucket topic mapping info for topic: "
+                 << topic.name << ", ret=" << ret << std::endl;
+          }
+          show_topics_info_v2(topic, subscribed_buckets, formatter.get());
         } else {
-          ++it;
+          encode_json("result", result, formatter.get());
+        }
+        if (max_entries_specified) {
+          --max_entries;
         }
       }
+    } while (!next_token.empty() && max_entries > 0);
+    formatter->close_section(); // topics
+    if (max_entries_specified) {
+      encode_json("truncated", !next_token.empty(), formatter.get());
+      if (!next_token.empty()) {
+        encode_json("marker", next_token, formatter.get());
+      }
     }
-    encode_json("result", result, formatter.get());
+    formatter->close_section(); // result
     formatter->flush(cout);
   }
 
@@ -10541,16 +10709,22 @@ next:
       cerr << "ERROR: topic name was not provided (via --topic)" << std::endl;
       return EINVAL;
     }
-
-    RGWPubSub ps(driver, tenant);
+    RGWPubSub ps(driver, tenant, *site);
 
     rgw_pubsub_topic topic;
-    ret = ps.get_topic(dpp(), topic_name, topic, null_yield);
+    std::set<std::string> subscribed_buckets;
+    ret =
+        ps.get_topic(dpp(), topic_name, topic, null_yield, &subscribed_buckets);
     if (ret < 0) {
       cerr << "ERROR: could not get topic: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
-    encode_json("topic", topic, formatter.get());
+    if (rgw::all_zonegroups_support(*site, rgw::zone_features::notification_v2) &&
+        driver->stat_topics_v1(tenant, null_yield, dpp()) == -ENOENT) {
+      show_topics_info_v2(topic, subscribed_buckets, formatter.get());
+    } else {
+      encode_json("topic", topic, formatter.get());
+    }
     formatter->flush(cout);
   }
 
@@ -10569,24 +10743,30 @@ next:
       cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
-
-    RGWPubSub ps(driver, tenant);
-
     rgw_pubsub_bucket_topics bucket_topics;
-    const RGWPubSub::Bucket b(ps, bucket.get());
-    ret = b.get_topics(dpp(), bucket_topics, null_yield);
-    if (ret < 0 && ret != -ENOENT) {
-      cerr << "ERROR: could not get bucket notifications: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
+    if (rgw::all_zonegroups_support(*site, rgw::zone_features::notification_v2) &&
+        driver->stat_topics_v1(tenant, null_yield, dpp()) == -ENOENT) {
+      ret = get_bucket_notifications(dpp(), bucket.get(), bucket_topics);
+      if (ret < 0) {
+        cerr << "ERROR: could not get bucket notifications: "
+             << cpp_strerror(-ret) << std::endl;
+        return -ret;
+      }
+    } else {
+      RGWPubSub ps(driver, tenant, *site);
+      const RGWPubSub::Bucket b(ps, bucket.get());
+      ret = b.get_topics(dpp(), bucket_topics, null_yield);
+      if (ret < 0 && ret != -ENOENT) {
+        cerr << "ERROR: could not get bucket notifications: " << cpp_strerror(-ret) << std::endl;
+        return -ret;
+      }
     }
-
-    rgw_pubsub_topic_filter bucket_topic;
-    ret = b.get_notification_by_id(dpp(), notification_id, bucket_topic, null_yield);
-    if (ret < 0) {
-      cerr << "ERROR: could not get notification: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
+    auto iter = find_unique_topic(bucket_topics, notification_id);
+    if (!iter) {
+      cerr << "ERROR: notification was not found" << std::endl;
+      return -ENOENT;
     }
-    encode_json("notification", bucket_topic, formatter.get());
+    encode_json("notification", *iter, formatter.get());
     formatter->flush(cout);
   }
 
@@ -10595,19 +10775,23 @@ next:
       cerr << "ERROR: topic name was not provided (via --topic)" << std::endl;
       return EINVAL;
     }
-
-    ret = rgw::notify::remove_persistent_topic(
-        dpp(), static_cast<rgw::sal::RadosStore*>(driver)->getRados()->get_notif_pool_ctx(), topic_name, null_yield);
-    if (ret < 0) {
-      cerr << "ERROR: could not remove persistent topic: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
+    if (!driver->is_meta_master()) {
+      cerr << "ERROR: Run 'topic rm' from master zone " << std::endl;
+      return -EINVAL;
     }
 
-    RGWPubSub ps(driver, tenant);
+    RGWPubSub ps(driver, tenant, *site);
 
     ret = ps.remove_topic(dpp(), topic_name, null_yield);
     if (ret < 0) {
       cerr << "ERROR: could not remove topic: " << cpp_strerror(-ret) << std::endl;
+      return -ret;
+    }
+    
+    ret = rgw::notify::remove_persistent_topic(
+        dpp(), static_cast<rgw::sal::RadosStore*>(driver)->getRados()->get_notif_pool_ctx(), topic_name, null_yield);
+    if (ret < 0 && ret != -ENOENT) {
+      cerr << "ERROR: could not remove persistent topic: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
   }
@@ -10617,28 +10801,41 @@ next:
       cerr << "ERROR: bucket name was not provided (via --bucket)" << std::endl;
       return EINVAL;
     }
-
+    if (!driver->is_meta_master()) {
+      cerr << "ERROR: Run 'notification rm' from master zone " << std::endl;
+      return -EINVAL;
+    }
     int ret = init_bucket(tenant, bucket_name, bucket_id, &bucket);
     if (ret < 0) {
       cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
 
-    RGWPubSub ps(driver, tenant);
-
-    rgw_pubsub_bucket_topics bucket_topics;
-    const RGWPubSub::Bucket b(ps, bucket.get());
-    ret = b.get_topics(dpp(), bucket_topics, null_yield);
-    if (ret < 0 && ret != -ENOENT) {
-      cerr << "ERROR: could not get bucket notifications: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
-    }
-
-    rgw_pubsub_topic_filter bucket_topic;
-    if(notification_id.empty()) {
-      ret = b.remove_notifications(dpp(), null_yield);
+    if (rgw::all_zonegroups_support(*site, rgw::zone_features::notification_v2)) {
+      if (ret = driver->stat_topics_v1(tenant, null_yield, dpp()); ret != -ENOENT) {
+        cerr << "WARNING: " << (ret == 0 ? "topic migration in process" : "cannot determine topic migration status. ret = " + std::to_string(ret))
+          << ". please try again later" << std::endl;
+        return -ret;
+      }
+      ret = remove_notification_v2(dpp(), driver, bucket.get(), notification_id,
+                                   null_yield);
     } else {
-      ret = b.remove_notification_by_id(dpp(), notification_id, null_yield);
+      RGWPubSub ps(driver, tenant, *site);
+
+      rgw_pubsub_bucket_topics bucket_topics;
+      const RGWPubSub::Bucket b(ps, bucket.get());
+      ret = b.get_topics(dpp(), bucket_topics, null_yield);
+      if (ret < 0 && ret != -ENOENT) {
+        cerr << "ERROR: could not get bucket notifications: " << cpp_strerror(-ret) << std::endl;
+        return -ret;
+      }
+
+      rgw_pubsub_topic_filter bucket_topic;
+      if(notification_id.empty()) {
+        ret = b.remove_notifications(dpp(), null_yield);
+      } else {
+        ret = b.remove_notification_by_id(dpp(), notification_id, null_yield);
+      }
     }
   }
 

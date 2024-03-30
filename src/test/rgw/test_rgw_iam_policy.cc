@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include "include/stringify.h"
+#include "common/async/context_pool.h"
 #include "common/code_environment.h"
 #include "common/ceph_context.h"
 #include "global/global_init.h"
@@ -29,14 +30,13 @@
 #include "rgw_op.h"
 #include "rgw_process_env.h"
 #include "rgw_sal_rados.h"
-
+#include "driver/rados/rgw_zone.h"
+#include "rgw_sal_config.h"
 
 using std::string;
-using std::vector;
 
 using boost::container::flat_set;
 using boost::intrusive_ptr;
-using boost::make_optional;
 using boost::none;
 
 using rgw::auth::Identity;
@@ -161,7 +161,7 @@ protected:
   static string example7;
 public:
   PolicyTest() {
-    cct = new CephContext(CEPH_ENTITY_TYPE_CLIENT);
+    cct.reset(new CephContext(CEPH_ENTITY_TYPE_CLIENT), false);
   }
 };
 
@@ -861,7 +861,7 @@ protected:
   const rgw::IAM::MaskedIP allowedIPv6Range = { true, rgw::IAM::Address("00100000000000010000110110111000100001011010001100000000000000000000000000000000100010100010111000000011011100000111001100110000"), 124 };
 public:
   IPPolicyTest() {
-    cct = new CephContext(CEPH_ENTITY_TYPE_CLIENT);
+    cct.reset(new CephContext(CEPH_ENTITY_TYPE_CLIENT), false);
   }
 };
 const string IPPolicyTest::arbitrary_tenant = "arbitrary_tenant";
@@ -912,7 +912,8 @@ TEST_F(IPPolicyTest, IPEnvironment) {
   RGWProcessEnv penv;
   // Unfortunately RGWCivetWeb is too tightly tied to civetweb to test RGWCivetWeb::init_env.
   RGWEnv rgw_env;
-  rgw::sal::RadosStore store;
+  ceph::async::io_context_pool context_pool(cct->_conf->rgw_thread_pool_size); \
+  rgw::sal::RadosStore store(context_pool);
   std::unique_ptr<rgw::sal::User> user = store.get_user(rgw_user());
   rgw_env.set("REMOTE_ADDR", "192.168.1.1");
   rgw_env.set("HTTP_HOST", "1.2.3.4");
@@ -1259,9 +1260,8 @@ TEST(MatchWildcards, Asterisk)
                               "http://example.com/index.html"));
   EXPECT_TRUE(match_wildcards("http://example.com/*/*.jpg",
                               "http://example.com/fun/smiley.jpg"));
-  // note: parsing of * is not greedy, so * does not match 'bc' here
-  EXPECT_FALSE(match_wildcards("a*c", "abcc"));
-  EXPECT_FALSE(match_wildcards("a*c", "abcc", MATCH_CASE_INSENSITIVE));
+  EXPECT_TRUE(match_wildcards("a*c", "abcc"));
+  EXPECT_TRUE(match_wildcards("a*c", "abcc", MATCH_CASE_INSENSITIVE));
 }
 
 TEST(MatchPolicy, Action)

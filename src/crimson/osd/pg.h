@@ -471,7 +471,7 @@ public:
   }
 
   /// initialize created PG
-  void init(
+  seastar::future<> init(
     int role,
     const std::vector<int>& up,
     int up_primary,
@@ -526,14 +526,16 @@ public:
   void handle_rep_op_reply(const MOSDRepOpReply& m);
   interruptible_future<> do_update_log_missing(
     Ref<MOSDPGUpdateLogMissing> m,
-    crimson::net::ConnectionRef conn);
+    crimson::net::ConnectionXcoreRef conn);
   interruptible_future<> do_update_log_missing_reply(
                          Ref<MOSDPGUpdateLogMissingReply> m);
 
 
   void print(std::ostream& os) const;
   void dump_primary(Formatter*);
-  seastar::future<> submit_error_log(
+  seastar::future<> complete_error_log(const ceph_tid_t& rep_tid,
+                                       const eversion_t& version);
+  seastar::future<std::optional<eversion_t>> submit_error_log(
     Ref<MOSDOp> m,
     const OpInfo &op_info,
     ObjectContextRef obc,
@@ -568,7 +570,7 @@ private:
                do_osd_ops_iertr::future<Ret>>;
   do_osd_ops_iertr::future<pg_rep_op_fut_t<MURef<MOSDOpReply>>> do_osd_ops(
     Ref<MOSDOp> m,
-    crimson::net::ConnectionRef conn,
+    crimson::net::ConnectionXcoreRef conn,
     ObjectContextRef obc,
     const OpInfo &op_info,
     const SnapContext& snapc);
@@ -645,12 +647,15 @@ public:
 private:
   OSDriver osdriver;
   SnapMapper snap_mapper;
-
 public:
   // PeeringListener
   void publish_stats_to_osd() final;
   void clear_publish_stats() final;
   pg_stat_t get_stats() const;
+  void apply_stats(
+    const hobject_t &soid,
+    const object_stat_sum_t &delta_stats);
+
 private:
   std::optional<pg_stat_t> pg_stats;
 
@@ -791,13 +796,12 @@ private:
   };
 
   std::map<ceph_tid_t, log_update_t> log_entry_update_waiting_on;
-  std::map<ceph_tid_t, eversion_t> log_entry_version;
   // snap trimming
   interval_set<snapid_t> snap_trimq;
 };
 
 struct PG::do_osd_ops_params_t {
-  crimson::net::ConnectionRef &get_connection() const {
+  crimson::net::ConnectionXcoreRef &get_connection() const {
     return conn;
   }
   osd_reqid_t get_reqid() const {
@@ -825,7 +829,7 @@ struct PG::do_osd_ops_params_t {
     return orig_source_inst.name;
   }
 
-  crimson::net::ConnectionRef &conn;
+  crimson::net::ConnectionXcoreRef &conn;
   osd_reqid_t reqid;
   utime_t mtime;
   epoch_t map_epoch;

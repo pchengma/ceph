@@ -251,6 +251,14 @@ public:
    */
   std::optional<PGLockWrapper> get_locked_pg(spg_t pgid) final;
 
+  /**
+   * the entity that counts the number of active replica scrub
+   * operations, and grant scrub reservation requests asynchronously.
+   */
+  AsyncReserver<spg_t, Finisher>& get_scrub_reserver() {
+    return scrub_reserver;
+  }
+
  private:
   // -- agent shared state --
   ceph::mutex agent_lock = ceph::make_mutex("OSDService::agent_lock");
@@ -494,6 +502,8 @@ public:
   void send_pg_created();
 
   AsyncReserver<spg_t, Finisher> snap_reserver;
+  /// keeping track of replicas being reserved for scrubbing
+  AsyncReserver<spg_t, Finisher> scrub_reserver;
   void queue_recovery_context(PG *pg,
                               GenContext<ThreadPool::TPHandle&> *c,
                               uint64_t cost,
@@ -553,7 +563,7 @@ public:
 				   unsigned int qu_priority,
 				   Scrub::act_token_t act_token);
 
-  void queue_for_pg_delete(spg_t pgid, epoch_t e);
+  void queue_for_pg_delete(spg_t pgid, epoch_t e, int64_t num_objects);
   bool try_finish_pg_delete(PG *pg, unsigned old_pg_num);
 
 private:
@@ -1984,7 +1994,6 @@ private:
   void maybe_override_sleep_options_for_qos();
   bool maybe_override_options_for_qos(
     const std::set<std::string> *changed = nullptr);
-  void maybe_override_cost_for_qos();
   int run_osd_bench_test(int64_t count,
                          int64_t bsize,
                          int64_t osize,
@@ -1992,7 +2001,6 @@ private:
                          double *elapsed,
                          std::ostream& ss);
   void mon_cmd_set_config(const std::string &key, const std::string &val);
-  bool unsupported_objstore_for_qos();
 
   void scrub_purged_snaps();
   void probe_smart(const std::string& devid, std::ostream& ss);

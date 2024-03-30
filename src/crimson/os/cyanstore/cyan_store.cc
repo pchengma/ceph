@@ -242,6 +242,22 @@ CyanStore::Shard::list_collections()
   return seastar::make_ready_future<std::vector<coll_core_t>>(std::move(collections));
 }
 
+CyanStore::Shard::base_errorator::future<bool>
+CyanStore::Shard::exists(
+  CollectionRef ch,
+  const ghobject_t &oid)
+{
+  auto c = static_cast<Collection*>(ch.get());
+  if (!c->exists) {
+    return base_errorator::make_ready_future<bool>(false);
+  }
+  auto o = c->get_object(oid);
+  if (!o) {
+    return base_errorator::make_ready_future<bool>(false);
+  }
+  return base_errorator::make_ready_future<bool>(true);
+}
+
 CyanStore::Shard::read_errorator::future<ceph::bufferlist>
 CyanStore::Shard::read(
   CollectionRef ch,
@@ -492,6 +508,12 @@ seastar::future<> CyanStore::Shard::do_transaction_no_callbacks(
       {
         coll_t cid = i.get_cid(op->cid);
         r = _create_collection(cid, op->split_bits);
+      }
+      break;
+      case Transaction::OP_RMCOLL:
+      {
+        coll_t cid = i.get_cid(op->cid);
+        r = _remove_collection(cid);
       }
       break;
       case Transaction::OP_SETALLOCHINT:
@@ -860,6 +882,17 @@ int CyanStore::Shard::_create_collection(const coll_t& cid, int bits)
   result.first->second = p->second;
   result.first->second->bits = bits;
   new_coll_map.erase(p);
+  return 0;
+}
+
+int CyanStore::Shard::_remove_collection(const coll_t& cid)
+{
+  logger().debug("{} cid={}", __func__, cid);
+  auto c = _get_collection(cid);
+  if (!c) {
+    return -ENOENT;
+  }
+  coll_map.erase(cid);
   return 0;
 }
 

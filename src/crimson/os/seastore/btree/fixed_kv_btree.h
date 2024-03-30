@@ -15,8 +15,6 @@
 #include "crimson/os/seastore/btree/btree_range_pin.h"
 #include "crimson/os/seastore/root_block.h"
 
-#define RESERVATION_PTR reinterpret_cast<ChildableCachedExtent*>(0x1)
-
 namespace crimson::os::seastore::lba_manager::btree {
 struct lba_map_val_t;
 }
@@ -24,6 +22,12 @@ struct lba_map_val_t;
 namespace crimson::os::seastore {
 
 bool is_valid_child_ptr(ChildableCachedExtent* child);
+
+bool is_reserved_ptr(ChildableCachedExtent* child);
+
+inline ChildableCachedExtent* get_reserved_ptr() {
+  return (ChildableCachedExtent*)0x1;
+}
 
 template <typename T>
 phy_tree_root_t& get_phy_tree_root(root_t& r);
@@ -356,7 +360,7 @@ public:
   using mkfs_ret = phy_tree_root_t;
   static mkfs_ret mkfs(RootBlockRef &root_block, op_context_t<node_key_t> c) {
     assert(root_block->is_mutation_pending());
-    auto root_leaf = c.cache.template alloc_new_extent<leaf_node_t>(
+    auto root_leaf = c.cache.template alloc_new_non_data_extent<leaf_node_t>(
       c.trans,
       node_size,
       placement_hint_t::HOT,
@@ -579,12 +583,12 @@ public:
           if constexpr (
             std::is_base_of_v<typename internal_node_t::base_t, child_node_t>)
           {
-            assert(!c.cache.query_cache(i->get_val(), nullptr));
+            assert(!c.cache.test_query_cache(i->get_val()));
           } else {
             if constexpr (leaf_has_children) {
               assert(i->get_val().pladdr.is_paddr()
-                ? (bool)!c.cache.query_cache(
-                    i->get_val().pladdr.get_paddr(), nullptr)
+                ? (bool)!c.cache.test_query_cache(
+                    i->get_val().pladdr.get_paddr())
                 : true);
             }
           }
@@ -1022,7 +1026,7 @@ public:
     assert(is_lba_backref_node(e->get_type()));
     
     auto do_rewrite = [&](auto &fixed_kv_extent) {
-      auto n_fixed_kv_extent = c.cache.template alloc_new_extent<
+      auto n_fixed_kv_extent = c.cache.template alloc_new_non_data_extent<
         std::remove_reference_t<decltype(fixed_kv_extent)>
         >(
         c.trans,
@@ -1781,7 +1785,7 @@ private:
     SUBTRACET(seastore_fixedkv_tree, "split_from {}, depth {}", c.trans, split_from, iter.get_depth());
 
     if (split_from == iter.get_depth()) {
-      auto nroot = c.cache.template alloc_new_extent<internal_node_t>(
+      auto nroot = c.cache.template alloc_new_non_data_extent<internal_node_t>(
         c.trans, node_size, placement_hint_t::HOT, INIT_GENERATION);
       fixed_kv_node_meta_t<node_key_t> meta{
         min_max_t<node_key_t>::min, min_max_t<node_key_t>::max, iter.get_depth() + 1};

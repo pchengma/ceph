@@ -176,15 +176,22 @@ public:
 				 rgw::notify::EventType event_type, optional_yield y,
 				 const std::string* object_name=nullptr) override;
   virtual std::unique_ptr<Notification> get_notification(
-    const DoutPrefixProvider* dpp, rgw::sal::Object* obj, rgw::sal::Object* src_obj,
-
-    rgw::notify::EventType event_type, rgw::sal::Bucket* _bucket,
-    std::string& _user_id, std::string& _user_tenant,
-    std::string& _req_id, optional_yield y) override;
+      const DoutPrefixProvider* dpp,
+      rgw::sal::Object* obj,
+      rgw::sal::Object* src_obj,
+      const rgw::notify::EventTypeList& event_types,
+      rgw::sal::Bucket* _bucket,
+      std::string& _user_id,
+      std::string& _user_tenant,
+      std::string& _req_id,
+      optional_yield y) override;
 
   int read_topics(const std::string& tenant, rgw_pubsub_topics& topics, RGWObjVersionTracker* objv_tracker,
       optional_yield y, const DoutPrefixProvider *dpp) override {
     return next->read_topics(tenant, topics, objv_tracker, y, dpp);
+  }
+  int stat_topics_v1(const std::string& tenant, optional_yield y, const DoutPrefixProvider *dpp) override {
+    return next->stat_topics_v1(tenant, y, dpp);
   }
   int write_topics(const std::string& tenant, const rgw_pubsub_topics& topics, RGWObjVersionTracker* objv_tracker,
       optional_yield y, const DoutPrefixProvider *dpp) override {
@@ -194,7 +201,49 @@ public:
       optional_yield y, const DoutPrefixProvider *dpp) override {
     return next->remove_topics(tenant, objv_tracker, y, dpp);
   }
-
+  int read_topic_v2(const std::string& topic_name,
+                    const std::string& tenant,
+                    rgw_pubsub_topic& topic,
+                    RGWObjVersionTracker* objv_tracker,
+                    optional_yield y,
+                    const DoutPrefixProvider* dpp) override {
+    return next->read_topic_v2(topic_name, tenant, topic, objv_tracker, y, dpp);
+  }
+  int write_topic_v2(const rgw_pubsub_topic& topic, bool exclusive,
+                     RGWObjVersionTracker& objv_tracker,
+                     optional_yield y,
+                     const DoutPrefixProvider* dpp) override {
+    return next->write_topic_v2(topic, exclusive, objv_tracker, y, dpp);
+  }
+  int remove_topic_v2(const std::string& topic_name,
+                      const std::string& tenant,
+                      RGWObjVersionTracker& objv_tracker,
+                      optional_yield y,
+                      const DoutPrefixProvider* dpp) override {
+    return next->remove_topic_v2(topic_name, tenant, objv_tracker, y, dpp);
+  }
+  int update_bucket_topic_mapping(const rgw_pubsub_topic& topic,
+                                  const std::string& bucket_key,
+                                  bool add_mapping,
+                                  optional_yield y,
+                                  const DoutPrefixProvider* dpp) override {
+    return next->update_bucket_topic_mapping(topic, bucket_key, add_mapping, y,
+                                             dpp);
+  }
+  int remove_bucket_mapping_from_topics(
+      const rgw_pubsub_bucket_topics& bucket_topics,
+      const std::string& bucket_key,
+      optional_yield y,
+      const DoutPrefixProvider* dpp) override {
+    return next->remove_bucket_mapping_from_topics(bucket_topics, bucket_key, y,
+                                                   dpp);
+  }
+  int get_bucket_topic_mapping(const rgw_pubsub_topic& topic,
+                               std::set<std::string>& bucket_keys,
+                               optional_yield y,
+                               const DoutPrefixProvider* dpp) override {
+    return next->get_bucket_topic_mapping(topic, bucket_keys, y, dpp);
+  }
   virtual RGWLC* get_rgwlc(void) override;
   virtual RGWCoroutinesManagerRegistry* get_cr_registry() override;
 
@@ -521,7 +570,7 @@ public:
     FilterDeleteOp(std::unique_ptr<DeleteOp> _next) : next(std::move(_next)) {}
     virtual ~FilterDeleteOp() = default;
 
-    virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y) override;
+    virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y, uint32_t flags) override;
   };
 
   FilterObject(std::unique_ptr<Object> _next) : next(std::move(_next)) {}
@@ -535,7 +584,7 @@ public:
 
   virtual int delete_object(const DoutPrefixProvider* dpp,
 			    optional_yield y,
-			    bool prevent_versioning = false) override;
+			    uint32_t flags) override;
   virtual int copy_object(User* user,
                req_info* info, const rgw_zone_id& source_zone,
 	       rgw::sal::Object* dest_object, rgw::sal::Bucket* dest_bucket,
@@ -583,7 +632,8 @@ public:
 			 const real_time& mtime,
 			 uint64_t olh_epoch,
 			 const DoutPrefixProvider* dpp,
-			 optional_yield y) override;
+			 optional_yield y,
+                         uint32_t flags) override;
   virtual int transition_to_cloud(Bucket* bucket,
 				  rgw::sal::PlacementTier* tier,
 				  rgw_bucket_dir_entry& o,
@@ -648,6 +698,9 @@ public:
     return std::make_unique<FilterObject>(*this);
   }
 
+  virtual jspan_context& get_trace() { return next->get_trace(); }
+  virtual void set_trace (jspan_context&& _trace_ctx) { next->set_trace(std::move(_trace_ctx)); }
+
   virtual void print(std::ostream& out) const override { return next->print(out); }
 
   /* Internal to Filters */
@@ -687,7 +740,7 @@ public:
 
   virtual std::map<uint32_t, std::unique_ptr<MultipartPart>>& get_parts() override { return parts; }
 
-  virtual const jspan_context& get_trace() override { return next->get_trace(); }
+  virtual jspan_context& get_trace() override { return next->get_trace(); }
 
   virtual std::unique_ptr<rgw::sal::Object> get_meta_obj() override;
 
@@ -840,7 +893,8 @@ public:
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       const req_context& rctx) override;
+                       const req_context& rctx,
+                       uint32_t flags) override;
 };
 
 class FilterLuaManager : public LuaManager {

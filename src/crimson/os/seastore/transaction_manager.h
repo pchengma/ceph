@@ -279,29 +279,33 @@ public:
     std::vector<laddr_t> offsets);
 
   /**
-   * alloc_extent
+   * alloc_non_data_extent
    *
    * Allocates a new block of type T with the minimum lba range of size len
    * greater than laddr_hint.
    */
-  using alloc_extent_iertr = LBAManager::alloc_extent_iertr;
+  using alloc_extent_iertr = LBAManager::alloc_extent_iertr::extend<
+    crimson::ct_error::enospc>;
   template <typename T>
   using alloc_extent_ret = alloc_extent_iertr::future<TCachedExtentRef<T>>;
   template <typename T>
-  alloc_extent_ret<T> alloc_extent(
+  alloc_extent_ret<T> alloc_non_data_extent(
     Transaction &t,
     laddr_t laddr_hint,
     extent_len_t len,
     placement_hint_t placement_hint = placement_hint_t::HOT) {
-    LOG_PREFIX(TransactionManager::alloc_extent);
+    LOG_PREFIX(TransactionManager::alloc_non_data_extent);
     SUBTRACET(seastore_tm, "{} len={}, placement_hint={}, laddr_hint={}",
               t, T::TYPE, len, placement_hint, laddr_hint);
     ceph_assert(is_aligned(laddr_hint, epm->get_block_size()));
-    auto ext = cache->alloc_new_extent<T>(
+    auto ext = cache->alloc_new_non_data_extent<T>(
       t,
       len,
       placement_hint,
       INIT_GENERATION);
+    if (!ext) {
+      return crimson::ct_error::enospc::make();
+    }
     return lba_manager->alloc_extent(
       t,
       laddr_hint,
@@ -309,10 +313,64 @@ public:
       ext->get_paddr(),
       *ext
     ).si_then([ext=std::move(ext), laddr_hint, &t](auto &&) mutable {
-      LOG_PREFIX(TransactionManager::alloc_extent);
+      LOG_PREFIX(TransactionManager::alloc_non_data_extent);
       SUBDEBUGT(seastore_tm, "new extent: {}, laddr_hint: {}", t, *ext, laddr_hint);
       return alloc_extent_iertr::make_ready_future<TCachedExtentRef<T>>(
 	std::move(ext));
+    });
+  }
+
+  /**
+   * alloc_data_extents
+   *
+   * Allocates a new block of type T with the minimum lba range of size len
+   * greater than laddr_hint.
+   */
+  using alloc_extents_iertr = alloc_extent_iertr;
+  template <typename T>
+  using alloc_extents_ret = alloc_extents_iertr::future<
+    std::vector<TCachedExtentRef<T>>>;
+  template <typename T>
+  alloc_extents_ret<T> alloc_data_extents(
+    Transaction &t,
+    laddr_t laddr_hint,
+    extent_len_t len,
+    placement_hint_t placement_hint = placement_hint_t::HOT) {
+    LOG_PREFIX(TransactionManager::alloc_data_extents);
+    SUBTRACET(seastore_tm, "{} len={}, placement_hint={}, laddr_hint={}",
+              t, T::TYPE, len, placement_hint, laddr_hint);
+    ceph_assert(is_aligned(laddr_hint, epm->get_block_size()));
+    auto exts = cache->alloc_new_data_extents<T>(
+      t,
+      len,
+      placement_hint,
+      INIT_GENERATION);
+    if (exts.empty()) {
+      return crimson::ct_error::enospc::make();
+    }
+    return seastar::do_with(
+      std::move(exts),
+      laddr_hint,
+      [this, &t](auto &exts, auto &laddr_hint) {
+      return trans_intr::do_for_each(
+        exts,
+        [this, &t, &laddr_hint](auto &ext) {
+        return lba_manager->alloc_extent(
+          t,
+          laddr_hint,
+          ext->get_length(),
+          ext->get_paddr(),
+          *ext
+        ).si_then([&ext, &laddr_hint, &t](auto &&) mutable {
+          LOG_PREFIX(TransactionManager::alloc_extents);
+          SUBDEBUGT(seastore_tm, "new extent: {}, laddr_hint: {}", t, *ext, laddr_hint);
+          laddr_hint += ext->get_length();
+          return alloc_extent_iertr::now();
+        });
+      }).si_then([&exts] {
+        return alloc_extent_iertr::make_ready_future<
+          std::vector<TCachedExtentRef<T>>>(std::move(exts));
+      });
     });
   }
 
@@ -326,7 +384,7 @@ public:
       return this->read_pin<T>(t, std::move(pin));
     }).si_then([this, &t](auto extent) {
       auto ext = get_mutable_extent(t, extent)->template cast<T>();
-      return alloc_extent_iertr::make_ready_future<TCachedExtentRef<T>>(
+      return read_extent_iertr::make_ready_future<TCachedExtentRef<T>>(
 	std::move(ext));
     });
   }
@@ -367,16 +425,20 @@ public:
     for (auto &remap : remaps) {
       auto remap_offset = remap.offset;
       auto remap_len = remap.len;
+      assert(remap_len > 0);
       total_remap_len += remap.len;
-      ceph_assert(remap_offset >= (last_offset + last_len));
+      assert(remap_offset >= (last_offset + last_len));
       last_offset = remap_offset;
       last_len = remap_len;
     }
-    ceph_assert(total_remap_len < original_len);
+    if (remaps.size() == 1) {
+      assert(total_remap_len < original_len);
+    } else {
+      assert(total_remap_len <= original_len);
+    }
 #endif
 
-    // FIXME: paddr can be absolute and pending
-    ceph_assert(pin->get_val().is_absolute());
+    // The according extent might be stable or pending.
     return cache->get_extent_if_cached(
       t, pin->get_val(), T::TYPE
     ).si_then([this, &t, remaps,
@@ -401,8 +463,6 @@ public:
 	(intermediate_base == L_ADDR_NULL)
 	  == (intermediate_key == L_ADDR_NULL));
       if (ext) {
-        // FIXME: cannot and will not remap a dirty extent for now.
-        ceph_assert(!ext->is_dirty());
         ceph_assert(!ext->is_mutable());
         ceph_assert(ext->get_length() >= original_len);
 	ceph_assert(ext->get_paddr() == original_paddr);
@@ -517,6 +577,10 @@ public:
       mapping.is_indirect()
 	? mapping.get_intermediate_key()
 	: mapping.get_key();
+    auto intermediate_base =
+      mapping.is_indirect()
+        ? mapping.get_intermediate_base()
+        : mapping.get_key();
 
     LOG_PREFIX(TransactionManager::clone_pin);
     SUBDEBUGT(seastore_tm, "len={}, laddr_hint={}, clone_offset {}",
@@ -528,7 +592,7 @@ public:
       mapping.get_length(),
       intermediate_key,
       mapping.get_val(),
-      intermediate_key
+      intermediate_base
     );
   }
 
@@ -536,7 +600,6 @@ public:
    *
    * allocates more than one new blocks of type T.
    */
-   using alloc_extents_iertr = alloc_extent_iertr;
    template<class T>
    alloc_extents_iertr::future<std::vector<TCachedExtentRef<T>>>
    alloc_extents(
@@ -553,7 +616,7 @@ public:
                        boost::make_counting_iterator(0),
                        boost::make_counting_iterator(num),
          [this, &t, len, hint, &extents] (auto i) {
-         return alloc_extent<T>(t, hint, len).si_then(
+         return alloc_non_data_extent<T>(t, hint, len).si_then(
            [&extents](auto &&node) {
            extents.push_back(node);
          });

@@ -17,7 +17,7 @@ from boto.s3.website import WebsiteConfiguration
 from boto.s3.cors import CORSConfiguration
 
 from nose.tools import eq_ as eq
-from nose.tools import assert_not_equal, assert_equal
+from nose.tools import assert_not_equal, assert_equal, assert_true, assert_false
 from nose.plugins.attrib import attr
 from nose.plugins.skip import SkipTest
 
@@ -66,6 +66,7 @@ num_buckets = 0
 run_prefix=''.join(random.choice(string.ascii_lowercase) for _ in range(6))
 
 num_roles = 0
+num_topic = 0
 
 def get_zone_connection(zone, credentials):
     """ connect to the zone's first gateway """
@@ -131,7 +132,7 @@ def parse_meta_sync_status(meta_sync_status_json):
         else:
             markers[i] = sync_markers[i]['val']['marker']
 
-    return period, realm_epoch, num_shards, markers
+    return global_sync_status, period, realm_epoch, num_shards, markers
 
 def meta_sync_status(zone):
     for _ in range(config.checkpoint_retries):
@@ -182,8 +183,10 @@ def zone_meta_checkpoint(zone, meta_master_zone = None, master_status = None):
     log.info('starting meta checkpoint for zone=%s', zone.name)
 
     for _ in range(config.checkpoint_retries):
-        period, realm_epoch, num_shards, sync_status = meta_sync_status(zone)
-        if realm_epoch < current_realm_epoch:
+        global_status, period, realm_epoch, num_shards, sync_status = meta_sync_status(zone)
+        if global_status != 'sync':
+            log.warning('zone %s has not started sync yet, state=%s', zone.name, global_status)
+        elif realm_epoch < current_realm_epoch:
             log.warning('zone %s is syncing realm epoch=%d, behind current realm epoch=%d',
                         zone.name, realm_epoch, current_realm_epoch)
         else:
@@ -453,6 +456,13 @@ def gen_role_name():
     num_roles += 1
     return "roles" + '-' + run_prefix + '-' + str(num_roles)
 
+
+def gen_topic_name():
+    global num_topic
+
+    num_topic += 1
+    return "topic" + '-' + run_prefix + '-' + str(num_topic)
+
 class ZonegroupConns:
     def __init__(self, zonegroup):
         self.zonegroup = zonegroup
@@ -499,6 +509,34 @@ def check_all_buckets_dont_exist(zone_conn, buckets):
         return False
 
     return True
+
+
+def get_topics(zone):
+    """
+    Get list of topics in cluster.
+    """
+    cmd = ['topic', 'list'] + zone.zone_args()
+    topics_json, _ = zone.cluster.admin(cmd, read_only=True)
+    topics = json.loads(topics_json)
+    return topics['topics']
+
+
+def create_topic_per_zone(zonegroup_conns, topics_per_zone=1):
+    topics = []
+    zone_topic = []
+    for zone in zonegroup_conns.rw_zones:
+        for _ in range(topics_per_zone):
+            topic_name = gen_topic_name()
+            log.info('create topic zone=%s name=%s', zone.name, topic_name)
+            attributes = {
+                "push-endpoint": "http://kaboom:9999",
+                "persistent": "true",
+            }
+            topic_arn = zone.create_topic(topic_name, attributes)
+            topics.append(topic_arn)
+            zone_topic.append((zone, topic_arn))
+
+    return topics, zone_topic
 
 def create_role_per_zone(zonegroup_conns, roles_per_zone = 1):
     roles = []
@@ -610,7 +648,8 @@ def test_object_sync():
     zonegroup_conns = ZonegroupConns(zonegroup)
     buckets, zone_bucket = create_bucket_per_zone(zonegroup_conns)
 
-    objnames = [ 'myobj', '_myobj', ':', '&' ]
+    objnames = [ 'myobj', '_myobj', ':', '&', '.', '..', '...',  '.o', '.o.']
+
     content = 'asdasd'
 
     # don't wait for meta sync just yet
@@ -657,6 +696,39 @@ def test_object_delete():
     for source_conn, bucket in zone_bucket:
         k = get_key(source_conn, bucket, objname)
         k.delete()
+        for target_conn in zonegroup_conns.zones:
+            if source_conn.zone == target_conn.zone:
+                continue
+
+            zone_bucket_checkpoint(target_conn.zone, source_conn.zone, bucket.name)
+            check_bucket_eq(source_conn, target_conn, bucket)
+
+def test_multi_object_delete():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    buckets, zone_bucket = create_bucket_per_zone(zonegroup_conns)
+
+    objnames = [f'obj{i}' for i in range(1,50)]
+    content = 'asdasd'
+
+    # don't wait for meta sync just yet
+    for zone, bucket in zone_bucket:
+        create_objects(zone, bucket, objnames, content)
+
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # check objects exist
+    for source_conn, bucket in zone_bucket:
+        for target_conn in zonegroup_conns.zones:
+            if source_conn.zone == target_conn.zone:
+                continue
+
+            zone_bucket_checkpoint(target_conn.zone, source_conn.zone, bucket.name)
+            check_bucket_eq(source_conn, target_conn, bucket)
+
+    # check object removal
+    for source_conn, bucket in zone_bucket:
+        bucket.delete_keys(objnames)
         for target_conn in zonegroup_conns.zones:
             if source_conn.zone == target_conn.zone:
                 continue
@@ -1704,6 +1776,30 @@ def test_role_sync():
                 continue
 
             check_role_eq(source_conn, target_conn, role)
+
+def test_role_delete_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    role_name = gen_role_name()
+    log.info('create role zone=%s name=%s', zonegroup_conns.master_zone.name, role_name)
+    zonegroup_conns.master_zone.create_role("", role_name, None, "")
+
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for zone in zonegroup_conns.zones:
+        log.info(f'checking if zone: {zone.name} has role: {role_name}')
+        assert(zone.has_role(role_name))
+        log.info(f'success, zone: {zone.name} has role: {role_name}')
+
+    log.info(f"deleting role: {role_name}")
+    zonegroup_conns.master_zone.delete_role(role_name)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for zone in zonegroup_conns.zones:
+        log.info(f'checking if zone: {zone.name} does not have role: {role_name}')
+        assert(not zone.has_role(role_name))
+        log.info(f'success, zone: {zone.name} does not have role: {role_name}')
+
 
 @attr('data_sync_init')
 def test_bucket_full_sync_after_data_sync_init():
@@ -2859,3 +2955,296 @@ def test_sync_single_bucket_to_multiple():
     remove_sync_policy_group(c1, "sync-bucket", bucketA.name)
     remove_sync_policy_group(c1, "sync-group")
     return
+
+def stop_2nd_rgw(zonegroup):
+    rgw_down = False
+    for z in zonegroup.zones:
+        if len(z.gateways) <= 1:
+            continue
+        z.gateways[1].stop()
+        log.info('gateway stopped zone=%s gateway=%s', z.name, z.gateways[1].endpoint())
+        rgw_down = True
+    return rgw_down
+
+def start_2nd_rgw(zonegroup):
+    for z in zonegroup.zones:
+        if len(z.gateways) <= 1:
+            continue
+        z.gateways[1].start()
+        log.info('gateway started zone=%s gateway=%s', z.name, z.gateways[1].endpoint())
+
+@attr('rgw_down')
+def test_bucket_create_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_bucket_create_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        zonegroup_conns = ZonegroupConns(zonegroup)
+        buckets, _ = create_bucket_per_zone(zonegroup_conns, 2)
+        zonegroup_meta_checkpoint(zonegroup)
+
+        for zone in zonegroup_conns.zones:
+            assert check_all_buckets_exist(zone, buckets)
+
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_bucket_remove_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_bucket_remove_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        zonegroup_conns = ZonegroupConns(zonegroup)
+        buckets, zone_bucket = create_bucket_per_zone(zonegroup_conns, 2)
+        zonegroup_meta_checkpoint(zonegroup)
+
+        for zone in zonegroup_conns.zones:
+            assert check_all_buckets_exist(zone, buckets)
+
+        for zone, bucket_name in zone_bucket:
+            zone.conn.delete_bucket(bucket_name)
+
+        zonegroup_meta_checkpoint(zonegroup)
+
+        for zone in zonegroup_conns.zones:
+            assert check_all_buckets_dont_exist(zone, buckets)
+
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_object_sync_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_object_sync_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_object_sync()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_object_delete_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_object_delete_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_object_delete()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_concurrent_versioned_object_incremental_sync_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_concurrent_versioned_object_incremental_sync_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_concurrent_versioned_object_incremental_sync()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_suspended_delete_marker_full_sync_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_suspended_delete_marker_full_sync_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_suspended_delete_marker_full_sync()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_bucket_acl_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_bucket_acl_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_bucket_acl()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_bucket_sync_enable_right_after_disable_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_bucket_sync_enable_right_after_disable_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_bucket_sync_enable_right_after_disable()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_multipart_object_sync_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_multipart_object_sync_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_multipart_object_sync()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_bucket_sync_run_basic_incremental_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_bucket_sync_run_basic_incremental_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_bucket_sync_run_basic_incremental()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_role_sync_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_role_sync_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_role_sync()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_bucket_full_sync_after_data_sync_init_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_bucket_full_sync_after_data_sync_init_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_bucket_full_sync_after_data_sync_init()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_sync_policy_config_zonegroup_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_sync_policy_config_zonegroup_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_sync_policy_config_zonegroup()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+@attr('rgw_down')
+def test_sync_flow_symmetrical_zonegroup_all_rgw_down():
+    zonegroup = realm.master_zonegroup()
+    try:
+        if not stop_2nd_rgw(zonegroup):
+            raise SkipTest("test_sync_flow_symmetrical_zonegroup_all_rgw_down skipped. More than one rgw needed in any one or multiple zone(s).")
+
+        test_sync_flow_symmetrical_zonegroup_all()
+    finally:
+        start_2nd_rgw(zonegroup)
+
+def test_topic_notification_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_meta_checkpoint(zonegroup)
+    # let wait for users and other settings to sync across all zones.
+    time.sleep(config.checkpoint_delay)
+    # create topics in each zone.
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    topic_arns, zone_topic = create_topic_per_zone(zonegroup_conns)
+    log.debug("topic_arns: %s", topic_arns)
+
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # verify topics exists in all zones
+    for conn in zonegroup_conns.zones:
+        topic_list = conn.list_topics()
+        log.debug("topics for zone=%s = %s", conn.name, topic_list)
+        assert_equal(len(topic_list), len(topic_arns))
+        for topic_arn_map in topic_list:
+            assert_true(topic_arn_map['TopicArn'] in topic_arns)
+
+    # create a bucket
+    bucket = zonegroup_conns.rw_zones[0].create_bucket(gen_bucket_name())
+    log.debug('created bucket=%s', bucket.name)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # create bucket_notification in each zone.
+    notification_ids = []
+    num = 1
+    for zone_conn, topic_arn in zone_topic:
+        noti_id = "bn" + '-' + run_prefix + '-' + str(num)
+        notification_ids.append(noti_id)
+        topic_conf = {'Id': noti_id,
+                      'TopicArn': topic_arn,
+                      'Events': ['s3:ObjectCreated:*']
+                     }
+        num += 1
+        log.info('creating bucket notification for zone=%s name=%s', zone_conn.name, noti_id)
+        zone_conn.create_notification(bucket.name, [topic_conf])
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # verify notifications exists in all zones
+    for conn in zonegroup_conns.zones:
+        notification_list = conn.list_notifications(bucket.name)
+        log.debug("notifications for zone=%s = %s", conn.name, notification_list)
+        assert_equal(len(notification_list), len(topic_arns))
+        for notification in notification_list:
+            assert_true(notification['Id'] in notification_ids)
+
+    # verify bucket_topic mapping
+    # create a new bucket and subcribe it to first topic.
+    bucket_2 = zonegroup_conns.rw_zones[0].create_bucket(gen_bucket_name())
+    notif_id = "bn-2" + '-' + run_prefix
+    topic_conf = {'Id': notif_id,
+                  'TopicArn': topic_arns[0],
+                  'Events': ['s3:ObjectCreated:*']
+                  }
+    zonegroup_conns.rw_zones[0].create_notification(bucket_2.name, [topic_conf])
+    zonegroup_meta_checkpoint(zonegroup)
+    for conn in zonegroup_conns.zones:
+        topics = get_topics(conn.zone)
+        for topic in topics:
+            if topic['arn'] == topic_arns[0]:
+                assert_equal(len(topic['subscribed_buckets']), 2)
+                assert_true(bucket_2.name in topic['subscribed_buckets'])
+            else:
+                assert_equal(len(topic['subscribed_buckets']), 1)
+            assert_true(bucket.name in topic['subscribed_buckets'])
+
+    # delete the 2nd bucket and verify the mapping is removed.
+    zonegroup_conns.rw_zones[0].delete_bucket(bucket_2.name)
+    zonegroup_meta_checkpoint(zonegroup)
+    for conn in zonegroup_conns.zones:
+        topics = get_topics(conn.zone)
+        for topic in topics:
+            assert_equal(len(topic['subscribed_buckets']), 1)
+        '''TODO(Remove the break once the https://tracker.ceph.com/issues/20802
+           is fixed, as the secondary site bucket instance info is currently not
+           getting deleted coz of the bug hence the bucket-topic mapping
+           deletion is not invoked on secondary sites.)'''
+        break
+
+    # delete notifications
+    zonegroup_conns.rw_zones[0].delete_notifications(bucket.name)
+    log.debug('Deleting all notifications for  bucket=%s', bucket.name)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # verify notification deleted in all zones
+    for conn in zonegroup_conns.zones:
+        notification_list = conn.list_notifications(bucket.name)
+        assert_equal(len(notification_list), 0)
+
+    # delete topics
+    for zone_conn, topic_arn in zone_topic:
+        log.debug('deleting topic zone=%s arn=%s', zone_conn.name, topic_arn)
+        zone_conn.delete_topic(topic_arn)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # verify topics deleted in all zones
+    for conn in zonegroup_conns.zones:
+        topic_list = conn.list_topics()
+        assert_equal(len(topic_list), 0)

@@ -145,6 +145,7 @@ using ceph::crypto::MD5;
 
 #define RGW_ATTR_OBJ_REPLICATION_STATUS RGW_ATTR_PREFIX "amz-replication-status"
 #define RGW_ATTR_OBJ_REPLICATION_TRACE RGW_ATTR_PREFIX "replication-trace"
+#define RGW_ATTR_OBJ_REPLICATION_TIMESTAMP RGW_ATTR_PREFIX "replicated-at"
 
 /* IAM Policy */
 #define RGW_ATTR_IAM_POLICY	RGW_ATTR_PREFIX "iam-policy"
@@ -170,6 +171,8 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_BUCKET_ENCRYPTION_KEY_ID RGW_ATTR_BUCKET_ENCRYPTION_PREFIX "key-id"
 
 #define RGW_ATTR_TRACE RGW_ATTR_PREFIX "trace"
+
+#define RGW_ATTR_BUCKET_NOTIFICATION RGW_ATTR_PREFIX "bucket-notification"
 
 enum class RGWFormat : int8_t {
   BAD_FORMAT = -1,
@@ -282,6 +285,7 @@ static inline const char* to_mime_type(const RGWFormat f)
 #define ERR_NO_SUCH_OBJECT_LOCK_CONFIGURATION  2046
 #define ERR_INVALID_RETENTION_PERIOD 2047
 #define ERR_NO_SUCH_BUCKET_ENCRYPTION_CONFIGURATION 2048
+#define ERR_NO_SUCH_PUBLIC_ACCESS_BLOCK_CONFIGURATION 2049
 #define ERR_USER_SUSPENDED       2100
 #define ERR_INTERNAL_ERROR       2200
 #define ERR_NOT_IMPLEMENTED      2201
@@ -306,6 +310,8 @@ static inline const char* to_mime_type(const RGWFormat f)
 #define ERR_OBJECT_NOT_APPENDABLE                        2220
 #define ERR_INVALID_BUCKET_STATE                         2221
 #define ERR_INVALID_OBJECT_STATE			 2222
+#define ERR_PRESIGNED_URL_EXPIRED			 2223
+#define ERR_PRESIGNED_URL_DISABLED     2224
 
 #define ERR_BUSY_RESHARDING      2300
 #define ERR_NO_SUCH_ENTITY       2301
@@ -445,8 +451,10 @@ public:
   }
 };
 
+using env_map_t = std::map<std::string, std::string, ltstr_nocase>;
+
 class RGWEnv {
-  std::map<std::string, std::string, ltstr_nocase> env_map;
+  env_map_t env_map;
   RGWConf conf;
 public:
   void init(CephContext *cct);
@@ -1112,6 +1120,7 @@ struct req_state : DoutPrefixProvider {
   uint64_t obj_size{0};
   bool enable_ops_log;
   bool enable_usage_log;
+  rgw_s3select_usage_data s3select_usage;
   uint8_t defer_to_bucket_acls;
   uint32_t perm_mask{0};
 
@@ -1356,16 +1365,34 @@ inline std::ostream& operator<<(std::ostream& out, const rgw_obj &o) {
 struct multipart_upload_info
 {
   rgw_placement_rule dest_placement;
+  //object lock
+  bool obj_retention_exist{false};
+  bool obj_legal_hold_exist{false};
+  RGWObjectRetention obj_retention;
+  RGWObjectLegalHold obj_legal_hold;
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(dest_placement, bl);
+    encode(obj_retention_exist, bl);
+    encode(obj_legal_hold_exist, bl);
+    encode(obj_retention, bl);
+    encode(obj_legal_hold, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(dest_placement, bl);
+    if (struct_v >= 2) {
+      decode(obj_retention_exist, bl);
+      decode(obj_legal_hold_exist, bl);
+      decode(obj_retention, bl);
+      decode(obj_legal_hold, bl);
+    } else {
+      obj_retention_exist = false;
+      obj_legal_hold_exist = false;
+    }
     DECODE_FINISH(bl);
   }
 
@@ -1767,7 +1794,7 @@ static constexpr uint32_t MATCH_POLICY_RESOURCE = 0x02;
 static constexpr uint32_t MATCH_POLICY_ARN = 0x04;
 static constexpr uint32_t MATCH_POLICY_STRING = 0x08;
 
-extern bool match_policy(std::string_view pattern, std::string_view input,
+extern bool match_policy(const std::string& pattern, const std::string& input,
                          uint32_t flag);
 
 extern std::string camelcase_dash_http_attr(const std::string& orig, bool convert2dash = true);
@@ -1824,13 +1851,14 @@ static inline ssize_t rgw_unescape_str(const std::string& s, ssize_t ofs,
   return std::string::npos;
 }
 
-static inline std::string rgw_bl_str(ceph::buffer::list& raw)
+/// Return a string copy of the given bufferlist with trailing nulls removed
+static inline std::string rgw_bl_str(const ceph::buffer::list& bl)
 {
-  size_t len = raw.length();
-  std::string s(raw.c_str(), len);
-  while (len && !s[len - 1]) {
-    --len;
-    s.resize(len);
+  // use to_str() instead of c_str() so we don't reallocate a flat bufferlist
+  std::string s = bl.to_str();
+  // with to_str(), the result may include null characters. trim trailing nulls
+  while (!s.empty() && s.back() == '\0') {
+    s.pop_back();
   }
   return s;
 }
@@ -1846,6 +1874,18 @@ int decode_bl(bufferlist& bl, T& t)
   }
   return 0;
 }
+
+static inline std::string ys_header_mangle(std::string_view name)
+{
+  /* can we please stop doing this? */
+  std::string out;
+  out.reserve(name.length());
+  std::transform(std::begin(name), std::end(name),
+		 std::back_inserter(out), [](const int c) {
+		   return c == '-' ? '_' : c == '_' ? '-' : std::toupper(c);
+		 });
+  return out;
+} /* ys_header_mangle */
 
 extern int rgw_bucket_parse_bucket_instance(const std::string& bucket_instance, std::string *bucket_name, std::string *bucket_id, int *shard_id);
 

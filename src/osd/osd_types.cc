@@ -1376,7 +1376,9 @@ static opt_mapping_t opt_mapping = boost::assign::map_list_of
            ("dedup_cdc_chunk_size", pool_opts_t::opt_desc_t(
 	     pool_opts_t::DEDUP_CDC_CHUNK_SIZE, pool_opts_t::INT))
 	   ("pg_num_max", pool_opts_t::opt_desc_t(
-             pool_opts_t::PG_NUM_MAX, pool_opts_t::INT));
+             pool_opts_t::PG_NUM_MAX, pool_opts_t::INT))
+	   ("read_ratio", pool_opts_t::opt_desc_t(
+             pool_opts_t::READ_RATIO, pool_opts_t::INT));
 
 bool pool_opts_t::is_opt_name(const std::string& name)
 {
@@ -3884,7 +3886,7 @@ class pi_compact_rep : public PastIntervals::interval_rep {
     bool ec_pool,
     std::list<PastIntervals::pg_interval_t> &&intervals) {
     for (auto &&i: intervals)
-      add_interval(ec_pool, i);
+      pi_compact_rep::add_interval(ec_pool, i);
   }
 public:
   pi_compact_rep() = default;
@@ -7148,8 +7150,16 @@ void ScrubMap::object::generate_test_instances(list<object*>& o)
   o.back()->negative = true;
   o.push_back(new object);
   o.back()->size = 123;
-  o.back()->attrs["foo"] = ceph::buffer::copy("foo", 3);
-  o.back()->attrs["bar"] = ceph::buffer::copy("barval", 6);
+  {
+    bufferlist foobl;
+    foobl.push_back(ceph::buffer::copy("foo", 3));
+    o.back()->attrs["foo"] = std::move(foobl);
+  }
+  {
+    bufferlist barbl;
+    barbl.push_back(ceph::buffer::copy("barval", 6));
+    o.back()->attrs["bar"] = std::move(barbl);
+  }
 }
 
 // -- OSDOp --

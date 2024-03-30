@@ -51,6 +51,8 @@ class OsdScrub {
 
   void dump_scrubs(ceph::Formatter* f) const;  ///< fwd to the queue
 
+  void dump_scrub_reservations(ceph::Formatter* f) const;
+
   /**
    * on_config_change() (the refactored "OSD::sched_all_scrubs()")
    *
@@ -69,18 +71,10 @@ class OsdScrub {
   std::unique_ptr<Scrub::LocalResourceWrapper> inc_scrubs_local(
       bool is_high_priority);
   void dec_scrubs_local();
-  bool inc_scrubs_remote(pg_t pgid);
-  void dec_scrubs_remote(pg_t pgid);
 
   // counting the number of PGs stuck while scrubbing, waiting for objects
   void mark_pg_scrub_blocked(spg_t blocked_pg);
   void clear_pg_scrub_blocked(spg_t blocked_pg);
-
-  // updating scheduling information for a specific PG
-  Scrub::sched_params_t determine_scrub_time(
-      const requested_scrub_t& request_flags,
-      const pg_info_t& pg_info,
-      const pool_opts_t& pool_conf) const;
 
   /**
    * modify a scrub-job's scheduled time and deadline
@@ -90,21 +84,23 @@ class OsdScrub {
    *   the registration will be with "beginning of time" target, making the
    *   scrub-job eligible to immediate scrub (given that external conditions
    *   do not prevent scrubbing)
-   *
    * - 'must' is asserted, and the suggested time is 'now':
    *   This happens if our stats are unknown. The results are similar to the
    *   previous scenario.
-   *
    * - not a 'must': we take the suggested time as a basis, and add to it some
    *   configuration / random delays.
-   *
    *  ('must' is Scrub::sched_params_t.is_must)
+   *
+   *  'reset_notbefore' is used to reset the 'not_before' time to the updated
+   *  'scheduled_at' time. This is used whenever the scrub-job schedule is
+   *  updated not as a result of a scrub attempt failure.
    *
    *  locking: not using the jobs_lock
    */
   void update_job(
       Scrub::ScrubJobRef sjob,
-      const Scrub::sched_params_t& suggested);
+      const Scrub::sched_params_t& suggested,
+      bool reset_notbefore);
 
   /**
    * Add the scrub job to the list of jobs (i.e. list of PGs) to be periodically
@@ -146,6 +142,17 @@ class OsdScrub {
   bool set_reserving_now(spg_t reserving_id, utime_t now_is);
 
   void clear_reserving_now(spg_t reserving_id);
+
+  /**
+   * push the 'not_before' time out by 'delay' seconds, so that this scrub target
+   * would not be retried before 'delay' seconds have passed.
+   */
+  void delay_on_failure(
+      Scrub::ScrubJobRef sjob,
+      std::chrono::seconds delay,
+      Scrub::delay_cause_t delay_cause,
+      utime_t now_is);
+
 
   /**
    * \returns true if the current time is within the scrub time window

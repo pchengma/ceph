@@ -11,6 +11,10 @@
 #include "rgw_sal.h"
 #include "rgw_auth.h"
 #include "rgw_auth_registry.h"
+#include "driver/rados/rgw_zone.h"
+#include "rgw_sal_config.h"
+
+#include <boost/asio/io_context.hpp>
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -33,6 +37,7 @@ class StoreObject : public rgw::sal::StoreObject {
 };
 
 class Environment : public ::testing::Environment {
+  boost::asio::io_context ioc;
   public:
     Environment() {}
     
@@ -52,15 +57,24 @@ class Environment : public ::testing::Environment {
       cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_CLIENT, 
 		        CODE_ENVIRONMENT_UTILITY, 
 			CINIT_FLAG_NO_MON_CONFIG);
-      
+
       dpp = new DoutPrefix(cct->get(), dout_subsys, "d4n test: ");
       DriverManager::Config cfg;
 
       cfg.store_name = "dbstore";
       cfg.filter_name = "d4n";
-      
+      auto config_store_type = g_conf().get_val<std::string>("rgw_config_store");
+      std::unique_ptr<rgw::sal::ConfigStore> cfgstore
+        = DriverManager::create_config_store(dpp, config_store_type);
+      ASSERT_TRUE(cfgstore);
+      rgw::SiteConfig site;
+      auto r = site.load(dpp, null_yield, cfgstore.get());
+      ASSERT_GT(r, 0);
+
       driver = DriverManager::get_storage(dpp, dpp->get_cct(),
               cfg,
+              ioc,
+              site,
               false,
               false,
               false,
@@ -169,7 +183,7 @@ class D4NFilterFixture : public ::testing::Test {
                        &if_match, &if_nomatch,
                        &user_data,
                        &zones_trace, &canceled,
-                       rctx);
+                       rctx, rgw::sal::FLAG_LOG_OP);
 
       return ret;
     }
@@ -429,7 +443,7 @@ TEST_F(D4NFilterFixture, CopyObjectReplace) {
 		   &if_match, &if_nomatch,
 		   &user_data,
 		   &zones_trace, &canceled,
-		   rctx), 0);
+		   rctx, rgw::sal::FLAG_LOG_OP), 0);
 
   unique_ptr<rgw::sal::Object> testObject_copy = testBucket->get_object(rgw_obj_key("test_object_copy"));
 
@@ -554,7 +568,7 @@ TEST_F(D4NFilterFixture, CopyObjectMerge) {
 		   &if_match, &if_nomatch,
 		   &user_data,
 		   &zones_trace, &canceled,
-		   rctx), 0);
+		   rctx, rgw::sal::FLAG_LOG_OP), 0);
 
   unique_ptr<rgw::sal::Object> testObject_copy = testBucket->get_object(rgw_obj_key("test_object_copy"));
 
@@ -639,7 +653,7 @@ TEST_F(D4NFilterFixture, DelObject) {
   unique_ptr<rgw::sal::Object::DeleteOp> testDOp = testObject_DelObject->get_delete_op();
 
   EXPECT_NE(testDOp, nullptr);
-  EXPECT_EQ(testDOp->delete_obj(dpp, null_yield), 0);
+  EXPECT_EQ(testDOp->delete_obj(dpp, null_yield, true), 0);
 
   /* Check the object does not exist after delete op */
   client.exists(keys, [](cpp_redis::reply& reply) {
@@ -1881,7 +1895,7 @@ TEST_F(D4NFilterFixture, DataCheck) {
 		 &if_match, &if_nomatch,
 		 &user_data,
 		 &zones_trace, &canceled,
-		 rctx), 0);
+		 rctx, rgw::sal::FLAG_LOG_OP), 0);
  
   client.hget("rgw-object:test_object_DataCheck:cache", "data", [&data](cpp_redis::reply& reply) {
     if (reply.is_string()) {
@@ -1906,7 +1920,7 @@ TEST_F(D4NFilterFixture, DataCheck) {
 		 &if_match, &if_nomatch,
 		 &user_data,
 		 &zones_trace, &canceled,
-		 rctx), 0);
+		 rctx, rgw::sal::FLAG_LOG_OP), 0);
 
   client.hget("rgw-object:test_object_DataCheck:cache", "data", [&dataNew](cpp_redis::reply& reply) {
     if (reply.is_string()) {

@@ -26,6 +26,7 @@ class Transaction;
 
 namespace crimson::os {
 class CyanStore final : public FuturizedStore {
+public:
   class Shard : public FuturizedStore::Shard {
   public:
     Shard(std::string path)
@@ -33,6 +34,10 @@ class CyanStore final : public FuturizedStore {
 
     seastar::future<struct stat> stat(
       CollectionRef c,
+      const ghobject_t& oid) final;
+
+    base_errorator::future<bool> exists(
+      CollectionRef ch,
       const ghobject_t& oid) final;
 
     read_errorator::future<ceph::bufferlist> read(
@@ -148,6 +153,7 @@ class CyanStore final : public FuturizedStore {
 		 std::string_view name);
     int _rm_attrs(const coll_t& cid, const ghobject_t& oid);
     int _create_collection(const coll_t& cid, int bits);
+    int _remove_collection(const coll_t& cid);
     boost::intrusive_ptr<Collection> _get_collection(const coll_t& cid);
 
   private:
@@ -157,7 +163,6 @@ class CyanStore final : public FuturizedStore {
     std::map<coll_t, boost::intrusive_ptr<Collection>> new_coll_map;
   };
 
-public:
   CyanStore(const std::string& path);
   ~CyanStore() final;
 

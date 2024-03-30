@@ -1,4 +1,5 @@
 local g = import 'grafonnet/grafana.libsonnet';
+local pieChartPanel = import 'piechart_panel.libsonnet';
 local timeSeries = import 'timeseries_panel.libsonnet';
 
 {
@@ -117,7 +118,8 @@ local timeSeries = import 'timeseries_panel.libsonnet';
                     regex,
                     hide='',
                     multi=false,
-                    allValues=null)::
+                    allValues=null,
+                    current=null)::
     g.template.new(name=name,
                    datasource=datasource,
                    query=query,
@@ -128,7 +130,8 @@ local timeSeries = import 'timeseries_panel.libsonnet';
                    regex=regex,
                    hide=hide,
                    multi=multi,
-                   allValues=allValues),
+                   allValues=allValues,
+                   current=current),
 
   addAnnotationSchema(builtIn,
                       datasource,
@@ -314,7 +317,7 @@ local timeSeries = import 'timeseries_panel.libsonnet';
                        '$datasource')
     .addTargets(
       [$.addTargetSchema(expr, legendFormat)]
-    ) + { gridPos: { x: x, y: y, w: w, h: h } },
+    ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } },
 
   simpleSingleStatPanel(format,
                         title,
@@ -524,6 +527,16 @@ local timeSeries = import 'timeseries_panel.libsonnet';
       maxDataPoints: maxDataPoints,
       interval: interval,
     },
+
+  addBarGaugePanel(title='',
+                   description='',
+                   datasource='${DS_PROMETHEUS}',
+                   gridPosition={},
+                   unit='percentunit',
+                   thresholds={})::
+    g.barGaugePanel.new(title, description, datasource, unit, thresholds) + {
+      gridPos: gridPosition,
+    },
   addTableExtended(
     title='',
     datasource=null,
@@ -635,6 +648,35 @@ local timeSeries = import 'timeseries_panel.libsonnet';
       pluginVersion: pluginVersion,
       [if interval != null then 'interval']: interval,
     },
+
+  pieChartPanel(
+    title,
+    description='',
+    datasource=null,
+    gridPos={},
+    displayMode='table',
+    placement='bottom',
+    showLegend=true,
+    displayLabels=[],
+    tooltip={},
+    pieType='pie',
+    values=[],
+    colorMode='auto'
+  )::
+    pieChartPanel.new(
+      title,
+      description=description,
+      datasource=datasource,
+      gridPos=gridPos,
+      displayMode=displayMode,
+      placement=placement,
+      showLegend=showLegend,
+      displayLabels=displayLabels,
+      tooltip=tooltip,
+      pieType=pieType,
+      values=values,
+      colorMode=colorMode
+    ),
 
   heatMapPanel(
     title='',

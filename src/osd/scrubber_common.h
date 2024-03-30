@@ -3,10 +3,11 @@
 #pragma once
 
 #include <fmt/ranges.h>
-
 #include "common/ceph_time.h"
+#include "common/fmt_common.h"
 #include "common/scrub_types.h"
 #include "include/types.h"
+#include "messages/MOSDScrubReserve.h"
 #include "os/ObjectStore.h"
 
 #include "OpRequest.h"
@@ -23,6 +24,32 @@ namespace Scrub {
   class ReplicaReservations;
   struct ReplicaActive;
 }
+
+/// reservation-related data sent by the primary to the replicas,
+/// and used to match the responses to the requests
+struct AsyncScrubResData {
+  spg_t pgid;
+  pg_shard_t from;
+  epoch_t request_epoch;
+  MOSDScrubReserve::reservation_nonce_t nonce;
+  AsyncScrubResData(
+      spg_t pgid,
+      pg_shard_t from,
+      epoch_t request_epoch,
+      MOSDScrubReserve::reservation_nonce_t nonce)
+      : pgid{pgid}
+      , from{from}
+      , request_epoch{request_epoch}
+      , nonce{nonce}
+  {}
+  template <typename FormatContext>
+  auto fmt_print_ctx(FormatContext& ctx) const
+  {
+    return fmt::format_to(
+	ctx.out(), "pg[{}],f:{},ep:{},n:{}", pgid, from, request_epoch, nonce);
+  }
+};
+
 
 /// Facilitating scrub-related object access to private PG data
 class ScrubberPasskey {
@@ -84,6 +111,53 @@ struct formatter<Scrub::OSDRestrictions> {
   }
 };
 }  // namespace fmt
+
+namespace Scrub {
+
+/**
+ * the result of the last attempt to schedule a scrub for a specific PG.
+ * The enum value itself is mostly used for logging purposes.
+ */
+enum class delay_cause_t {
+  none,		    ///< scrub attempt was successful
+  replicas,	    ///< failed to reserve replicas
+  flags,	    ///< noscrub or nodeep-scrub
+  pg_state,	    ///< e.g. snap-trimming
+  restricted_time,  ///< time restrictions or busy CPU
+  local_resources,  ///< too many scrubbing PGs
+  aborted,	    ///< scrub was aborted w/ unspecified reason
+  interval,	    ///< the interval had ended mid-scrub
+  scrub_params,     ///< the specific scrub type is not allowed
+};
+}  // namespace Scrub
+
+namespace fmt {
+// clang-format off
+template <>
+struct formatter<Scrub::delay_cause_t> : ::fmt::formatter<std::string_view> {
+  template <typename FormatContext>
+  auto format(Scrub::delay_cause_t cause, FormatContext& ctx)
+  {
+    using enum Scrub::delay_cause_t;
+    std::string_view desc;
+    switch (cause) {
+      case none:                desc = "ok"; break;
+      case replicas:            desc = "replicas"; break;
+      case flags:               desc = "noscrub"; break;
+      case pg_state:            desc = "pg-state"; break;
+      case restricted_time:     desc = "time/load"; break;
+      case local_resources:     desc = "local-cnt"; break;
+      case aborted:             desc = "aborted"; break;
+      case interval:            desc = "interval"; break;
+      case scrub_params:        desc = "scrub-mode"; break;
+      // better to not have a default case, so that the compiler will warn
+    }
+    return ::fmt::formatter<string_view>::format(desc, ctx);
+  }
+};
+// clang-format on
+}  // namespace fmt
+
 
 namespace Scrub {
 
@@ -270,6 +344,8 @@ struct ScrubPgIF {
 
   virtual void send_scrub_is_finished(epoch_t epoch_queued) = 0;
 
+  virtual void send_granted_by_reserver(const AsyncScrubResData& req) = 0;
+
   virtual void on_applied_when_primary(const eversion_t& applied_version) = 0;
 
   // --------------------------------------------------
@@ -319,15 +395,19 @@ struct ScrubPgIF {
   /// the OSD scrub queue
   virtual void on_new_interval() = 0;
 
+  /// we are peered as primary, and the PG is active and clean
+  /// Scrubber's internal FSM should be ActivePrimary
+  virtual void on_primary_active_clean() = 0;
+
   /// we are peered as a replica
   virtual void on_replica_activate() = 0;
-
-  virtual void scrub_clear_state() = 0;
 
   virtual void handle_query_state(ceph::Formatter* f) = 0;
 
   virtual pg_scrubbing_status_t get_schedule() const = 0;
 
+  /// notify the scrubber about a scrub failure
+  virtual void penalize_next_scrub(Scrub::delay_cause_t cause) = 0;
 
   // // perform 'scrub'/'deep_scrub' asok commands
 
@@ -378,8 +458,13 @@ struct ScrubPgIF {
 					const hobject_t& soid) = 0;
 
   /**
-   * the version of 'scrub_clear_state()' that does not try to invoke FSM
-   * services (thus can be called from FSM reactions)
+   * clears both internal scrub state, and some PG-visible flags:
+   * - the two scrubbing PG state flags;
+   * - primary/replica scrub position (chunk boundaries);
+   * - primary/replica interaction state;
+   * - the backend state
+   * Also runs pending callbacks, and clears the active flags.
+   * Does not try to invoke FSM events.
    */
   virtual void clear_pgscrub_state() = 0;
 
@@ -406,12 +491,6 @@ struct ScrubPgIF {
   virtual bool reserve_local() = 0;
 
   /**
-   * if activated as a Primary - register the scrub job with the OSD
-   * scrub queue
-   */
-  virtual void on_pg_activate(const requested_scrub_t& request_flags) = 0;
-
-  /**
    * Recalculate the required scrub time.
    *
    * This function assumes that the queue registration status is up-to-date,
@@ -426,8 +505,6 @@ struct ScrubPgIF {
    * send all relevant messages to the ScrubMachine.
    */
   virtual void handle_scrub_reserve_msgs(OpRequestRef op) = 0;
-
-  virtual void rm_from_osd_scrubbing() = 0;
 
   virtual scrub_level_t scrub_requested(
       scrub_level_t scrub_level,

@@ -269,6 +269,8 @@ private:
 
   ServiceDaemonStats m_service_daemon_stats;
 
+  PerfCounters *m_perf_counters;
+
   void run(SnapshotReplayerThread *replayer);
 
   boost::optional<std::string> pick_directory();
@@ -301,6 +303,8 @@ private:
 
   int do_synchronize(const std::string &dir_root, const Snapshot &current,
                      boost::optional<Snapshot> prev);
+
+  int do_synchronize(const std::string &dir_root, const Snapshot &current);
 
   int synchronize(const std::string &dir_root, const Snapshot &current,
                   boost::optional<Snapshot> prev);

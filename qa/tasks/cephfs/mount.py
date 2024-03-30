@@ -761,36 +761,49 @@ class CephFSMount(object):
             'rm', '-f', os.path.join(self.hostfs_mntpt, filename)
         ])
 
-    def _run_python(self, pyscript, py_version='python3', sudo=False):
+    def _run_python(self, pyscript, py_version='python3', sudo=False, timeout=None):
         args, omit_sudo = [], True
         if sudo:
             args.append('sudo')
             omit_sudo = False
-        args += ['stdin-killer', '--', py_version, '-c', pyscript]
+        timeout_args = ['--timeout', "%d" % timeout] if timeout is not None else []
+        args += ['stdin-killer', *timeout_args, '--', py_version, '-c', pyscript]
         return self.client_remote.run(args=args, wait=False, stdin=run.PIPE,
                                       stdout=StringIO(), omit_sudo=omit_sudo)
 
-    def run_python(self, pyscript, py_version='python3', sudo=False):
-        p = self._run_python(pyscript, py_version, sudo=sudo)
+    def run_python(self, pyscript, py_version='python3', sudo=False, timeout=None):
+        p = self._run_python(pyscript, py_version, sudo=sudo, timeout=timeout)
         p.wait()
         return p.stdout.getvalue().strip()
 
-    def run_shell(self, args, timeout=300, **kwargs):
-        omit_sudo = kwargs.pop('omit_sudo', False)
-        cwd = kwargs.pop('cwd', self.mountpoint)
-        stdout = kwargs.pop('stdout', StringIO())
-        stderr = kwargs.pop('stderr', StringIO())
+    def run_shell(self, args, **kwargs):
+        kwargs.setdefault('cwd', self.mountpoint)
+        kwargs.setdefault('omit_sudo', False)
+        kwargs.setdefault('stdout', StringIO())
+        kwargs.setdefault('stderr', StringIO())
+        kwargs.setdefault('timeout', 300)
 
-        return self.client_remote.run(args=args, cwd=cwd, timeout=timeout,
-                                      stdout=stdout, stderr=stderr,
-                                      omit_sudo=omit_sudo, **kwargs)
+        return self.client_remote.run(args=args, **kwargs)
 
-    def run_shell_payload(self, payload, **kwargs):
-        kwargs['args'] = ["bash", "-c", Raw(f"'{payload}'")]
+    def run_shell_payload(self, payload, wait=True, timeout=900, **kwargs):
+        kwargs.setdefault('cwd', self.mountpoint)
+        kwargs.setdefault('omit_sudo', False)
+        kwargs.setdefault('stdout', StringIO())
+        kwargs.setdefault('stderr', StringIO())
+        kwargs.setdefault('stdin', run.PIPE)
+        args = []
         if kwargs.pop('sudo', False):
-            kwargs['args'].insert(0, 'sudo')
+            args.append('sudo')
             kwargs['omit_sudo'] = False
-        return self.run_shell(**kwargs)
+        args.append("stdin-killer")
+        if timeout is not None:
+            args.append(f"--timeout={timeout}")
+        args += ("--", "bash", "-c", Raw(f"'{payload}'"))
+        p = self.client_remote.run(args=args, wait=False, **kwargs)
+        if wait:
+            p.stdin.close()
+            p.wait()
+        return p
 
     def run_as_user(self, **kwargs):
         """
@@ -1243,7 +1256,7 @@ class CephFSMount(object):
             size=size
         )))
 
-    def validate_test_pattern(self, filename, size):
+    def validate_test_pattern(self, filename, size, timeout=None):
         log.info("Validating {0} bytes from {1}".format(size, filename))
         # Use sudo because cephfs-data-scan may recreate the file with owner==root
         return self.run_python(dedent("""
@@ -1262,7 +1275,7 @@ class CephFSMount(object):
         """.format(
             path=os.path.join(self.hostfs_mntpt, filename),
             size=size
-        )), sudo=True)
+        )), sudo=True, timeout=timeout)
 
     def open_n_background(self, fs_path, count):
         """
@@ -1367,11 +1380,8 @@ class CephFSMount(object):
         self.run_python(pyscript)
 
     def teardown(self):
-        for p in self.background_procs:
-            log.info("Terminating background process")
-            self._kill_background(p)
-
-        self.background_procs = []
+        log.info("Terminating background process")
+        self.kill_background()
 
     def _kill_background(self, p):
         if p.stdin:
@@ -1381,13 +1391,16 @@ class CephFSMount(object):
             except (CommandFailedError, ConnectionLostError):
                 pass
 
-    def kill_background(self, p):
+    def kill_background(self, p=None):
         """
         For a process that was returned by one of the _background member functions,
         kill it hard.
         """
-        self._kill_background(p)
-        self.background_procs.remove(p)
+        procs = [p] if p is not None else self.background_procs
+        for p in procs:
+            log.debug(f"terminating {p}")
+            self._kill_background(p)
+            self.background_procs.remove(p)
 
     def send_signal(self, signal):
         signal = signal.lower()

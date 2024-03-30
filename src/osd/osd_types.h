@@ -315,9 +315,9 @@ inline bool operator!=(const object_locator_t& l, const object_locator_t& r) {
 inline std::ostream& operator<<(std::ostream& out, const object_locator_t& loc)
 {
   out << "@" << loc.pool;
-  if (loc.nspace.length())
+  if (!loc.nspace.empty())
     out << ";" << loc.nspace;
-  if (loc.key.length())
+  if (!loc.key.empty())
     out << ":" << loc.key;
   return out;
 }
@@ -403,7 +403,7 @@ struct pg_t {
   uint32_t m_seed;
 
   pg_t() : m_pool(0), m_seed(0) {}
-  pg_t(ps_t seed, uint64_t pool) :
+  constexpr pg_t(ps_t seed, uint64_t pool) :
     m_pool(pool), m_seed(seed) {}
   // cppcheck-suppress noExplicitConstructor
   pg_t(const ceph_pg& cpg) :
@@ -521,7 +521,7 @@ struct spg_t {
   pg_t pgid;
   shard_id_t shard;
   spg_t() : shard(shard_id_t::NO_SHARD) {}
-  spg_t(pg_t pgid, shard_id_t shard) : pgid(pgid), shard(shard) {}
+  constexpr spg_t(pg_t pgid, shard_id_t shard) : pgid(pgid), shard(shard) {}
   explicit spg_t(pg_t pgid) : pgid(pgid), shard(shard_id_t::NO_SHARD) {}
   auto operator<=>(const spg_t&) const = default;
   unsigned get_split_bits(unsigned pg_num) const {
@@ -587,6 +587,10 @@ struct spg_t {
 
   ghobject_t make_pgmeta_oid() const {
     return ghobject_t::make_pgmeta(pgid.pool(), pgid.ps(), shard);
+  }
+
+  ghobject_t make_snapmapper_oid() const {
+    return ghobject_t::make_snapmapper(pgid.pool(), pgid.ps(), shard);
   }
 
   void encode(ceph::buffer::list &bl) const {
@@ -1101,6 +1105,7 @@ public:
     DEDUP_CHUNK_ALGORITHM,
     DEDUP_CDC_CHUNK_SIZE,
     PG_NUM_MAX, // max pg_num
+    READ_RATIO, // read ration for the read balancer work [0-100]
   };
 
   enum type_t {
@@ -6233,7 +6238,7 @@ std::ostream& operator<<(std::ostream& out, const PushOp &op);
  */
 struct ScrubMap {
   struct object {
-    std::map<std::string, ceph::buffer::ptr, std::less<>> attrs;
+    std::map<std::string, ceph::buffer::list, std::less<>> attrs;
     uint64_t size;
     __u32 omap_digest;         ///< omap crc32c
     __u32 digest;              ///< data crc32c

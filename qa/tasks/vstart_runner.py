@@ -804,8 +804,10 @@ class LocalCephManager(CephManager):
         self.cephadm = False
         self.rook = False
         self.testdir = None
-        self.CEPH_CMD = [CEPH_CMD]
         self.RADOS_CMD = [RADOS_CMD]
+
+    def get_ceph_cmd(self, **kwargs):
+        return [CEPH_CMD]
 
     def find_remote(self, daemon_type, daemon_id):
         """
@@ -1000,6 +1002,7 @@ class LocalContext(object):
                           stdout=StringIO()).stdout.getvalue()
 
         cluster_name = 'ceph'
+        self.archive = "./"
         self.config = {'cluster': cluster_name}
         self.ceph = {cluster_name: Namespace()}
         self.ceph[cluster_name].fsid = FSID

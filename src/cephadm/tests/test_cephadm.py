@@ -1,5 +1,6 @@
 # type: ignore
 
+import copy
 import errno
 import json
 import mock
@@ -784,6 +785,80 @@ class TestCephAdm(object):
             with mock.patch('cephadm.get_container_stats', return_value=container_stats):
                 assert _cephadm.get_container_info(ctx, daemon_filter, by_name) == output
 
+    @mock.patch('cephadm.list_daemons')
+    @mock.patch('cephadm.get_container_stats')
+    @mock.patch('cephadm.get_container_stats_by_image_name')
+    def test_get_container_info_daemon_down(self, _get_stats_by_name, _get_stats, _list_daemons):
+        ctx = _cephadm.CephadmContext()
+        ctx.fsid = '5e39c134-dfc5-11ee-a344-5254000ee071'
+        ctx.container_engine = mock_podman()
+
+        # list_daemons output taken from cephadm ls of an
+        # OSD that was stopped, with subsititutions
+        # true -> True
+        # null -> None
+        down_osd_json = {
+                "style": "cephadm:v1",
+                "name": "osd.2",
+                "fsid": "5e39c134-dfc5-11ee-a344-5254000ee071",
+                "systemd_unit": "ceph-5e39c134-dfc5-11ee-a344-5254000ee071@osd.2",
+                "enabled": True,
+                "state": "stopped",
+                "service_name": "osd.foo",
+                "ports": [],
+                "ip": None,
+                "deployed_by": [
+                    "quay.io/adk3798/ceph@sha256:7da0af22ce45aac97dff00125af590506d8e36ab97d78e5175149643562bfb0b"
+                ],
+                "rank": None,
+                "rank_generation": None,
+                "extra_container_args": None,
+                "extra_entrypoint_args": None,
+                "memory_request": None,
+                "memory_limit": None,
+                "container_id": None,
+                "container_image_name": "quay.io/adk3798/ceph@sha256:7da0af22ce45aac97dff00125af590506d8e36ab97d78e5175149643562bfb0b",
+                "container_image_id": None,
+                "container_image_digests": None,
+                "version": None,
+                "started": None,
+                "created": "2024-03-11T17:17:49.533757Z",
+                "deployed": "2024-03-11T17:37:23.520061Z",
+                "configured": "2024-03-11T17:37:28.494075Z"
+        }
+        _list_daemons.return_value = [down_osd_json]
+        _get_stats_by_name.return_value = (('a03c201ff4080204949932f367545cd381c4acee0d48dbc15f2eac1e35f22318,'
+                                   '2023-11-28 21:34:38.045413692 +0000 UTC,'),
+                                   '', 0)
+
+        expected_container_info = _cephadm.ContainerInfo(
+            container_id='',
+            image_name='quay.io/adk3798/ceph@sha256:7da0af22ce45aac97dff00125af590506d8e36ab97d78e5175149643562bfb0b',
+            image_id='a03c201ff4080204949932f367545cd381c4acee0d48dbc15f2eac1e35f22318',
+            start='2023-11-28 21:34:38.045413692 +0000 UTC',
+            version='')
+
+        assert _cephadm.get_container_info(ctx, 'osd.2', by_name=True) == expected_container_info
+        assert not _get_stats.called, 'only get_container_stats_by_image_name should have been called'
+
+        # If there is one down and one up daemon of the same name, it should use the up one
+        # In this case, we would be using the running container to get the image, so
+        # all the info will come from the return value of get_container_stats, rather
+        # than it partially being taken from the list_daemons output
+        up_osd_json = copy.deepcopy(down_osd_json)
+        up_osd_json['state'] = 'running'
+        _get_stats.return_value = (('container_id,image_name,image_id,the_past,'), '', 0)
+        _list_daemons.return_value = [down_osd_json, up_osd_json]
+
+        expected_container_info = _cephadm.ContainerInfo(
+            container_id='container_id',
+            image_name='image_name',
+            image_id='image_id',
+            start='the_past',
+            version='')
+
+        assert _cephadm.get_container_info(ctx, 'osd.2', by_name=True) == expected_container_info
+
     def test_should_log_to_journald(self):
         from cephadmlib import context_getters
 
@@ -1345,7 +1420,9 @@ class TestBootstrap(object):
 
 ###############################################3
 
-    def test_config(self, cephadm_fs):
+    def test_config(self, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
+
         conf_file = 'foo'
         cmd = self._get_cmd(
             '--mon-ip', '192.168.1.1',
@@ -1363,14 +1440,17 @@ class TestBootstrap(object):
             retval = _cephadm.command_bootstrap(ctx)
             assert retval == 0
 
-    def test_no_mon_addr(self, cephadm_fs):
+    def test_no_mon_addr(self, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
+
         cmd = self._get_cmd()
         with with_cephadm_ctx(cmd) as ctx:
             msg = r'must specify --mon-ip or --mon-addrv'
             with pytest.raises(_cephadm.Error, match=msg):
                 _cephadm.command_bootstrap(ctx)
 
-    def test_skip_mon_network(self, cephadm_fs):
+    def test_skip_mon_network(self, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
         cmd = self._get_cmd('--mon-ip', '192.168.1.1')
 
         with with_cephadm_ctx(cmd, list_networks={}) as ctx:
@@ -1453,7 +1533,9 @@ class TestBootstrap(object):
                 True,
             ),
         ])
-    def test_mon_ip(self, mon_ip, list_networks, result, cephadm_fs):
+    def test_mon_ip(self, mon_ip, list_networks, result, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
+
         cmd = self._get_cmd('--mon-ip', mon_ip)
         if not result:
             with with_cephadm_ctx(cmd, list_networks=list_networks) as ctx:
@@ -1515,7 +1597,9 @@ class TestBootstrap(object):
                 None,
             ),
         ])
-    def test_mon_addrv(self, mon_addrv, list_networks, err, cephadm_fs):
+    def test_mon_addrv(self, mon_addrv, list_networks, err, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
+
         cmd = self._get_cmd('--mon-addrv', mon_addrv)
         if err:
             with with_cephadm_ctx(cmd, list_networks=list_networks) as ctx:
@@ -1526,7 +1610,9 @@ class TestBootstrap(object):
                 retval = _cephadm.command_bootstrap(ctx)
                 assert retval == 0
 
-    def test_allow_fqdn_hostname(self, cephadm_fs):
+    def test_allow_fqdn_hostname(self, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
+
         hostname = 'foo.bar'
         cmd = self._get_cmd(
             '--mon-ip', '192.168.1.1',
@@ -1549,7 +1635,9 @@ class TestBootstrap(object):
             ('00000000-0000-0000-0000-0000deadbeef', None),
             ('00000000-0000-0000-0000-0000deadbeez', 'not an fsid'),
         ])
-    def test_fsid(self, fsid, err, cephadm_fs):
+    def test_fsid(self, fsid, err, cephadm_fs, funkypatch):
+        funkypatch.patch('cephadmlib.systemd.call')
+
         cmd = self._get_cmd(
             '--mon-ip', '192.168.1.1',
             '--skip-mon-network',
@@ -1760,7 +1848,11 @@ class TestCephVolume(object):
 
 
 class TestIscsi:
-    def test_unit_run(self, cephadm_fs):
+    def test_unit_run(self, cephadm_fs, funkypatch):
+        funkypatch.patch(
+            'cephadmlib.daemons.iscsi.extract_uid_gid'
+        ).return_value = (123, 123)
+
         fsid = '9b9d7609-f4d5-4aba-94c8-effa764d96c9'
         config_json = {
                 'files': {'iscsi-gateway.cfg': ''}
@@ -1773,27 +1865,35 @@ class TestIscsi:
             _cephadm.get_parm.return_value = config_json
 
             ident = _cephadm.DaemonIdentity(fsid, 'iscsi', 'daemon_id')
-            c = _cephadm.get_container(ctx, ident)
-            _cephadm.make_data_dir(ctx, ident)
-            _cephadm.deploy_daemon_units(
-                ctx,
-                ident,
-                0, 0,
-                c,
-                True, True
+
+            _cephadm._deploy_daemon_container(
+                ctx, ident, [], _cephadm.DeploymentType.DEFAULT
             )
 
             with open('/var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/unit.run') as f:
-                assert f.read() == """set -e
+                contents = f.read()
+                assert contents == """set -e
 if ! grep -qs /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/configfs /proc/mounts; then mount -t configfs none /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/configfs; fi
-# iscsi tcmu-runner container
-! /usr/bin/docker rm -f ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi.daemon_id-tcmu 2> /dev/null
-! /usr/bin/docker rm -f ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id-tcmu 2> /dev/null
-/usr/bin/docker run --rm --ipc=host --stop-signal=SIGTERM --ulimit nofile=1048576 --net=host --entrypoint /usr/local/scripts/tcmu-runner-entrypoint.sh --privileged --group-add=disk --init --name ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id-tcmu --pids-limit=0 -e CONTAINER_IMAGE=ceph/ceph -e NODE_NAME=host1 -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/config:/etc/ceph/ceph.conf:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/keyring:/etc/ceph/keyring:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/iscsi-gateway.cfg:/etc/ceph/iscsi-gateway.cfg:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/configfs:/sys/kernel/config -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/tcmu-runner-entrypoint.sh:/usr/local/scripts/tcmu-runner-entrypoint.sh -v /var/log/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9:/var/log:z -v /dev:/dev --mount type=bind,source=/lib/modules,destination=/lib/modules,ro=true ceph/ceph &
 # iscsi.daemon_id
 ! /usr/bin/docker rm -f ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi.daemon_id 2> /dev/null
 ! /usr/bin/docker rm -f ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id 2> /dev/null
 /usr/bin/docker run --rm --ipc=host --stop-signal=SIGTERM --ulimit nofile=1048576 --net=host --entrypoint /usr/bin/rbd-target-api --privileged --group-add=disk --init --name ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id --pids-limit=0 -e CONTAINER_IMAGE=ceph/ceph -e NODE_NAME=host1 -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/config:/etc/ceph/ceph.conf:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/keyring:/etc/ceph/keyring:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/iscsi-gateway.cfg:/etc/ceph/iscsi-gateway.cfg:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/configfs:/sys/kernel/config -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/tcmu-runner-entrypoint.sh:/usr/local/scripts/tcmu-runner-entrypoint.sh -v /var/log/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9:/var/log:z -v /dev:/dev --mount type=bind,source=/lib/modules,destination=/lib/modules,ro=true ceph/ceph
+"""
+            with open('/var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/sidecar-tcmu.run') as f:
+                contents = f.read()
+            assert contents == """#!/bin/sh
+# sidecar: tcmu
+
+set -e
+if [ "$1" = stop ] || [ "$1" = poststop ]; then
+    ! /usr/bin/docker stop ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id-tcmu
+    ! /usr/bin/docker inspect ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id-tcmu &>/dev/null
+    exit $?
+fi
+
+! /usr/bin/docker rm -f ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id-tcmu 2> /dev/null
+
+exec /usr/bin/docker run --rm --ipc=host --stop-signal=SIGTERM --ulimit nofile=1048576 --net=host --entrypoint /usr/local/scripts/tcmu-runner-entrypoint.sh --privileged --group-add=disk --init --name ceph-9b9d7609-f4d5-4aba-94c8-effa764d96c9-iscsi-daemon_id-tcmu --pids-limit=0 -e CONTAINER_IMAGE=ceph/ceph -e NODE_NAME=host1 -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/config:/etc/ceph/ceph.conf:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/keyring:/etc/ceph/keyring:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/iscsi-gateway.cfg:/etc/ceph/iscsi-gateway.cfg:z -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/configfs:/sys/kernel/config -v /var/lib/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9/iscsi.daemon_id/tcmu-runner-entrypoint.sh:/usr/local/scripts/tcmu-runner-entrypoint.sh -v /var/log/ceph/9b9d7609-f4d5-4aba-94c8-effa764d96c9:/var/log:z -v /dev:/dev --mount type=bind,source=/lib/modules,destination=/lib/modules,ro=true ceph/ceph
 """
 
     def test_get_container(self):

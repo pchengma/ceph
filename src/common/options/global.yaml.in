@@ -2550,6 +2550,18 @@ options:
   - mon
   flags:
   - runtime
+- name: osd_pool_default_read_ratio
+  type: uint
+  level: advanced
+  desc: Default read ratio (the percent of read IOs out of all IOs) for a pool.
+  long_desc: Default read ratio (the percent of read IOs out of all IOs) for a pool.
+    applicable to replicated pools only. This value is used to improve read balancing
+    when OSDs have different weights.
+  default: 70
+  services:
+  - mon
+  flags:
+  - runtime
 - name: osd_erasure_code_plugins
   type: str
   level: advanced
@@ -2903,11 +2915,19 @@ options:
   default: 5_min
   with_legacy: true
 # report pg stats for any given pg at least this often
-- name: osd_pg_stat_report_interval_max
+- name: osd_pg_stat_report_interval_max_seconds
   type: int
   level: advanced
+  desc: How often (in seconds) should PGs stats be collected.
+  with_legacy: false
+  default: 5
+- name: osd_pg_stat_report_interval_max_epochs
+  type: int
+  level: advanced
+  desc: The maximum number of epochs allowed to pass before PG stats
+        are collected.
   default: 500
-  with_legacy: true
+  with_legacy: false
 # Max number of snap intervals to report to mgr in pg_stat_t
 - name: osd_max_snap_prune_intervals_per_epoch
   type: uint
@@ -3226,6 +3246,12 @@ options:
 - name: osd_debug_no_purge_strays
   type: bool
   level: dev
+  default: false
+  with_legacy: true
+- name: osd_skip_check_past_interval_bounds
+  type: bool
+  level: dev
+  desc: See https://tracker.ceph.com/issues/64002
   default: false
   with_legacy: true
 - name: osd_debug_pretend_recovery_active
@@ -3990,15 +4016,26 @@ options:
   default: false
   with_legacy: true
 - name: bdev_enable_discard
+  desc: send discards to the block device
   type: bool
   level: advanced
   default: false
   with_legacy: true
-- name: bdev_async_discard
-  type: bool
+  flags:
+  - runtime
+  see_also:
+  - bdev_async_discard_threads
+- name: bdev_async_discard_threads
+  desc: number of discard threads used to issue discards to the device
+  type: uint
   level: advanced
-  default: false
-  with_legacy: true
+  default: 0
+  min: 0
+  with_legacy: false
+  flags:
+  - runtime
+  see_also:
+  - bdev_enable_discard
 - name: bdev_flock_retry_interval
   type: float
   level: advanced
@@ -4385,6 +4422,21 @@ options:
   - bluestore_min_alloc_size
   flags:
   - create
+  with_legacy: true
+- name: bluestore_debug_enforce_min_alloc_size
+  type: uint
+  level: dev
+  desc: Enforces specific min_alloc size usages
+  long_desc: This overrides actual min_alloc_size value persisted on mkfs
+    (and originally obtained from bluestore_min_alloc_size) and permits to
+    use arbitrary value for this value. Intended primarily for dev/debug
+    purposes and should be used with care and deep understanding of potential
+    consequences, e.g. data corruption.
+  default: 0
+  see_also:
+  - bluestore_min_alloc_size
+  flags:
+  - startup
   with_legacy: true
 - name: bluestore_use_optimal_io_size_for_min_alloc_size 
   type: bool
@@ -4897,7 +4949,6 @@ options:
   - stupid
   - avl
   - hybrid
-  - zoned
   with_legacy: true
 - name: bluestore_freelist_blocks_per_key
   type: size
@@ -5654,12 +5705,6 @@ options:
   level: dev
   default: false
   with_legacy: true
-- name: filestore_debug_random_read_err
-  type: float
-  level: dev
-  default: 0
-  with_legacy: true
-# Expensive debugging check on sync
 - name: filestore_debug_omap_check
   type: bool
   level: dev
@@ -6326,7 +6371,6 @@ options:
   - aio
   - spdk
   - pmem
-  - hm_smr
 - name: bluestore_cleaner_sleep_interval
   type: float
   level: advanced
@@ -6357,3 +6401,9 @@ options:
   default: 0
   services:
   - mgr
+- name: objectstore_debug_throw_on_failed_txc
+  type: bool
+  level: dev
+  desc: Enables exception throwing instead of process abort on transaction submission error.
+  default: false
+  with_legacy: false

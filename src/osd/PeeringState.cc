@@ -922,6 +922,10 @@ static pair<epoch_t, epoch_t> get_required_past_interval_bounds(
 
 void PeeringState::check_past_interval_bounds() const
 {
+  // See: https://tracker.ceph.com/issues/64002
+  if (cct->_conf.get_val<bool>("osd_skip_check_past_interval_bounds")) {
+    return;
+  }
   // cluster_osdmap_trim_lower_bound gives us a bound on needed
   // intervals, see doc/dev/osd_internals/past_intervals.rst
   auto oldest_epoch = pl->cluster_osdmap_trim_lower_bound();
@@ -3892,8 +3896,6 @@ std::optional<pg_stat_t> PeeringState::prepare_stats_for_publish(
 
   pg_stat_t pre_publish = info.stats;
   pre_publish.stats.add(unstable_stats);
-  utime_t cutoff = now;
-  cutoff -= cct->_conf->osd_pg_stat_report_interval_max;
 
   // share (some of) our purged_snaps via the pg_stats. limit # of intervals
   // because we don't want to make the pg_stat_t structures too expensive.
@@ -3908,8 +3910,24 @@ std::optional<pg_stat_t> PeeringState::prepare_stats_for_publish(
   psdout(20) << "reporting purged_snaps "
 	     << pre_publish.purged_snaps << dendl;
 
+  // when there is no change in osdmap,
+  // update info.stats.reported_epoch by the number of time seconds.
+  utime_t cutoff_time = now;
+  cutoff_time -=
+      cct->_conf.get_val<int64_t>("osd_pg_stat_report_interval_max_seconds");
+  const bool is_time_expired = cutoff_time > info.stats.last_fresh;
+
+  // 500 epoch osdmaps are also the minimum number of osdmaps that mon must retain.
+  // if info.stats.reported_epoch less than current osdmap epoch exceeds 500 osdmaps,
+  // it can be considered that the one reported by pgid is too old and needs to be updated.
+  // to facilitate mon trim osdmaps
+  epoch_t cutoff_epoch = info.stats.reported_epoch;
+  cutoff_epoch +=
+      cct->_conf.get_val<int64_t>("osd_pg_stat_report_interval_max_epochs");
+  const bool is_epoch_behind = cutoff_epoch < get_osdmap_epoch();
+
   if (pg_stats_publish && pre_publish == *pg_stats_publish &&
-      info.stats.last_fresh > cutoff) {
+      (!is_epoch_behind && !is_time_expired)) {
     psdout(15) << "publish_stats_to_osd " << pg_stats_publish->reported_epoch
 	       << ": no change since " << info.stats.last_fresh << dendl;
     return std::nullopt;
@@ -5980,14 +5998,12 @@ boost::statechart::result PeeringState::Active::react(const AdvMap& advmap)
     return forward_event();
   }
   psdout(10) << "Active advmap" << dendl;
-  bool need_publish = false;
 
   pl->on_active_advmap(advmap.osdmap);
   if (ps->dirty_big_info) {
     // share updated purged_snaps to mgr/mon so that we (a) stop reporting
     // purged snaps and (b) perhaps share more snaps that we have purged
     // but didn't fit in pg_stat_t.
-    need_publish = true;
     ps->share_pg_info();
   }
 
@@ -6029,18 +6045,9 @@ boost::statechart::result PeeringState::Active::react(const AdvMap& advmap)
       ps->state_set(PG_STATE_UNDERSIZED);
     }
     // degraded changes will be detected by call from publish_stats_to_osd()
-    need_publish = true;
   }
 
-  // if we haven't reported our PG stats in a long time, do so now.
-  if (ps->info.stats.reported_epoch + ps->cct->_conf->osd_pg_stat_report_interval_max < advmap.osdmap->get_epoch()) {
-    psdout(20) << "reporting stats to osd after " << (advmap.osdmap->get_epoch() - ps->info.stats.reported_epoch)
-		       << " epochs" << dendl;
-    need_publish = true;
-  }
-
-  if (need_publish)
-    pl->publish_stats_to_osd();
+  pl->publish_stats_to_osd();
 
   if (ps->check_prior_readable_down_osds(advmap.osdmap)) {
     pl->recheck_readable();
@@ -6329,6 +6336,22 @@ boost::statechart::result PeeringState::Active::react(const CheckReadable &evt)
 {
   DECLARE_LOCALS;
   pl->recheck_readable();
+  return discard_event();
+}
+
+boost::statechart::result PeeringState::Active::react(const PgCreateEvt &evt)
+{
+  DECLARE_LOCALS;
+  pg_t pgid = context< PeeringMachine >().spgid.pgid;
+
+  psdout(10) << __func__ << " receive PgCreateEvt"
+             << " is_peered=" << ps->is_peered() << dendl;
+
+  if (ps->is_peered()) {
+    psdout(10) << __func__ << " pg is peered, reply pg_created" << dendl;
+    pl->send_pg_created(pgid);
+  }
+
   return discard_event();
 }
 

@@ -191,11 +191,13 @@ WRITE_CLASS_ENCODER(MotrAccessKey);
 
 class MotrNotification : public StoreNotification {
   public:
-    MotrNotification(Object* _obj, Object* _src_obj, rgw::notify::EventType _type) :
-        StoreNotification(_obj, _src_obj, _type) {}
-    ~MotrNotification() = default;
+  MotrNotification(Object* _obj,
+                   Object* _src_obj,
+                   const rgw::notify::EventTypeList& _types)
+      : StoreNotification(_obj, _src_obj, _types) {}
+  ~MotrNotification() = default;
 
-    virtual int publish_reserve(const DoutPrefixProvider *dpp, RGWObjTags* obj_tags = nullptr) override { return 0;}
+  virtual int publish_reserve(const DoutPrefixProvider *dpp, RGWObjTags* obj_tags = nullptr) override { return 0;}
     virtual int publish_commit(const DoutPrefixProvider* dpp, uint64_t size,
 			       const ceph::real_time& mtime, const std::string& etag, const std::string& version) override { return 0; }
 };
@@ -660,7 +662,7 @@ class MotrObject : public StoreObject {
       public:
         MotrDeleteOp(MotrObject* _source);
 
-        virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y) override;
+        virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y, uint32_t flags) override;
     };
 
     MotrObject() = default;
@@ -676,7 +678,7 @@ class MotrObject : public StoreObject {
 
     virtual int delete_object(const DoutPrefixProvider* dpp,
         optional_yield y,
-        bool prevent_versioning = false) override;
+        uint32_t flags) override;
     virtual int copy_object(User* user,
         req_info* info, const rgw_zone_id& source_zone,
         rgw::sal::Object* dest_object, rgw::sal::Bucket* dest_bucket,
@@ -710,7 +712,8 @@ class MotrObject : public StoreObject {
         const real_time& mtime,
         uint64_t olh_epoch,
         const DoutPrefixProvider* dpp,
-        optional_yield y) override;
+        optional_yield y,
+        uint32_t flags) override;
     virtual bool placement_rules_match(rgw_placement_rule& r1, rgw_placement_rule& r2) override;
     virtual int dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y, Formatter* f) override;
 
@@ -812,7 +815,8 @@ class MotrAtomicWriter : public StoreWriter {
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       const req_context& rctx) override;
+                       const req_context& rctx,
+                       uint32_t flags) override;
 
   unsigned populate_bvec(unsigned len, bufferlist::iterator &bi);
   void cleanup();
@@ -859,7 +863,8 @@ public:
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       optional_yield y) override;
+                       optional_yield y,
+                       uint32_t flags) override;
 };
 
 // The implementation of multipart upload in POC roughly follows the
@@ -934,7 +939,7 @@ public:
 			 int num_parts, int marker,
 			 int* next_marker, bool* truncated,
 			 bool assume_unsorted = false) override;
-  virtual int abort(const DoutPrefixProvider* dpp, CephContext* cct) override;
+  virtual int abort(const DoutPrefixProvider* dpp, CephContext* cct, optional_yield y) override;
   virtual int complete(const DoutPrefixProvider* dpp,
 		       optional_yield y, CephContext* cct,
 		       std::map<int, std::string>& part_etags,
@@ -1003,9 +1008,16 @@ class MotrStore : public StoreDriver {
     virtual std::unique_ptr<Lifecycle> get_lifecycle(void) override;
     virtual std::unique_ptr<Notification> get_notification(rgw::sal::Object* obj, rgw::sal::Object* src_obj,
         req_state* s, rgw::notify::EventType event_type, optional_yield y, const std::string* object_name=nullptr) override;
-    virtual std::unique_ptr<Notification> get_notification(const DoutPrefixProvider* dpp, rgw::sal::Object* obj,
-        rgw::sal::Object* src_obj, rgw::notify::EventType event_type, rgw::sal::Bucket* _bucket,
-        std::string& _user_id, std::string& _user_tenant, std::string& _req_id, optional_yield y) override;
+    virtual std::unique_ptr<Notification> get_notification(
+        const DoutPrefixProvider* dpp,
+        rgw::sal::Object* obj,
+        rgw::sal::Object* src_obj,
+        const rgw::notify::EventTypeList& event_types,
+        rgw::sal::Bucket* _bucket,
+        std::string& _user_id,
+        std::string& _user_tenant,
+        std::string& _req_id,
+        optional_yield y) override;
     virtual RGWLC* get_rgwlc(void) override { return NULL; }
     virtual RGWCoroutinesManagerRegistry* get_cr_registry() override { return NULL; }
 

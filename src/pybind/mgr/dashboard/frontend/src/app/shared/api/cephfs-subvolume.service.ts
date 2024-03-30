@@ -75,8 +75,8 @@ export class CephfsSubvolumeService {
     });
   }
 
-  exists(subVolumeName: string, fsName: string) {
-    return this.info(fsName, subVolumeName).pipe(
+  exists(subVolumeName: string, fsName: string, subVolumeGroupName: string = '') {
+    return this.info(fsName, subVolumeName, subVolumeGroupName).pipe(
       mapTo(true),
       catchError((error: Event) => {
         if (_.isFunction(error.preventDefault)) {
@@ -115,6 +115,82 @@ export class CephfsSubvolumeService {
           group_name: groupName
         }
       }
+    );
+  }
+
+  getSnapshotInfo(snapshotName: string, fsName: string, subVolumeName: string, groupName = '') {
+    return this.http.get(`${this.baseURL}/snapshot/${fsName}/${subVolumeName}/info`, {
+      params: {
+        snap_name: snapshotName,
+        group_name: groupName
+      }
+    });
+  }
+
+  snapshotExists(
+    fsName: string,
+    snapshotName: string,
+    subVolumeName: string,
+    groupName: string = ''
+  ): Observable<boolean> {
+    return this.getSnapshotInfo(fsName, snapshotName, subVolumeName, groupName).pipe(
+      mapTo(true),
+      catchError((error: Event) => {
+        if (_.isFunction(error.preventDefault)) {
+          error.preventDefault();
+        }
+        return of(false);
+      })
+    );
+  }
+
+  createSnapshot(
+    fsName: string,
+    snapshotName: string,
+    subVolumeName: string,
+    groupName: string = ''
+  ) {
+    return this.http.post(
+      `${this.baseURL}/snapshot/`,
+      {
+        vol_name: fsName,
+        subvol_name: subVolumeName,
+        snap_name: snapshotName,
+        group_name: groupName
+      },
+      { observe: 'response' }
+    );
+  }
+
+  deleteSnapshot(fsName: string, subVolumeName: string, snapshotName: string, groupName = '') {
+    return this.http.delete(`${this.baseURL}/snapshot/${fsName}/${subVolumeName}`, {
+      params: {
+        snap_name: snapshotName,
+        group_name: groupName
+      },
+      observe: 'response'
+    });
+  }
+
+  createSnapshotClone(
+    fsName: string,
+    subVolumeName: string,
+    snapshotName: string,
+    cloneName: string,
+    groupName = '',
+    targetGroupName = ''
+  ) {
+    return this.http.post(
+      `${this.baseURL}/snapshot/clone`,
+      {
+        vol_name: fsName,
+        subvol_name: subVolumeName,
+        snap_name: snapshotName,
+        clone_name: cloneName,
+        group_name: groupName,
+        target_group_name: targetGroupName
+      },
+      { observe: 'response' }
     );
   }
 }

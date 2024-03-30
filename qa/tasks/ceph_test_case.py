@@ -20,7 +20,7 @@ class RunCephCmd:
     def run_ceph_cmd(self, *args, **kwargs):
         """
         *args and **kwargs must contain arguments that are accepted by
-        vstart_runner.LocalRemote._do_run() or teuhology.orchestra.run.run()
+        vstart_runner.LocalRemote._do_run() or teuthology.orchestra.run.run()
         methods.
         """
         if kwargs.get('args') is None and args:
@@ -32,7 +32,7 @@ class RunCephCmd:
     def get_ceph_cmd_result(self, *args, **kwargs):
         """
         *args and **kwargs must contain arguments that are accepted by
-        vstart_runner.LocalRemote._do_run() or teuhology.orchestra.run.run()
+        vstart_runner.LocalRemote._do_run() or teuthology.orchestra.run.run()
         methods.
         """
         if kwargs.get('args') is None and args:
@@ -44,7 +44,7 @@ class RunCephCmd:
     def get_ceph_cmd_stdout(self, *args, **kwargs):
         """
         *args and **kwargs must contain arguments that are accepted by
-        vstart_runner.LocalRemote._do_run() or teuhology.orchestra.run.run()
+        vstart_runner.LocalRemote._do_run() or teuthology.orchestra.run.run()
         methods.
         """
         if kwargs.get('args') is None and args:
@@ -94,7 +94,7 @@ class RunCephCmd:
         failure.
 
         *args and **kwargs must contain arguments that are accepted by
-        vstart_runner.LocalRemote._do_run() or teuhology.orchestra.run.run()
+        vstart_runner.LocalRemote._do_run() or teuthology.orchestra.run.run()
         methods.
 
         NOTE: errmsgs is expected to be a tuple, but in case there's only one
@@ -257,7 +257,7 @@ class CephTestCase(unittest.TestCase, RunCephCmd):
 
                 if present and not self.match():
                     log.error(f"Log output: \n{self.watcher_process.stdout.getvalue()}\n")
-                    raise AssertionError(f"Expected log message found: '{expected_pattern}'")
+                    raise AssertionError(f"Expected log message not found: '{expected_pattern}'")
                 elif fail or (not present and self.match()):
                     log.error(f"Log output: \n{self.watcher_process.stdout.getvalue()}\n")
                     raise AssertionError(f"Unexpected log message found: '{expected_pattern}'")

@@ -63,11 +63,13 @@ public:
 class DBNotification : public StoreNotification {
 protected:
   public:
-  DBNotification(Object* _obj, Object* _src_obj, rgw::notify::EventType _type)
-    : StoreNotification(_obj, _src_obj, _type) {}
-    ~DBNotification() = default;
+ DBNotification(Object* _obj,
+                Object* _src_obj,
+                const rgw::notify::EventTypeList& _types)
+     : StoreNotification(_obj, _src_obj, _types) {}
+ ~DBNotification() = default;
 
-    virtual int publish_reserve(const DoutPrefixProvider *dpp, RGWObjTags* obj_tags = nullptr) override { return 0;}
+ virtual int publish_reserve(const DoutPrefixProvider *dpp, RGWObjTags* obj_tags = nullptr) override { return 0;}
     virtual int publish_commit(const DoutPrefixProvider* dpp, uint64_t size,
 			       const ceph::real_time& mtime, const std::string& etag, const std::string& version) override { return 0; }
 };
@@ -524,7 +526,7 @@ protected:
         public:
           DBDeleteOp(DBObject* _source);
 
-          virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y) override;
+          virtual int delete_obj(const DoutPrefixProvider* dpp, optional_yield y, uint32_t flags) override;
       };
 
       DBObject() = default;
@@ -543,7 +545,7 @@ protected:
 
       virtual int delete_object(const DoutPrefixProvider* dpp,
           optional_yield y,
-          bool prevent_versioning = false) override;
+          uint32_t flags) override;
       virtual int copy_object(User* user,
           req_info* info, const rgw_zone_id& source_zone,
           rgw::sal::Object* dest_object, rgw::sal::Bucket* dest_bucket,
@@ -579,7 +581,8 @@ protected:
           const real_time& mtime,
           uint64_t olh_epoch,
           const DoutPrefixProvider* dpp,
-          optional_yield y) override;
+          optional_yield y,
+          uint32_t flags) override;
       virtual bool placement_rules_match(rgw_placement_rule& r1, rgw_placement_rule& r2) override;
       virtual int dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y, Formatter* f) override;
 
@@ -655,7 +658,8 @@ protected:
                          const char *if_match, const char *if_nomatch,
                          const std::string *user_data,
                          rgw_zone_set *zones_trace, bool *canceled,
-                         const req_context& rctx) override;
+                         const req_context& rctx,
+                         uint32_t flags) override;
   };
 
   class DBMultipartWriter : public StoreWriter {
@@ -703,7 +707,8 @@ public:
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
                        rgw_zone_set *zones_trace, bool *canceled,
-                       const req_context& rctx) override;
+                       const req_context& rctx,
+                       uint32_t flags) override;
   };
 
   class DBStore : public StoreDriver {
@@ -762,13 +767,17 @@ public:
     rgw::notify::EventType event_type, optional_yield y, const std::string* object_name) override;
 
   virtual std::unique_ptr<Notification> get_notification(
-    const DoutPrefixProvider* dpp, rgw::sal::Object* obj,
-    rgw::sal::Object* src_obj,
-    rgw::notify::EventType event_type, rgw::sal::Bucket* _bucket,
-    std::string& _user_id, std::string& _user_tenant, std::string& _req_id,
-    optional_yield y) override;
+      const DoutPrefixProvider* dpp,
+      rgw::sal::Object* obj,
+      rgw::sal::Object* src_obj,
+      const rgw::notify::EventTypeList& event_types,
+      rgw::sal::Bucket* _bucket,
+      std::string& _user_id,
+      std::string& _user_tenant,
+      std::string& _req_id,
+      optional_yield y) override;
 
-      virtual RGWLC* get_rgwlc(void) override;
+  virtual RGWLC* get_rgwlc(void) override;
       virtual RGWCoroutinesManagerRegistry* get_cr_registry() override { return NULL; }
       virtual int log_usage(const DoutPrefixProvider *dpp, std::map<rgw_user_bucket, RGWUsageBatch>& usage_info, optional_yield y) override;
       virtual int log_op(const DoutPrefixProvider *dpp, std::string& oid, bufferlist& bl) override;

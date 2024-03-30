@@ -5,7 +5,7 @@ import abc
 from typing import List, Tuple, Optional, Dict
 
 from .container_engines import Podman
-from .container_types import CephContainer, InitContainer
+from .container_types import CephContainer, InitContainer, SidecarContainer
 from .context import CephadmContext
 from .daemon_form import DaemonForm
 from .deploy import DeploymentType
@@ -37,6 +37,14 @@ class ContainerDaemonForm(DaemonForm):
     def init_containers(self, ctx: CephadmContext) -> List[InitContainer]:
         """Returns a list of init containers to execute prior to the primary
         container running. By default, returns an empty list.
+        """
+        return []
+
+    def sidecar_containers(
+        self, ctx: CephadmContext
+    ) -> List[SidecarContainer]:
+        """Returns a list of sidecar containers that should be executed along
+        with the primary service container.
         """
         return []
 
@@ -112,6 +120,9 @@ class ContainerDaemonForm(DaemonForm):
         """
         return ''
 
+    def prepare_data_dir(self, data_dir: str, uid: int, gid: int) -> None:
+        pass
+
 
 def daemon_to_container(
     ctx: CephadmContext,
@@ -157,9 +168,10 @@ def daemon_to_container(
     if auto_podman_mounts and _is_podman:
         ctx.container_engine.update_mounts(ctx, container_mounts)
     if auto_podman_args and _is_podman:
-        service_name = f'{daemon.identity.unit_name}.service'
         container_args.extend(
-            ctx.container_engine.service_args(ctx, service_name)
+            ctx.container_engine.service_args(
+                ctx, daemon.identity.service_name
+            )
         )
 
     return CephContainer.for_daemon(

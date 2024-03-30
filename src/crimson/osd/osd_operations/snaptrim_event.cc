@@ -39,31 +39,6 @@ PG::BackgroundProcessLock::lock_with_op(SnapTrimEvent &st_event) noexcept
   });
 }
 
-void SnapTrimEvent::SubOpBlocker::dump_detail(Formatter *f) const
-{
-  f->open_array_section("dependent_operations");
-  {
-    for (const auto &kv : subops) {
-      f->dump_unsigned("op_id", kv.first->get_id());
-    }
-  }
-  f->close_section();
-}
-
-template <class... Args>
-void SnapTrimEvent::SubOpBlocker::emplace_back(Args&&... args)
-{
-  subops.emplace_back(std::forward<Args>(args)...);
-};
-
-SnapTrimEvent::remove_or_update_iertr::future<>
-SnapTrimEvent::SubOpBlocker::wait_completion()
-{
-  return interruptor::do_for_each(subops, [](auto&& kv) {
-    return std::move(kv.second);
-  });
-}
-
 void SnapTrimEvent::print(std::ostream &lhs) const
 {
   lhs << "SnapTrimEvent("
@@ -85,19 +60,11 @@ CommonPGPipeline& SnapTrimEvent::client_pp()
   return pg->request_pg_pipeline;
 }
 
-SnapTrimEvent::snap_trim_ertr::future<seastar::stop_iteration>
+SnapTrimEvent::snap_trim_event_ret_t
 SnapTrimEvent::start()
 {
   ShardServices &shard_services = pg->get_shard_services();
-  IRef ref = this;
-  return interruptor::with_interruption(
-    // SnapTrimEvent is a background operation,
-    // it's lifetime is not guarnteed since the caller
-    // returned future is being ignored. We should capture
-    // a self reference thourhgout the entire execution
-    // progress (not only on finally() continuations).
-    // See: PG::on_active_actmap()
-    [&shard_services, this, ref] {
+  return interruptor::with_interruption([&shard_services, this] {
     return enter_stage<interruptor>(
       client_pp().wait_for_active
     ).then_interruptible([this] {
@@ -121,28 +88,19 @@ SnapTrimEvent::start()
         client_pp().process);
     }).then_interruptible([&shard_services, this] {
       return interruptor::async([this] {
-        std::vector<hobject_t> to_trim;
         using crimson::common::local_conf;
         const auto max =
           local_conf().get_val<uint64_t>("osd_pg_max_concurrent_snap_trims");
         // we need to look for at least 1 snaptrim, otherwise we'll misinterpret
-        // the ENOENT below and erase snapid.
-        int r = snap_mapper.get_next_objects_to_trim(
+        // the nullopt below and erase snapid.
+        auto to_trim = snap_mapper.get_next_objects_to_trim(
           snapid,
-          max,
-          &to_trim);
-        if (r == -ENOENT) {
-          to_trim.clear(); // paranoia
-          return to_trim;
-        } else if (r != 0) {
-          logger().error("{}: get_next_objects_to_trim returned {}",
-                         *this, cpp_strerror(r));
-          ceph_abort_msg("get_next_objects_to_trim returned an invalid code");
-        } else {
-          assert(!to_trim.empty());
+          max);
+        if (!to_trim.has_value()) {
+          return std::vector<hobject_t>{};
         }
         logger().debug("{}: async almost done line {}", *this, __LINE__);
-        return to_trim;
+        return std::move(*to_trim);
       }).then_interruptible([&shard_services, this] (const auto& to_trim) {
         if (to_trim.empty()) {
           // the legit ENOENT -> done
@@ -154,22 +112,19 @@ SnapTrimEvent::start()
         return [&shard_services, this](const auto &to_trim) {
 	  for (const auto& object : to_trim) {
 	    logger().debug("{}: trimming {}", *this, object);
-	    auto [op, fut] = shard_services.start_operation_may_interrupt<
-	      interruptor, SnapTrimObjSubEvent>(
-	      pg,
-	      object,
-	      snapid);
 	    subop_blocker.emplace_back(
-	      std::move(op),
-	      std::move(fut)
-	    );
+	      shard_services.start_operation_may_interrupt<
+	      interruptor, SnapTrimObjSubEvent>(
+	        pg,
+	        object,
+	        snapid));
 	  }
 	  return interruptor::now();
 	}(to_trim).then_interruptible([this] {
 	  return enter_stage<interruptor>(wait_subop);
 	}).then_interruptible([this] {
           logger().debug("{}: awaiting completion", *this);
-          return subop_blocker.wait_completion();
+          return subop_blocker.interruptible_wait_completion();
         }).finally([this] {
 	  pg->background_process_lock.unlock();
 	}).si_then([this] {
@@ -200,11 +155,12 @@ SnapTrimEvent::start()
         });
       });
     });
-  }, [this, ref]
-     (std::exception_ptr eptr) -> snap_trim_ertr::future<seastar::stop_iteration> {
+  }, [this](std::exception_ptr eptr) -> snap_trim_event_ret_t {
     logger().debug("{}: interrupted {}", *this, eptr);
     return crimson::ct_error::eagain::make();
-  }, pg).finally([this, ref=std::move(ref)] {
+  }, pg).finally([this] {
+    // This SnapTrimEvent op lifetime is maintained within
+    // PerShardState::start_operation() implementation.
     logger().debug("{}: exit", *this);
     handle.exit();
   });
@@ -216,7 +172,7 @@ CommonPGPipeline& SnapTrimObjSubEvent::client_pp()
   return pg->request_pg_pipeline;
 }
 
-SnapTrimObjSubEvent::remove_or_update_iertr::future<>
+SnapTrimObjSubEvent::snap_trim_obj_subevent_ret_t
 SnapTrimObjSubEvent::remove_clone(
   ObjectContextRef obc,
   ObjectContextRef head_obc,
@@ -425,7 +381,6 @@ SnapTrimObjSubEvent::remove_or_update(
   }
 
   return seastar::do_with(ceph::os::Transaction{}, [=, this](auto &txn) {
-    int64_t num_objects_before_trim = delta_stats.num_objects;
     osd_op_p.at_version = pg->get_next_version();
     auto ret = remove_or_update_iertr::now();
     if (new_snaps.empty()) {
@@ -440,8 +395,7 @@ SnapTrimObjSubEvent::remove_or_update(
       ret = adjust_snaps(obc, head_obc, new_snaps, txn);
     }
     return std::move(ret).si_then(
-      [&txn, obc, num_objects_before_trim,
-      head_obc=std::move(head_obc), this]() mutable {
+      [&txn, obc, head_obc=std::move(head_obc), this]() mutable {
       // save head snapset
       logger().debug("{}: {} new snapset {} on {}",
 		     *this, coid, head_obc->ssc->snapset, head_obc->obs.oi);
@@ -451,11 +405,14 @@ SnapTrimObjSubEvent::remove_or_update(
 	update_head(obc, head_obc, txn);
       }
       // Stats reporting - Set number of objects trimmed
-      if (num_objects_before_trim > delta_stats.num_objects) {
-	//int64_t num_objects_trimmed =
-	//  num_objects_before_trim - delta_stats.num_objects;
-	//add_objects_trimmed_count(num_objects_trimmed);
+      if (delta_stats.num_objects < 0) {
+        int64_t num_objects_trimmed = std::abs(delta_stats.num_objects);
+        pg->get_peering_state().update_stats_wo_resched(
+          [num_objects_trimmed](auto &history, auto &stats) {
+          stats.objects_trimmed += num_objects_trimmed;
+        });
       }
+      pg->apply_stats(coid, delta_stats);
     }).si_then(
       [&txn] () mutable {
       return std::move(txn);
@@ -463,7 +420,7 @@ SnapTrimObjSubEvent::remove_or_update(
   });
 }
 
-SnapTrimObjSubEvent::remove_or_update_iertr::future<>
+SnapTrimObjSubEvent::snap_trim_obj_subevent_ret_t
 SnapTrimObjSubEvent::start()
 {
   return enter_stage<interruptor>(

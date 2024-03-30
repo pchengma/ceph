@@ -13,6 +13,8 @@ This feature allows users to assign execution context to Lua scripts. The suppor
  - ``background`` which will execute within a specified time interval
  - ``getdata`` which will execute on objects' data when objects are downloaded
  - ``putdata`` which will execute on objects' data when objects are uploaded
+ - ``preRequest`` which will execute a script before each operation is performed
+ - ``postRequest`` which will execute after each operation is performed
 
 A request (pre or post) or data (get or put) context script may be constrained to operations belonging to a specific tenant's users.
 The request context script can also access fields in the request and modify certain fields, as well as the `Global RGW Table`_.
@@ -42,12 +44,10 @@ To upload a script:
    
 
 ::
+
+   # radosgw-admin script put --infile={lua-file-path} --context={prerequest|postrequest|background|getdata|putdata} [--tenant={tenant-name}]   
    
-   # radosgw-admin script put --infile={lua-file-path} --context={prerequest|postrequest|background|getdata|putdata} [--tenant={tenant-name}]
-
-
 * When uploading a script with the ``background`` context, a tenant name should not be specified.
-* When uploading a script into a cluster deployed with cephadm, use the following command:
 
 ::
 
@@ -58,14 +58,14 @@ To print the content of the script to standard output:
 
 ::
    
-   # radosgw-admin script get --context={prerequest|postrequest|background|getdata|putdata} [--tenant={tenant-name}]
+   # radosgw-admin script get --context={preRequest|postRequest|background|getdata|putdata} [--tenant={tenant-name}]
 
 
 To remove the script:
 
 ::
    
-   # radosgw-admin script rm --context={prerequest|postrequest|background|getdata|putdata} [--tenant={tenant-name}]
+   # radosgw-admin script rm --context={preRequest|postRequest|background|getdata|putdata} [--tenant={tenant-name}]
 
 
 Package Management via CLI

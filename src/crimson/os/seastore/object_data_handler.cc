@@ -423,6 +423,7 @@ void ObjectDataBlock::apply_delta(const ceph::bufferlist &bl) {
   for (auto &&d : deltas) {
     auto iter = d.bl.cbegin();
     iter.copy(d.len, get_bptr().c_str() + d.offset);
+    modified_region.union_insert(d.offset, d.len);
   }
 }
 
@@ -525,24 +526,32 @@ ObjectDataHandler::write_ret do_insertions(
 	       ctx.t,
 	       region.addr,
 	       region.len);
-	return ctx.tm.alloc_extent<ObjectDataBlock>(
+	return ctx.tm.alloc_data_extents<ObjectDataBlock>(
 	  ctx.t,
 	  region.addr,
 	  region.len
-	).si_then([&region](auto extent) {
-	  if (extent->get_laddr() != region.addr) {
-	    logger().debug(
-	      "object_data_handler::do_insertions alloc got addr {},"
-	      " should have been {}",
-	      extent->get_laddr(),
-	      region.addr);
-	  }
-	  ceph_assert(extent->get_laddr() == region.addr);
-	  ceph_assert(extent->get_length() == region.len);
+        ).si_then([&region](auto extents) {
+          auto off = region.addr;
+          auto left = region.len;
 	  auto iter = region.bl->cbegin();
-	  iter.copy(region.len, extent->get_bptr().c_str());
+          for (auto &extent : extents) {
+            ceph_assert(left >= extent->get_length());
+            if (extent->get_laddr() != off) {
+              logger().debug(
+                "object_data_handler::do_insertions alloc got addr {},"
+                " should have been {}",
+                extent->get_laddr(),
+                off);
+            }
+            iter.copy(extent->get_length(), extent->get_bptr().c_str());
+            off += extent->get_length();
+            left -= extent->get_length();
+          }
 	  return ObjectDataHandler::write_iertr::now();
-	});
+	}).handle_error_interruptible(
+	  crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
+	  ObjectDataHandler::write_iertr::pass_further{}
+	);
       } else if (region.is_zero()) {
 	DEBUGT("reserving: {}~{}",
 	       ctx.t,
@@ -563,7 +572,10 @@ ObjectDataHandler::write_ret do_insertions(
 	  }
 	  ceph_assert(pin->get_key() == region.addr);
 	  return ObjectDataHandler::write_iertr::now();
-	});
+	}).handle_error_interruptible(
+	  crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
+	  ObjectDataHandler::write_iertr::pass_further{}
+	);
       } else {
 	ceph_abort("impossible");
 	return ObjectDataHandler::write_iertr::now();
@@ -629,6 +641,8 @@ struct overwrite_plan_t {
 
   // helper member
   extent_len_t block_size;
+  bool is_left_stable;
+  bool is_right_stable;
 
 public:
   extent_len_t get_left_size() const {
@@ -678,14 +692,15 @@ public:
 	       << ", left_operation=" << overwrite_plan.left_operation
 	       << ", right_operation=" << overwrite_plan.right_operation
 	       << ", block_size=" << overwrite_plan.block_size
+	       << ", is_left_stable=" << overwrite_plan.is_left_stable
+	       << ", is_right_stable=" << overwrite_plan.is_right_stable
 	       << ")";
   }
 
   overwrite_plan_t(laddr_t offset,
 		   extent_len_t len,
 		   const lba_pin_list_t& pins,
-		   extent_len_t block_size,
-		   Transaction& t) :
+		   extent_len_t block_size) :
       pin_begin(pins.front()->get_key()),
       pin_end(pins.back()->get_key() + pins.back()->get_length()),
       left_paddr(pins.front()->get_val()),
@@ -696,9 +711,11 @@ public:
       aligned_data_end(p2roundup((uint64_t)data_end, (uint64_t)block_size)),
       left_operation(overwrite_operation_t::UNKNOWN),
       right_operation(overwrite_operation_t::UNKNOWN),
-      block_size(block_size) {
+      block_size(block_size),
+      is_left_stable(pins.front()->is_stable()),
+      is_right_stable(pins.back()->is_stable()) {
     validate();
-    evaluate_operations(t);
+    evaluate_operations();
     assert(left_operation != overwrite_operation_t::UNKNOWN);
     assert(right_operation != overwrite_operation_t::UNKNOWN);
   }
@@ -726,31 +743,17 @@ private:
    * original extent into at most three parts: origin-left, part-to-be-modified
    * and origin-right.
    */
-  void evaluate_operations(Transaction& t) {
+  void evaluate_operations() {
     auto actual_write_size = get_pins_size();
     auto aligned_data_size = get_aligned_data_size();
     auto left_ext_size = get_left_extent_size();
     auto right_ext_size = get_right_extent_size();
 
-    auto can_merge = [](Transaction& t, paddr_t paddr) {
-      CachedExtentRef ext;
-      if (paddr.is_relative() || paddr.is_delayed()) {
-	  return true;
-      } else if (t.get_extent(paddr, &ext) ==
-	Transaction::get_extent_ret::PRESENT) {
-	// FIXME: there is no need to lookup the cache if the pin can 
-	// be associated with the extent state
-	if (ext->is_mutable()) {
-	  return true;
-	}
-      }
-      return false;
-    };
     if (left_paddr.is_zero()) {
       actual_write_size -= left_ext_size;
       left_ext_size = 0;
       left_operation = overwrite_operation_t::OVERWRITE_ZERO;
-    } else if (can_merge(t, left_paddr)) {
+    } else if (!is_left_stable) {
       aligned_data_size += left_ext_size;
       left_ext_size = 0;
       left_operation = overwrite_operation_t::MERGE_EXISTING;
@@ -760,7 +763,7 @@ private:
       actual_write_size -= right_ext_size;
       right_ext_size = 0;
       right_operation = overwrite_operation_t::OVERWRITE_ZERO;
-    } else if (can_merge(t, right_paddr)) {
+    } else if (!is_right_stable) {
       aligned_data_size += right_ext_size;
       right_ext_size = 0;
       right_operation = overwrite_operation_t::MERGE_EXISTING;
@@ -1056,7 +1059,10 @@ ObjectDataHandler::write_ret ObjectDataHandler::prepare_data_reservation(
 	pin->get_key(),
 	pin->get_length());
       return write_iertr::now();
-    });
+    }).handle_error_interruptible(
+      crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
+      write_iertr::pass_further{}
+    );
   }
 }
 
@@ -1267,7 +1273,7 @@ ObjectDataHandler::write_ret ObjectDataHandler::overwrite(
   if (bl.has_value()) {
     assert(bl->length() == len);
   }
-  overwrite_plan_t overwrite_plan(offset, len, _pins, ctx.tm.get_block_size(), ctx.t);
+  overwrite_plan_t overwrite_plan(offset, len, _pins, ctx.tm.get_block_size());
   return seastar::do_with(
     std::move(_pins),
     extent_to_write_list_t(),
@@ -1676,12 +1682,12 @@ ObjectDataHandler::clone_ret ObjectDataHandler::clone_extents(
 	  return TransactionManager::reserve_extent_iertr::now();
 	});
       });
-    },
+    }
+  ).handle_error_interruptible(
     ObjectDataHandler::write_iertr::pass_further{},
     crimson::ct_error::assert_all{
       "object_data_handler::clone invalid error"
-    }
-  );
+  });
 }
 
 ObjectDataHandler::clone_ret ObjectDataHandler::clone(

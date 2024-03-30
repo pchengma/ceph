@@ -1,4 +1,5 @@
 import asyncio
+import concurrent
 import json
 import errno
 import ipaddress
@@ -10,9 +11,12 @@ from configparser import ConfigParser
 from contextlib import contextmanager
 from functools import wraps
 from tempfile import TemporaryDirectory, NamedTemporaryFile
+from urllib.error import HTTPError
 from threading import Event
 
 from cephadm.service_discovery import ServiceDiscovery
+
+from ceph.deployment.service_spec import PrometheusSpec
 
 import string
 from typing import List, Dict, Optional, Callable, Tuple, TypeVar, \
@@ -71,9 +75,11 @@ from .services.osd import OSDRemovalQueue, OSDService, OSD, NotFoundError
 from .services.monitoring import GrafanaService, AlertmanagerService, PrometheusService, \
     NodeExporterService, SNMPGatewayService, LokiService, PromtailService
 from .services.jaeger import ElasticSearchService, JaegerAgentService, JaegerCollectorService, JaegerQueryService
+from .services.node_proxy import NodeProxy
+from .services.smb import SMBService
 from .schedule import HostAssignment
 from .inventory import Inventory, SpecStore, HostCache, AgentCache, EventStore, \
-    ClientKeyringStore, ClientKeyringSpec, TunedProfileStore
+    ClientKeyringStore, ClientKeyringSpec, TunedProfileStore, NodeProxyCache
 from .upgrade import CephadmUpgrade
 from .template import TemplateMgr
 from .utils import CEPH_IMAGE_TYPES, RESCHEDULE_FROM_OFFLINE_HOSTS_TYPES, forall_hosts, \
@@ -114,11 +120,11 @@ os._exit = os_exit_noop   # type: ignore
 DEFAULT_IMAGE = 'quay.io/ceph/ceph'
 DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.43.0'
 DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v1.5.0'
-DEFAULT_NVMEOF_IMAGE = 'quay.io/ceph/nvmeof:latest'
+DEFAULT_NVMEOF_IMAGE = 'quay.io/ceph/nvmeof:1.0.0'
 DEFAULT_LOKI_IMAGE = 'docker.io/grafana/loki:2.4.0'
 DEFAULT_PROMTAIL_IMAGE = 'docker.io/grafana/promtail:2.4.0'
 DEFAULT_ALERT_MANAGER_IMAGE = 'quay.io/prometheus/alertmanager:v0.25.0'
-DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/ceph-grafana:9.4.12'
+DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/grafana:9.4.12'
 DEFAULT_HAPROXY_IMAGE = 'quay.io/ceph/haproxy:2.3'
 DEFAULT_KEEPALIVED_IMAGE = 'quay.io/ceph/keepalived:2.2.4'
 DEFAULT_SNMP_GATEWAY_IMAGE = 'docker.io/maxwo/snmp-notifier:v1.2.1'
@@ -126,6 +132,7 @@ DEFAULT_ELASTICSEARCH_IMAGE = 'quay.io/omrizeneva/elasticsearch:6.8.23'
 DEFAULT_JAEGER_COLLECTOR_IMAGE = 'quay.io/jaegertracing/jaeger-collector:1.29'
 DEFAULT_JAEGER_AGENT_IMAGE = 'quay.io/jaegertracing/jaeger-agent:1.29'
 DEFAULT_JAEGER_QUERY_IMAGE = 'quay.io/jaegertracing/jaeger-query:1.29'
+DEFAULT_SAMBA_IMAGE = 'quay.io/samba.org/samba-server:devbuilds-centos-amd64'
 # ------------------------------------------------------------------------------
 
 
@@ -283,6 +290,11 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             desc='Jaeger query container image',
         ),
         Option(
+            'container_image_samba',
+            default=DEFAULT_SAMBA_IMAGE,
+            desc='Samba/SMB container image',
+        ),
+        Option(
             'warn_on_stray_hosts',
             type='bool',
             default=True,
@@ -329,6 +341,12 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             type='str',
             default='/etc/prometheus/ceph/ceph_default_alerts.yml',
             desc='location of alerts to include in prometheus deployments',
+        ),
+        Option(
+            'grafana_dashboards_path',
+            type='str',
+            default='/etc/grafana/dashboards/ceph-dashboard/',
+            desc='location of dashboards to include in grafana deployments',
         ),
         Option(
             'migration_current',
@@ -443,6 +461,12 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             desc='Multiplied by agent refresh rate to calculate how long agent must not report before being marked down'
         ),
         Option(
+            'hw_monitoring',
+            type='bool',
+            default=False,
+            desc='Deploy hw monitoring daemon on every host.'
+        ),
+        Option(
             'max_osd_draining_count',
             type='int',
             default=10,
@@ -474,7 +498,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         ),
         Option(
             'default_cephadm_command_timeout',
-            type='secs',
+            type='int',
             default=15 * 60,
             desc='Default timeout applied to cephadm commands run directly on '
             'the host (in seconds)'
@@ -485,6 +509,12 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             default='',
             desc="Destination for cephadm command's persistent logging",
             enum_allowed=['file', 'syslog', 'file,syslog'],
+        ),
+        Option(
+            'oob_default_addr',
+            type='str',
+            default='169.254.1.1',
+            desc="Default address for RedFish API (oob management)."
         ),
     ]
 
@@ -528,12 +558,14 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.container_image_jaeger_agent = ''
             self.container_image_jaeger_collector = ''
             self.container_image_jaeger_query = ''
+            self.container_image_samba = ''
             self.warn_on_stray_hosts = True
             self.warn_on_stray_daemons = True
             self.warn_on_failed_host_check = True
             self.allow_ptrace = False
             self.container_init = True
             self.prometheus_alerts_path = ''
+            self.grafana_dashboards_path = ''
             self.migration_current: Optional[int] = None
             self.config_dashboard = True
             self.manage_etc_ceph_ceph_conf = True
@@ -543,6 +575,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.registry_password: Optional[str] = None
             self.registry_insecure: bool = False
             self.use_repo_digest = True
+            self.config_checks_enabled = False
             self.default_registry = ''
             self.autotune_memory_target_ratio = 0.0
             self.autotune_interval = 0
@@ -559,6 +592,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.agent_refresh_rate = 0
             self.agent_down_multiplier = 0.0
             self.agent_starting_port = 0
+            self.hw_monitoring = False
             self.service_discovery_port = 0
             self.secure_monitoring_stack = False
             self.apply_spec_fails: List[Tuple[str, str]] = []
@@ -569,6 +603,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.log_refresh_metadata = False
             self.default_cephadm_command_timeout = 0
             self.cephadm_log_destination = ''
+            self.oob_default_addr = ''
 
         self.notify(NotifyType.mon_map, None)
         self.config_notify()
@@ -598,6 +633,9 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         self.cache = HostCache(self)
         self.cache.load()
+
+        self.node_proxy_cache = NodeProxyCache(self)
+        self.node_proxy_cache.load()
 
         self.agent_cache = AgentCache(self)
         self.agent_cache.load()
@@ -631,12 +669,34 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self.migration = Migrations(self)
 
         _service_classes: Sequence[Type[CephadmService]] = [
-            OSDService, NFSService, MonService, MgrService, MdsService,
-            RgwService, RbdMirrorService, GrafanaService, AlertmanagerService,
-            PrometheusService, NodeExporterService, LokiService, PromtailService, CrashService, IscsiService,
-            IngressService, CustomContainerService, CephfsMirrorService, NvmeofService,
-            CephadmAgent, CephExporterService, SNMPGatewayService, ElasticSearchService,
-            JaegerQueryService, JaegerAgentService, JaegerCollectorService
+            AlertmanagerService,
+            CephExporterService,
+            CephadmAgent,
+            CephfsMirrorService,
+            CrashService,
+            CustomContainerService,
+            ElasticSearchService,
+            GrafanaService,
+            IngressService,
+            IscsiService,
+            JaegerAgentService,
+            JaegerCollectorService,
+            JaegerQueryService,
+            LokiService,
+            MdsService,
+            MgrService,
+            MonService,
+            NFSService,
+            NodeExporterService,
+            NodeProxy,
+            NvmeofService,
+            OSDService,
+            PrometheusService,
+            PromtailService,
+            RbdMirrorService,
+            RgwService,
+            SMBService,
+            SNMPGatewayService,
         ]
 
         # https://github.com/python/mypy/issues/8993
@@ -647,6 +707,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self.osd_service: OSDService = cast(OSDService, self.cephadm_services['osd'])
         self.iscsi_service: IscsiService = cast(IscsiService, self.cephadm_services['iscsi'])
         self.nvmeof_service: NvmeofService = cast(NvmeofService, self.cephadm_services['nvmeof'])
+        self.node_proxy_service: NodeProxy = cast(NodeProxy, self.cephadm_services['node-proxy'])
 
         self.scheduled_async_actions: List[Callable] = []
 
@@ -659,6 +720,9 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         self.http_server = CephadmHttpServer(self)
         self.http_server.start()
+
+        self.node_proxy = NodeProxy(self)
+
         self.agent_helpers = CephadmAgentHelpers(self)
         if self.use_agent:
             self.agent_helpers._apply_agent()
@@ -724,7 +788,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         # are provided, that will be included in the OrchestratorError's message
         try:
             yield
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
             err_str: str = ''
             if cmd:
                 err_str = f'Command "{cmd}" timed out '
@@ -736,6 +800,16 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 err_str += f'(non-default {timeout} second timeout)'
             else:
                 err_str += (f'(default {self.default_cephadm_command_timeout} second timeout)')
+            raise OrchestratorError(err_str)
+        except concurrent.futures.CancelledError as e:
+            err_str = ''
+            if cmd:
+                err_str = f'Command "{cmd}" failed '
+            else:
+                err_str = 'Command failed '
+            if host:
+                err_str += f'on host {host} '
+            err_str += f' - {str(e)}'
             raise OrchestratorError(err_str)
 
     def set_container_image(self, entity: str, image: str) -> None:
@@ -825,7 +899,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         Generate a unique random service name
         """
         suffix = daemon_type not in [
-            'mon', 'crash', 'ceph-exporter',
+            'mon', 'crash', 'ceph-exporter', 'node-proxy',
             'prometheus', 'node-exporter', 'grafana', 'alertmanager',
             'container', 'agent', 'snmp-gateway', 'loki', 'promtail',
             'elasticsearch', 'jaeger-collector', 'jaeger-agent', 'jaeger-query'
@@ -962,6 +1036,17 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         if failed_daemons:
             self.set_health_warning('CEPHADM_FAILED_DAEMON', f'{len(failed_daemons)} failed cephadm daemon(s)', len(
                 failed_daemons), failed_daemons)
+
+    def get_first_matching_network_ip(self, host: str, sspec: ServiceSpec) -> Optional[str]:
+        sspec_networks = sspec.networks
+        for subnet, ifaces in self.cache.networks.get(host, {}).items():
+            host_network = ipaddress.ip_network(subnet)
+            for spec_network_str in sspec_networks:
+                spec_network = ipaddress.ip_network(spec_network_str)
+                if host_network.overlaps(spec_network):
+                    return list(ifaces.values())[0][0]
+                logger.error(f'{spec_network} from {sspec.service_name()} spec does not overlap with {host_network} on {host}')
+        return None
 
     @staticmethod
     def can_run() -> Tuple[bool, str]:
@@ -1335,7 +1420,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
     @orchestrator._cli_read_command('cephadm config-check status')
     def _config_check_status(self) -> HandleCommandResult:
         """Show whether the configuration checker feature is enabled/disabled"""
-        status = self.get_module_option('config_checks_enabled')
+        status = self.config_checks_enabled
         return HandleCommandResult(stdout="Enabled" if status else "Disabled")
 
     @orchestrator._cli_write_command('cephadm config-check enable')
@@ -1506,41 +1591,32 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 utils.name_to_config_section(daemon_name),
                 'container_image'
             )).strip()
-        elif daemon_type == 'prometheus':
-            image = self.container_image_prometheus
-        elif daemon_type == 'nvmeof':
-            image = self.container_image_nvmeof
-        elif daemon_type == 'grafana':
-            image = self.container_image_grafana
-        elif daemon_type == 'alertmanager':
-            image = self.container_image_alertmanager
-        elif daemon_type == 'node-exporter':
-            image = self.container_image_node_exporter
-        elif daemon_type == 'loki':
-            image = self.container_image_loki
-        elif daemon_type == 'promtail':
-            image = self.container_image_promtail
-        elif daemon_type == 'haproxy':
-            image = self.container_image_haproxy
-        elif daemon_type == 'keepalived':
-            image = self.container_image_keepalived
-        elif daemon_type == 'elasticsearch':
-            image = self.container_image_elasticsearch
-        elif daemon_type == 'jaeger-agent':
-            image = self.container_image_jaeger_agent
-        elif daemon_type == 'jaeger-collector':
-            image = self.container_image_jaeger_collector
-        elif daemon_type == 'jaeger-query':
-            image = self.container_image_jaeger_query
-        elif daemon_type == CustomContainerService.TYPE:
-            # The image can't be resolved, the necessary information
-            # is only available when a container is deployed (given
-            # via spec).
-            image = None
-        elif daemon_type == 'snmp-gateway':
-            image = self.container_image_snmp_gateway
         else:
-            assert False, daemon_type
+            images = {
+                'alertmanager': self.container_image_alertmanager,
+                'elasticsearch': self.container_image_elasticsearch,
+                'grafana': self.container_image_grafana,
+                'haproxy': self.container_image_haproxy,
+                'jaeger-agent': self.container_image_jaeger_agent,
+                'jaeger-collector': self.container_image_jaeger_collector,
+                'jaeger-query': self.container_image_jaeger_query,
+                'keepalived': self.container_image_keepalived,
+                'loki': self.container_image_loki,
+                'node-exporter': self.container_image_node_exporter,
+                'nvmeof': self.container_image_nvmeof,
+                'prometheus': self.container_image_prometheus,
+                'promtail': self.container_image_promtail,
+                'snmp-gateway': self.container_image_snmp_gateway,
+                # The image can't be resolved here, the necessary information
+                # is only available when a container is deployed (given
+                # via spec).
+                CustomContainerService.TYPE: None,
+                SMBService.TYPE: self.container_image_samba,
+            }
+            try:
+                image = images[daemon_type]
+            except KeyError:
+                raise ValueError(f'no image for {daemon_type}')
 
         self.log.debug('%s container image %s' % (daemon_name, image))
 
@@ -1612,6 +1688,18 @@ Then run the following:
         if spec.hostname in self.inventory and self.inventory.get_addr(spec.hostname) != spec.addr:
             self.cache.refresh_all_host_info(spec.hostname)
 
+        if spec.oob:
+            if not spec.oob.get('addr'):
+                spec.oob['addr'] = self.oob_default_addr
+            if not spec.oob.get('port'):
+                spec.oob['port'] = '443'
+            host_oob_info = dict()
+            host_oob_info['addr'] = spec.oob['addr']
+            host_oob_info['port'] = spec.oob['port']
+            host_oob_info['username'] = spec.oob['username']
+            host_oob_info['password'] = spec.oob['password']
+            self.node_proxy_cache.update_oob(spec.hostname, host_oob_info)
+
         # prime crush map?
         if spec.location:
             self.check_mon_command({
@@ -1634,6 +1722,71 @@ Then run the following:
     @handle_orch_error
     def add_host(self, spec: HostSpec) -> str:
         return self._add_host(spec)
+
+    @handle_orch_error
+    def hardware_light(self, light_type: str, action: str, hostname: str, device: Optional[str] = None) -> Dict[str, Any]:
+        try:
+            result = self.node_proxy.led(light_type=light_type,
+                                         action=action,
+                                         hostname=hostname,
+                                         device=device)
+        except RuntimeError as e:
+            self.log.error(e)
+            raise OrchestratorValidationError(f'Make sure the node-proxy agent is deployed and running on {hostname}')
+        except HTTPError as e:
+            self.log.error(e)
+            raise OrchestratorValidationError(f"http error while querying node-proxy API: {e}")
+        return result
+
+    @handle_orch_error
+    def hardware_shutdown(self, hostname: str, force: Optional[bool] = False, yes_i_really_mean_it: bool = False) -> str:
+        if not yes_i_really_mean_it:
+            raise OrchestratorError("you must pass --yes-i-really-mean-it")
+
+        try:
+            self.node_proxy.shutdown(hostname, force)
+        except RuntimeError as e:
+            self.log.error(e)
+            raise OrchestratorValidationError(f'Make sure the node-proxy agent is deployed and running on {hostname}')
+        except HTTPError as e:
+            self.log.error(e)
+            raise OrchestratorValidationError(f"Can't shutdown node {hostname}: {e}")
+        return f'Shutdown scheduled on {hostname}'
+
+    @handle_orch_error
+    def hardware_powercycle(self, hostname: str, yes_i_really_mean_it: bool = False) -> str:
+        if not yes_i_really_mean_it:
+            raise OrchestratorError("you must pass --yes-i-really-mean-it")
+
+        try:
+            self.node_proxy.powercycle(hostname)
+        except RuntimeError as e:
+            self.log.error(e)
+            raise OrchestratorValidationError(f'Make sure the node-proxy agent is deployed and running on {hostname}')
+        except HTTPError as e:
+            self.log.error(e)
+            raise OrchestratorValidationError(f"Can't perform powercycle on node {hostname}: {e}")
+        return f'Powercycle scheduled on {hostname}'
+
+    @handle_orch_error
+    def node_proxy_fullreport(self, hostname: Optional[str] = None) -> Dict[str, Any]:
+        return self.node_proxy_cache.fullreport(hostname=hostname)
+
+    @handle_orch_error
+    def node_proxy_summary(self, hostname: Optional[str] = None) -> Dict[str, Any]:
+        return self.node_proxy_cache.summary(hostname=hostname)
+
+    @handle_orch_error
+    def node_proxy_firmwares(self, hostname: Optional[str] = None) -> Dict[str, Any]:
+        return self.node_proxy_cache.firmwares(hostname=hostname)
+
+    @handle_orch_error
+    def node_proxy_criticals(self, hostname: Optional[str] = None) -> Dict[str, Any]:
+        return self.node_proxy_cache.criticals(hostname=hostname)
+
+    @handle_orch_error
+    def node_proxy_common(self, category: str, hostname: Optional[str] = None) -> Dict[str, Any]:
+        return self.node_proxy_cache.common(category, hostname=hostname)
 
     @handle_orch_error
     def remove_host(self, host: str, force: bool = False, offline: bool = False, rm_crush_entry: bool = False) -> str:
@@ -2691,6 +2844,15 @@ Then run the following:
                 pass
             deps = sorted([self.get_mgr_ip(), server_port, root_cert,
                            str(self.device_enhanced_scan)])
+        elif daemon_type == 'node-proxy':
+            root_cert = ''
+            server_port = ''
+            try:
+                server_port = str(self.http_server.agent.server_port)
+                root_cert = self.http_server.agent.ssl_certs.get_root_cert()
+            except Exception:
+                pass
+            deps = sorted([self.get_mgr_ip(), server_port, root_cert])
         elif daemon_type == 'iscsi':
             if spec:
                 iscsi_spec = cast(IscsiServiceSpec, spec)
@@ -2859,6 +3021,38 @@ Then run the following:
         self.set_store(PrometheusService.USER_CFG_KEY, user)
         self.set_store(PrometheusService.PASS_CFG_KEY, password)
         return 'prometheus credentials updated correctly'
+
+    @handle_orch_error
+    def set_prometheus_target(self, url: str) -> str:
+        prometheus_spec = cast(PrometheusSpec, self.spec_store['prometheus'].spec)
+        if url not in prometheus_spec.targets:
+            prometheus_spec.targets.append(url)
+        else:
+            return f"Target '{url}' already exists.\n"
+        if not prometheus_spec:
+            return "Service prometheus not found\n"
+        daemons: List[orchestrator.DaemonDescription] = self.cache.get_daemons_by_type('prometheus')
+        spec = ServiceSpec.from_json(prometheus_spec.to_json())
+        self.apply([spec], no_overwrite=False)
+        for daemon in daemons:
+            self.daemon_action(action='redeploy', daemon_name=daemon.daemon_name)
+        return 'prometheus multi-cluster targets updated'
+
+    @handle_orch_error
+    def remove_prometheus_target(self, url: str) -> str:
+        prometheus_spec = cast(PrometheusSpec, self.spec_store['prometheus'].spec)
+        if url in prometheus_spec.targets:
+            prometheus_spec.targets.remove(url)
+        else:
+            return f"Target '{url}' does not exist.\n"
+        if not prometheus_spec:
+            return "Service prometheus not found\n"
+        daemons: List[orchestrator.DaemonDescription] = self.cache.get_daemons_by_type('prometheus')
+        spec = ServiceSpec.from_json(prometheus_spec.to_json())
+        self.apply([spec], no_overwrite=False)
+        for daemon in daemons:
+            self.daemon_action(action='redeploy', daemon_name=daemon.daemon_name)
+        return 'prometheus multi-cluster targets updated'
 
     @handle_orch_error
     def set_alertmanager_access_info(self, user: str, password: str) -> str:
@@ -3081,7 +3275,8 @@ Then run the following:
                 'elasticsearch': PlacementSpec(count=1),
                 'jaeger-agent': PlacementSpec(host_pattern='*'),
                 'jaeger-collector': PlacementSpec(count=1),
-                'jaeger-query': PlacementSpec(count=1)
+                'jaeger-query': PlacementSpec(count=1),
+                SMBService.TYPE: PlacementSpec(count=1),
             }
             spec.placement = defaults[spec.service_type]
         elif spec.service_type in ['mon', 'mgr'] and \
@@ -3209,6 +3404,10 @@ Then run the following:
 
     @handle_orch_error
     def apply_snmp_gateway(self, spec: ServiceSpec) -> str:
+        return self._apply(spec)
+
+    @handle_orch_error
+    def apply_smb(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
     @handle_orch_error

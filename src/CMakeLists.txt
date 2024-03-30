@@ -143,7 +143,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
   if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12) # require >= clang-12
     message(FATAL_ERROR "C++20 support requires a minimum Clang version of 12.")
   endif()
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_EXPORTS_C_FLAG}")
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " ${CMAKE_EXE_EXPORTS_C_FLAG}")
   string(APPEND CMAKE_LINKER_FLAGS " -rdynamic -export-dynamic ${CMAKE_EXE_EXPORTS_C_FLAG}")
   string(PREPEND CMAKE_CXX_FLAGS_DEBUG "-g ")
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-inconsistent-missing-override>)
@@ -301,6 +301,15 @@ if (WITH_BLKIN)
   add_subdirectory(blkin/blkin-lib)
 endif(WITH_BLKIN)
 
+if(WITH_JAEGER)
+  find_package(thrift 0.13.0 REQUIRED)
+  include(BuildOpentelemetry)
+  build_opentelemetry()
+  add_library(jaeger_base INTERFACE)
+  target_link_libraries(jaeger_base INTERFACE opentelemetry::libopentelemetry
+    thrift::libthrift)
+endif()
+
 set(mds_files)
 list(APPEND mds_files
   mds/MDSMap.cc
@@ -371,6 +380,7 @@ if(WITH_SEASTAR)
   endmacro ()
   set(Seastar_API_LEVEL "6" CACHE STRING "" FORCE)
   set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
+  set(Seastar_IO_URING OFF CACHE BOOL "" FORCE)
   set(Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW ON CACHE BOOL "" FORCE)
   if(Seastar_DPDK)
     find_package(dpdk QUIET)
@@ -392,6 +402,7 @@ if(WITH_SEASTAR)
   # create the directory so cmake won't complain when looking at the imported
   # target: Seastar exports this directory created at build-time
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/seastar/gen/include")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/seastar/gen/src")
   add_subdirectory(crimson)
 endif()
 
@@ -441,12 +452,6 @@ target_compile_definitions(common-objs PRIVATE
 add_dependencies(common-objs legacy-option-headers)
 
 if(WITH_JAEGER)
-  find_package(thrift 0.13.0 REQUIRED)
-  include(BuildOpentelemetry)
-  build_opentelemetry()
-  add_library(jaeger_base INTERFACE)
-  target_link_libraries(jaeger_base INTERFACE opentelemetry::libopentelemetry
-    thrift::libthrift)
   add_dependencies(common-objs jaeger_base)
   target_link_libraries(common-objs jaeger_base)
 endif()
@@ -502,10 +507,6 @@ endif()
 
 if(NOT WITH_SYSTEM_BOOST)
   list(APPEND ceph_common_deps ${ZLIB_LIBRARIES})
-endif()
-
-if(HAVE_QATZIP)
-  list(APPEND ceph_common_deps ${qatzip_LIBRARIES})
 endif()
 
 if(WITH_DPDK)
@@ -662,6 +663,7 @@ endif()
 if(NOT WIN32)
 add_subdirectory(pybind)
 add_subdirectory(ceph-volume)
+add_subdirectory(ceph-node-proxy)
 add_subdirectory(python-common)
 add_subdirectory(cephadm)
 endif(NOT WIN32)

@@ -156,7 +156,8 @@ public:
       ShardServices &target_shard_services,
       typename T::IRef &&op,
       F &&f) {
-    auto &crosscore_ordering = get_osd_priv(&op->get_connection()).crosscore_ordering;
+    auto &crosscore_ordering = get_osd_priv(
+        &op->get_foreign_connection()).crosscore_ordering;
     if (crosscore_ordering.proceed_or_wait(cc_seq)) {
       return std::invoke(
         std::move(f),
@@ -182,6 +183,8 @@ public:
       F &&f) {
     ceph_assert(op->use_count() == 1);
     if (seastar::this_shard_id() == core) {
+      auto f_conn = op->prepare_remote_submission();
+      op->finish_remote_submission(std::move(f_conn));
       auto &target_shard_services = shard_services.local();
       return std::invoke(
         std::move(f),
@@ -190,17 +193,17 @@ public:
     }
     // Note: the ordering in only preserved until f is invoked.
     auto &opref = *op;
-    auto &crosscore_ordering = get_osd_priv(&opref.get_connection()).crosscore_ordering;
+    auto &crosscore_ordering = get_osd_priv(
+        &opref.get_local_connection()).crosscore_ordering;
     auto cc_seq = crosscore_ordering.prepare_submit(core);
     auto &logger = crimson::get_logger(ceph_subsys_osd);
     logger.debug("{}: send {} to the remote pg core {}",
                  opref, cc_seq, core);
     return opref.get_handle().complete(
-    ).then([&opref, this] {
-      get_local_state().registry.remove_from_registry(opref);
-      return opref.prepare_remote_submission();
-    }).then([op=std::move(op), f=std::move(f), this, core, cc_seq
-            ](auto f_conn) mutable {
+    ).then([this, core, cc_seq,
+            op=std::move(op), f=std::move(f)]() mutable {
+      get_local_state().registry.remove_from_registry(*op);
+      auto f_conn = op->prepare_remote_submission();
       return shard_services.invoke_on(
         core,
         [this, cc_seq,
@@ -373,7 +376,7 @@ public:
       return opref.template enter_stage<>(
 	opref.get_connection_pipeline().get_pg_mapping);
     }).then([this, &opref] {
-      return get_pg_to_shard_mapping().maybe_create_pg(opref.get_pgid());
+      return get_pg_to_shard_mapping().get_or_create_pg_mapping(opref.get_pgid());
     }).then_wrapped([this, &logger, op=std::move(op)](auto fut) mutable {
       if (unlikely(fut.failed())) {
         logger.error("{}: failed before with_pg", *op);

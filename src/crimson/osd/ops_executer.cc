@@ -160,13 +160,13 @@ OpsExecuter::watch_ierrorator::future<> OpsExecuter::do_op_watch_subop_watch(
   logger().debug("{}", __func__);
   struct connect_ctx_t {
     ObjectContext::watch_key_t key;
-    crimson::net::ConnectionRef conn;
+    crimson::net::ConnectionXcoreRef conn;
     watch_info_t info;
 
     connect_ctx_t(
       const OSDOp& osd_op,
       const ExecutableMessage& msg,
-      crimson::net::ConnectionRef conn)
+      crimson::net::ConnectionXcoreRef conn)
       : key(osd_op.op.watch.cookie, msg.get_reqid().name),
         conn(conn),
         info(create_watch_info(osd_op, msg, conn->get_peer_addr())) {
@@ -323,13 +323,13 @@ OpsExecuter::watch_ierrorator::future<> OpsExecuter::do_op_notify(
     return crimson::ct_error::enoent::make();
   }
   struct notify_ctx_t {
-    crimson::net::ConnectionRef conn;
+    crimson::net::ConnectionXcoreRef conn;
     notify_info_t ninfo;
     const uint64_t client_gid;
     const epoch_t epoch;
 
     notify_ctx_t(const ExecutableMessage& msg,
-                 crimson::net::ConnectionRef conn)
+                 crimson::net::ConnectionXcoreRef conn)
       : conn(conn),
         client_gid(msg.get_reqid().name.num()),
         epoch(msg.get_map_epoch()) {
@@ -674,7 +674,16 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
       whiteout = true;
     }
     return do_write_op([this, whiteout](auto& backend, auto& os, auto& txn) {
-      return backend.remove(os, txn, delta_stats, whiteout);
+      int num_bytes = 0;
+      // Calculate num_bytes to be removed
+      if (obc->obs.oi.soid.is_snap()) {
+        ceph_assert(obc->ssc->snapset.clone_overlap.count(obc->obs.oi.soid.snap));
+        num_bytes = obc->ssc->snapset.get_clone_bytes(obc->obs.oi.soid.snap);
+      } else {
+        num_bytes = obc->obs.oi.size;
+      }
+      return backend.remove(os, txn, *osd_op_params,
+                            delta_stats, whiteout, num_bytes);
     });
   }
   case CEPH_OSD_OP_CALL:
@@ -922,12 +931,12 @@ std::unique_ptr<OpsExecuter::CloningContext> OpsExecuter::execute_clone(
     return std::vector<snapid_t>{std::begin(snapc.snaps), last};
   }();
 
-  auto [snap_oi, clone_obc] = prepare_clone(coid);
+  auto clone_obc = prepare_clone(coid);
   // make clone
-  backend.clone(snap_oi, initial_obs, clone_obc->obs, txn);
+  backend.clone(clone_obc->obs.oi, initial_obs, clone_obc->obs, txn);
 
   delta_stats.num_objects++;
-  if (snap_oi.is_omap()) {
+  if (clone_obc->obs.oi.is_omap()) {
     delta_stats.num_objects_omap++;
   }
   delta_stats.num_object_clones++;
@@ -951,7 +960,7 @@ std::unique_ptr<OpsExecuter::CloningContext> OpsExecuter::execute_clone(
   cloning_ctx->log_entry = {
     pg_log_entry_t::CLONE,
     coid,
-    snap_oi.version,
+    clone_obc->obs.oi.version,
     initial_obs.oi.version,
     initial_obs.oi.user_version,
     osd_reqid_t(),
@@ -961,7 +970,17 @@ std::unique_ptr<OpsExecuter::CloningContext> OpsExecuter::execute_clone(
   osd_op_params->at_version.version++;
   encode(cloned_snaps, cloning_ctx->log_entry.snaps);
 
-  // TODO: update most recent clone_overlap and usage stats
+  // update most recent clone_overlap and usage stats
+  assert(cloning_ctx->new_snapset.clones.size() > 0);
+  // In classic, we check for evicted clones before
+  // adjusting the clone_overlap.
+  // This check is redundant here since `clone_obc`
+  // was just created (See prepare_clone()).
+  interval_set<uint64_t> &newest_overlap =
+    cloning_ctx->new_snapset.clone_overlap.rbegin()->second;
+  osd_op_params->modified_ranges.intersection_of(newest_overlap);
+  delta_stats.num_bytes += osd_op_params->modified_ranges.size();
+  newest_overlap.subtract(osd_op_params->modified_ranges);
   return cloning_ctx;
 }
 
@@ -1009,46 +1028,35 @@ OpsExecuter::flush_clone_metadata(
   });
 }
 
-// TODO: make this static
-std::pair<object_info_t, ObjectContextRef> OpsExecuter::prepare_clone(
+ObjectContextRef OpsExecuter::prepare_clone(
   const hobject_t& coid)
 {
-  object_info_t static_snap_oi(coid);
-  static_snap_oi.version = osd_op_params->at_version;
-  static_snap_oi.prior_version = obc->obs.oi.version;
-  static_snap_oi.copy_user_bits(obc->obs.oi);
-  if (static_snap_oi.is_whiteout()) {
-    // clone shouldn't be marked as whiteout
-    static_snap_oi.clear_flag(object_info_t::FLAG_WHITEOUT);
-  }
+  ceph_assert(pg->is_primary());
+  ObjectState clone_obs{coid};
+  clone_obs.exists = true;
+  clone_obs.oi.version = osd_op_params->at_version;
+  clone_obs.oi.prior_version = obc->obs.oi.version;
+  clone_obs.oi.copy_user_bits(obc->obs.oi);
+  clone_obs.oi.clear_flag(object_info_t::FLAG_WHITEOUT);
 
-  ObjectContextRef clone_obc;
-  if (pg->is_primary()) {
-    // lookup_or_create
-    auto [c_obc, existed] =
-      pg->obc_registry.get_cached_obc(std::move(coid));
-    assert(!existed);
-    c_obc->obs.oi = static_snap_oi;
-    c_obc->obs.exists = true;
-    c_obc->ssc = obc->ssc;
-    logger().debug("clone_obc: {}", c_obc->obs.oi);
-    clone_obc = std::move(c_obc);
-  }
-  return std::make_pair(std::move(static_snap_oi), std::move(clone_obc));
+  auto [clone_obc, existed] = pg->obc_registry.get_cached_obc(std::move(coid));
+  ceph_assert(!existed);
+
+  clone_obc->set_clone_state(std::move(clone_obs));
+  clone_obc->ssc = obc->ssc;
+  return clone_obc;
 }
 
 void OpsExecuter::apply_stats()
 {
-  pg->get_peering_state().apply_op_stats(get_target(), delta_stats);
-  pg->scrubber.handle_op_stats(get_target(), delta_stats);
-  pg->publish_stats_to_osd();
+  pg->apply_stats(get_target(), delta_stats);
 }
 
 OpsExecuter::OpsExecuter(Ref<PG> pg,
                          ObjectContextRef _obc,
                          const OpInfo& op_info,
                          abstracted_msg_t&& msg,
-                         crimson::net::ConnectionRef conn,
+                         crimson::net::ConnectionXcoreRef conn,
                          const SnapContext& _snapc)
   : pg(std::move(pg)),
     obc(std::move(_obc)),
@@ -1444,7 +1452,7 @@ static PG::interruptible_future<> do_pgls_filtered(
 PgOpsExecuter::interruptible_future<>
 PgOpsExecuter::execute_op(OSDOp& osd_op)
 {
-  logger().warn("handling op {}", ceph_osd_op_name(osd_op.op.op));
+  logger().debug("handling op {}", ceph_osd_op_name(osd_op.op.op));
   switch (const ceph_osd_op& op = osd_op.op; op.op) {
   case CEPH_OSD_OP_PGLS:
     return do_pgls(pg, nspace, osd_op);
