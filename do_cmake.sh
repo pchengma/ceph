@@ -2,7 +2,7 @@
 set -ex
 
 if [ -d .git ]; then
-    git submodule update --init --recursive --progress
+    git submodule update --init --recursive --progress --recommend-shallow
 fi
 
 : ${BUILD_DIR:=build}
@@ -58,7 +58,10 @@ fi
 
 ARGS+=" -DWITH_PYTHON3=${PYBUILD}"
 
-if type ccache > /dev/null 2>&1 ; then
+if type sccache > /dev/null 2>&1 ; then
+    echo "enabling sccache"
+    ARGS+=" -DWITH_SCCACHE=ON"
+elif type ccache > /dev/null 2>&1 ; then
     echo "enabling ccache"
     ARGS+=" -DWITH_CCACHE=ON"
 fi

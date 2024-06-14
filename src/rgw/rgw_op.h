@@ -70,7 +70,7 @@ namespace rgw::auth::registry { class StrategyRegistry; }
 
 int rgw_forward_request_to_master(const DoutPrefixProvider* dpp,
                                   const rgw::SiteConfig& site,
-                                  const rgw_user& uid,
+                                  const rgw_owner& effective_owner,
                                   bufferlist* indata, JSONParser* jp,
                                   req_info& req, optional_yield y);
 
@@ -163,6 +163,36 @@ int rgw_rest_get_json_input(CephContext *cct, req_state *s, T& out,
   }
 
   return 0;
+}
+
+// So! Now and then when we try to update bucket information, the
+// bucket has changed during the course of the operation. (Or we have
+// a cache consistency problem that Watch/Notify isn't ruling out
+// completely.)
+//
+// When this happens, we need to update the bucket info and try
+// again. We have, however, to try the right *part* again.  We can't
+// simply re-send, since that will obliterate the previous update.
+//
+// Thus, callers of this function should include everything that
+// merges information to be changed into the bucket information as
+// well as the call to set it.
+//
+// The called function must return an integer, negative on error. In
+// general, they should just return op_ret.
+template<typename F>
+int retry_raced_bucket_write(const DoutPrefixProvider *dpp,
+                             rgw::sal::Bucket *b,
+                             const F &f,
+                             optional_yield y) {
+  auto r = f();
+  for (auto i = 0u; i < 15u && r == -ECANCELED; ++i) {
+    r = b->try_refresh_info(dpp, nullptr, y);
+    if (r >= 0) {
+      r = f();
+    }
+  }
+  return r;
 }
 
 /**
@@ -1322,6 +1352,7 @@ public:
     attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
   }
 
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1446,6 +1477,7 @@ public:
       bypass_governance_mode(false) {
   }
 
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1839,10 +1871,7 @@ protected:
   std::unique_ptr<rgw::sal::MPSerializer> serializer;
   jspan_ptr multipart_trace;
   ceph::real_time upload_time;
-  std::unique_ptr<rgw::sal::Object> target_obj;
   std::unique_ptr<rgw::sal::Notification> res;
-  std::unique_ptr<rgw::sal::Object> meta_obj;
-  off_t ofs = 0;
 
 public:
   RGWCompleteMultipart() {}
@@ -1998,24 +2027,7 @@ class RGWDeleteMultiObj : public RGWOp {
    * Handles the deletion of an individual object and uses
    * set_partial_response to record the outcome.
    */
-  void handle_individual_object(const rgw_obj_key& o,
-				optional_yield y,
-                                boost::asio::deadline_timer *formatter_flush_cond);
-
-  /**
-   * When the request is being executed in a coroutine, performs
-   * the actual formatter flushing and is responsible for the
-   * termination condition (when when all partial object responses
-   * have been sent). Note that the formatter flushing must be handled
-   * on the coroutine that invokes the execute method vs. the
-   * coroutines that are spawned to handle individual objects because
-   * the flush logic uses a yield context that was captured
-   * and saved on the req_state vs. one that is passed on the stack.
-   * This is a no-op in the case where we're not executing as a coroutine.
-   */
-  void wait_flush(optional_yield y,
-                  boost::asio::deadline_timer *formatter_flush_cond,
-                  std::function<bool()> predicate);
+  void handle_individual_object(const rgw_obj_key& o, optional_yield y);
 
 protected:
   std::vector<delete_multi_obj_entry> ops_log_entries;
@@ -2023,7 +2035,6 @@ protected:
   rgw::sal::Bucket* bucket;
   bool quiet;
   bool status_dumped;
-  bool acl_allowed = false;
   bool bypass_perm;
   bool bypass_governance_mode;
 
@@ -2035,16 +2046,18 @@ public:
     bypass_governance_mode = false;
   }
 
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
+  void send_response() override;
 
   virtual int get_params(optional_yield y) = 0;
   virtual void send_status() = 0;
   virtual void begin_response() = 0;
   virtual void send_partial_response(const rgw_obj_key& key, bool delete_marker,
-                                     const std::string& marker_version_id, int ret,
-                                     boost::asio::deadline_timer *formatter_flush_cond) = 0;
+                                     const std::string& marker_version_id,
+                                     int ret) = 0;
   virtual void end_response() = 0;
   const char* name() const override { return "multi_object_delete"; }
   RGWOpType get_type() override { return RGW_OP_DELETE_MULTI_OBJ; }
@@ -2070,9 +2083,6 @@ extern int rgw_build_object_policies(const DoutPrefixProvider *dpp, rgw::sal::Dr
 				     req_state *s, bool prefetch_data, optional_yield y);
 extern void rgw_build_iam_environment(rgw::sal::Driver* driver,
 				      req_state* s);
-extern std::vector<rgw::IAM::Policy> get_iam_user_policy_from_attr(CephContext* cct,
-                        std::map<std::string, bufferlist>& attrs,
-                        const std::string& tenant);
 
 inline int get_system_versioning_params(req_state *s,
 					uint64_t *olh_epoch,

@@ -111,7 +111,7 @@ NOTE: if for some reason the build has to be restarted (for example if one distr
     +===================+==================================================+
     | pacific (16.X.X)  | ``focal bionic centos8 buster bullseye``         |
     +-------------------+--------------------------------------------------+
-    | quincy (17.X.X)   | ``focal centos8 centos9 bullseye``               |
+    | quincy (17.X.X)   | ``jammy focal centos8 centos9 bullseye``         |
     +-------------------+--------------------------------------------------+
     | reef (18.X.X)     | ``jammy focal centos8 centos9 windows bookworm`` |
     +-------------------+--------------------------------------------------+
@@ -188,11 +188,11 @@ See `the Ceph Tracker wiki page that explains how to write the release notes <ht
 
    .. prompt:: bash
 
-      sign-rpms octopus
+      sign-rpms ceph octopus
 
    Example::
 
-      $ sign-rpms octopus
+      $ sign-rpms ceph octopus
       Checking packages in: /opt/repos/ceph/octopus-15.2.17/centos/7
       signing:  /opt/repos/ceph/octopus-15.2.17/centos/7/SRPMS/ceph-release-1-1.el7.src.rpm
       /opt/repos/ceph/octopus-15.2.17/centos/7/SRPMS/ceph-release-1-1.el7.src.rpm:
@@ -206,19 +206,19 @@ See `the Ceph Tracker wiki page that explains how to write the release notes <ht
 
    .. prompt:: bash $
 
-      sync-push octopus
+      sync-push ceph octopus
 
 This leaves the packages in a password-protected prerelease area
-at https://download.ceph.com/prerelease.  Verify them from there.  
-When done and ready for release, mv the directories to the parent
-directory (that is, "mv <whatever you're promoting> ..".  
+at https://download.ceph.com/prerelease/ceph.  Verify them from there.
+When done and ready for release, mv the directories to the release
+directory (that is, "mv <whatever you're promoting> ../..".
 
 
 5. Build Containers
 ===================
 
-Prerelease containers (x86_64 only) are built by 
-https://2.jenkins.ceph.com/job/ceph-container-prerelease-build; run it 
+Prerelease containers (x86_64 only) are built by
+https://2.jenkins.ceph.com/job/ceph-container-prerelease-build; run it
 with appropriate parameters.  Test container images will appear on
 quay.ceph.io in the ceph/prerelease repo, built from the prerelease area
 on download.ceph.com.  When satisfied with them, and after you have promoted

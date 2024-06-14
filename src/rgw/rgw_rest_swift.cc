@@ -709,8 +709,7 @@ static int get_swift_container_settings(req_state * const s,
 
   if (read_list || write_list) {
     int r = rgw::swift::create_container_policy(s, driver,
-                                                s->user->get_id(),
-                                                s->user->get_display_name(),
+                                                s->owner,
                                                 read_list,
                                                 write_list,
                                                 *rw_mask,
@@ -823,7 +822,7 @@ int RGWCreateBucket_ObjStore_SWIFT::get_params(optional_yield y)
   }
 
   if (!has_policy) {
-    policy.create_default(s->user->get_id(), s->user->get_display_name());
+    policy.create_default(s->owner.id, s->owner.display_name);
   }
 
   location_constraint = driver->get_zone()->get_zonegroup().get_api_name();
@@ -989,7 +988,7 @@ int RGWPutObj_ObjStore_SWIFT::update_slo_segment_size(rgw_slo_entry& entry) {
     return r;
   }
 
-  size_bytes = slo_seg->get_obj_size();
+  size_bytes = slo_seg->get_size();
 
   r = rgw_compression_info_from_attrset(slo_seg->get_attrs(), compressed, cs_info);
   if (r < 0) {
@@ -1048,7 +1047,7 @@ int RGWPutObj_ObjStore_SWIFT::get_params(optional_yield y)
     }
   }
 
-  policy.create_default(s->user->get_id(), s->user->get_display_name());
+  policy.create_default(s->owner.id, s->owner.display_name);
 
   int r = get_delete_at_param(s, delete_at);
   if (r < 0) {
@@ -1167,9 +1166,7 @@ static int get_swift_account_settings(req_state * const s,
 
   const char * const acl_attr = s->info.env->get("HTTP_X_ACCOUNT_ACCESS_CONTROL");
   if (acl_attr) {
-    int r = rgw::swift::create_account_policy(s, driver,
-                                              s->user->get_id(),
-                                              s->user->get_display_name(),
+    int r = rgw::swift::create_account_policy(s, driver, s->owner,
                                               acl_attr, policy);
     if (r < 0) {
       return r;
@@ -1477,7 +1474,7 @@ static void dump_object_metadata(const DoutPrefixProvider* dpp, req_state * cons
 
 int RGWCopyObj_ObjStore_SWIFT::init_dest_policy()
 {
-  dest_policy.create_default(s->user->get_id(), s->user->get_display_name());
+  dest_policy.create_default(s->owner.id, s->owner.display_name);
 
   return 0;
 }
@@ -2140,8 +2137,13 @@ bool RGWFormPost::is_integral()
   bool r = false;
 
   try {
-    get_owner_info(s, s->user->get_info());
-    s->auth.identity = rgw::auth::transform_old_authinfo(s);
+    s->user = get_owner_info(s);
+    auto result = rgw::auth::transform_old_authinfo(
+        this, s->yield, driver, s->user.get());
+    if (!result) {
+      return false;
+    }
+    s->auth.identity = std::move(result).value();
   } catch (...) {
     ldpp_dout(this, 5) << "cannot get user_info of account's owner" << dendl;
     return false;
@@ -2182,8 +2184,8 @@ bool RGWFormPost::is_integral()
   return r;
 }
 
-void RGWFormPost::get_owner_info(const req_state* const s,
-                                   RGWUserInfo& owner_info) const
+auto RGWFormPost::get_owner_info(const req_state* const s) const
+  -> std::unique_ptr<rgw::sal::User>
 {
   /* We cannot use req_state::bucket_name because it isn't available
    * now. It will be initialized in RGWHandler_REST_SWIFT::postauth_init(). */
@@ -2230,15 +2232,22 @@ void RGWFormPost::get_owner_info(const req_state* const s,
     throw ret;
   }
 
-  ldpp_dout(this, 20) << "temp url user (bucket owner): " << bucket->get_info().owner
-                 << dendl;
+  const rgw_owner& owner = bucket->get_owner();
+  const rgw_user* uid = std::get_if<rgw_user>(&owner);
+  if (!uid) {
+    ldpp_dout(this, 20) << "bucket " << *bucket <<  " is not owned by a user "
+        "so has no temp url keys" << dendl;
+    throw -EPERM;
+  }
 
-  user = driver->get_user(bucket->get_info().owner);
+  ldpp_dout(this, 20) << "temp url user (bucket owner): " << *uid << dendl;
+
+  user = driver->get_user(*uid);
   if (user->load_user(s, s->yield) < 0) {
     throw -EPERM;
   }
 
-  owner_info = user->get_info();
+  return user;
 }
 
 int RGWFormPost::get_params(optional_yield y)
@@ -2249,7 +2258,7 @@ int RGWFormPost::get_params(optional_yield y)
     return ret;
   }
 
-  policy.create_default(s->user->get_id(), s->user->get_display_name());
+  policy.create_default(s->owner.id, s->owner.display_name);
 
   /* Let's start parsing the HTTP body by parsing each form part step-
    * by-step till encountering the first part with file data. */
@@ -2396,6 +2405,16 @@ int RGWFormPost::get_data(ceph::bufferlist& bl, bool& again)
   again = !boundary;
 
   return bl.length();
+}
+
+// override error_handler() to map error messages from abort_early(), which
+// doesn't end up calling our send_response()
+int RGWFormPost::error_handler(int err_no, std::string *error_content, optional_yield y)
+{
+  if (!err_msg.empty()) {
+    *error_content = err_msg;
+  }
+  return err_no;
 }
 
 void RGWFormPost::send_response()
@@ -2692,26 +2711,25 @@ bool RGWSwiftWebsiteHandler::is_web_dir() const
   obj->set_atomic();
   obj->set_prefetch_data();
 
-  RGWObjState* state = nullptr;
-  if (obj->get_obj_state(s, &state, s->yield, false)) {
+  if (obj->load_obj_state(s, s->yield, false)) {
     return false;
   }
 
   /* A nonexistent object cannot be a considered as a marker representing
    * the emulation of catalog in FS hierarchy. */
-  if (! state->exists) {
+  if (! obj->exists()) {
     return false;
   }
 
   /* Decode the content type. */
   std::string content_type;
-  get_contype_from_attrs(state->attrset, content_type);
+  get_contype_from_attrs(obj->get_attrs(), content_type);
 
   const auto& ws_conf = s->bucket->get_info().website_conf;
   const std::string subdir_marker = ws_conf.subdir_marker.empty()
                                       ? "application/directory"
                                       : ws_conf.subdir_marker;
-  return subdir_marker == content_type && state->size <= 1;
+  return subdir_marker == content_type && obj->get_size() <= 1;
 }
 
 bool RGWSwiftWebsiteHandler::is_index_present(const std::string& index) const
@@ -2721,14 +2739,13 @@ bool RGWSwiftWebsiteHandler::is_index_present(const std::string& index) const
   obj->set_atomic();
   obj->set_prefetch_data();
 
-  RGWObjState* state = nullptr;
-  if (obj->get_obj_state(s, &state, s->yield, false)) {
+  if (obj->load_obj_state(s, s->yield, false)) {
     return false;
   }
 
   /* A nonexistent object cannot be a considered as a viable index. We will
    * try to list the bucket or - if this is impossible - return an error. */
-  return state->exists;
+  return obj->exists();
 }
 
 int RGWSwiftWebsiteHandler::retarget_bucket(RGWOp* op, RGWOp** new_op)
@@ -2931,7 +2948,7 @@ int RGWHandler_REST_SWIFT::postauth_init(optional_yield y)
       && s->user->get_id().id == RGW_USER_ANON_ID) {
     s->bucket_tenant = s->account_name;
   } else {
-    s->bucket_tenant = s->user->get_tenant();
+    s->bucket_tenant = s->auth.identity->get_tenant();
   }
   s->bucket_name = t->url_bucket;
 

@@ -220,7 +220,7 @@ def run_tests(ctx, config):
     for client, client_config in config.items():
         (remote,) = ctx.cluster.only(client).remotes.keys()
 
-        attr = ["!kafka_test", "!amqp_test", "!amqp_ssl_test", "!kafka_security_test", "!modification_required", "!manual_test"]
+        attr = ["!kafka_test", "!amqp_test", "!amqp_ssl_test", "!kafka_security_test", "!modification_required", "!manual_test", "!http_test"]
 
         if 'extra_attr' in client_config:
             attr = client_config.get('extra_attr')
@@ -298,7 +298,7 @@ def task(ctx,config):
                     {
                     'port':endpoint.port,
                     'host':endpoint.dns_name,
-                    'zonegroup':'default',
+                    'zonegroup':ctx.rgw.zonegroup,
                     'cluster':'noname',
                     'version':'v2'
                     },

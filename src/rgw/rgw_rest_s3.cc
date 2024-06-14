@@ -469,7 +469,7 @@ int RGWGetObj_ObjStore_S3::send_response_data(bufferlist& bl, off_t bl_ofs,
     try {
       ceph::real_time replicated_time;
       decode(replicated_time, i->second);
-      dump_time(s, "x-rgw-replicated-at", replicated_time);
+      dump_time_header(s, "x-rgw-replicated-at", replicated_time);
     } catch (const buffer::error&) {}
   }
 
@@ -1820,7 +1820,7 @@ void RGWListBucket_ObjStore_S3::send_versioned_response()
         auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
         s->formatter->dump_string("StorageClass", storage_class.c_str());
       }
-      dump_owner(s, rgw_user(iter->meta.owner), iter->meta.owner_display_name);
+      dump_owner(s, iter->meta.owner, iter->meta.owner_display_name);
       if (iter->meta.appendable) {
         s->formatter->dump_string("Type", "Appendable");
       } else {
@@ -1911,7 +1911,7 @@ void RGWListBucket_ObjStore_S3::send_response()
       s->formatter->dump_int("Size", iter->meta.accounted_size);
       auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
       s->formatter->dump_string("StorageClass", storage_class.c_str());
-      dump_owner(s, rgw_user(iter->meta.owner), iter->meta.owner_display_name);
+      dump_owner(s, iter->meta.owner, iter->meta.owner_display_name);
       if (s->system_request) {
 	s->formatter->dump_string("RgwxTag", iter->tag);
       }
@@ -1988,7 +1988,7 @@ void RGWListBucket_ObjStore_S3v2::send_versioned_response()
         s->formatter->dump_string("StorageClass", storage_class.c_str());
       }
       if (fetchOwner == true) {
-        dump_owner(s, rgw_user(iter->meta.owner), iter->meta.owner_display_name);
+        dump_owner(s, iter->meta.owner, iter->meta.owner_display_name);
       }
       s->formatter->close_section();
     }
@@ -2056,7 +2056,7 @@ void RGWListBucket_ObjStore_S3v2::send_response()
       auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
       s->formatter->dump_string("StorageClass", storage_class.c_str());
       if (fetchOwner == true) {
-        dump_owner(s, rgw_user(iter->meta.owner), iter->meta.owner_display_name);
+        dump_owner(s, iter->meta.owner, iter->meta.owner_display_name);
       }
       if (s->system_request) {
         s->formatter->dump_string("RgwxTag", iter->tag);
@@ -2097,6 +2097,8 @@ void RGWGetBucketLogging_ObjStore_S3::send_response()
 void RGWGetBucketLocation_ObjStore_S3::send_response()
 {
   dump_errno(s);
+  dump_header(s, "x-rgw-bucket-placement-target", 
+    s->bucket->get_info().placement_rule.name);
   end_header(s, this);
   dump_start(s);
 
@@ -2349,9 +2351,9 @@ static void dump_bucket_metadata(req_state *s, rgw::sal::Bucket* bucket,
   dump_header(s, "X-RGW-Bytes-Used", static_cast<long long>(stats.size));
 
   // only bucket's owner is allowed to get the quota settings of the account
-  if (bucket->get_owner() == s->user->get_id()) {
-    auto user_info = s->user->get_info();
-    auto bucket_quota = s->bucket->get_info().quota; // bucket quota
+  if (s->auth.identity->is_owner_of(bucket->get_owner())) {
+    const auto& user_info = s->user->get_info();
+    const auto& bucket_quota = s->bucket->get_info().quota; // bucket quota
     dump_header(s, "X-RGW-Quota-User-Size", static_cast<long long>(user_info.quota.user_quota.max_size));
     dump_header(s, "X-RGW-Quota-User-Objects", static_cast<long long>(user_info.quota.user_quota.max_objects));
     dump_header(s, "X-RGW-Quota-Max-Buckets", static_cast<long long>(user_info.max_buckets));
@@ -2381,7 +2383,7 @@ static int create_s3_policy(req_state *s, rgw::sal::Driver* driver,
     if (!s->canned_acl.empty())
       return -ERR_INVALID_REQUEST;
 
-    return rgw::s3::create_policy_from_headers(s, driver, owner,
+    return rgw::s3::create_policy_from_headers(s, s->yield, driver, owner,
                                                *s->info.env, policy);
   }
 
@@ -3148,9 +3150,6 @@ int RGWPostObj_ObjStore_S3::get_policy(optional_yield y)
     if (ret != 0) {
       return -EACCES;
     } else {
-      /* Populate the owner info. */
-      s->owner.id = s->user->get_id();
-      s->owner.display_name = s->user->get_display_name();
       ldpp_dout(this, 20) << "Successful Signature Verification!" << dendl;
     }
 
@@ -4229,8 +4228,7 @@ void RGWDeleteMultiObj_ObjStore_S3::begin_response()
 void RGWDeleteMultiObj_ObjStore_S3::send_partial_response(const rgw_obj_key& key,
 							  bool delete_marker,
 							  const string& marker_version_id,
-                                                          int ret,
-                                                          boost::asio::deadline_timer *formatter_flush_cond)
+                                                          int ret)
 {
   if (!key.empty()) {
     delete_multi_obj_entry ops_log_entry;
@@ -4276,17 +4274,11 @@ void RGWDeleteMultiObj_ObjStore_S3::send_partial_response(const rgw_obj_key& key
     }
 
     ops_log_entries.push_back(std::move(ops_log_entry));
-    if (formatter_flush_cond) {
-      formatter_flush_cond->cancel();
-    } else {
-      rgw_flush_formatter(s, s->formatter);
-    }
   }
 }
 
 void RGWDeleteMultiObj_ObjStore_S3::end_response()
 {
-
   s->formatter->close_section();
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
@@ -4605,6 +4597,9 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_get()
   }
 
   if (s->info.args.exists("mdsearch")) {
+    if (!s->cct->_conf->rgw_enable_mdsearch) {
+      return NULL;
+    }
     return new RGWGetBucketMetaSearch_ObjStore_S3;
   }
 
@@ -4727,6 +4722,9 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_delete()
   }
 
   if (s->info.args.exists("mdsearch")) {
+    if (!s->cct->_conf->rgw_enable_mdsearch) {
+      return NULL;
+    }
     return new RGWDelBucketMetaSearch_ObjStore_S3;
   }
 
@@ -4740,6 +4738,9 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_post()
   }
 
   if (s->info.args.exists("mdsearch")) {
+    if (!s->cct->_conf->rgw_enable_mdsearch) {
+      return NULL;
+    }
     return new RGWConfigBucketMetaSearch_ObjStore_S3;
   }
 
@@ -4918,13 +4919,12 @@ int RGWHandler_REST_S3::postauth_init(optional_yield y)
 {
   struct req_init_state *t = &s->init_state;
 
-  int ret = rgw_parse_url_bucket(t->url_bucket, s->user->get_tenant(),
+  const std::string& auth_tenant = s->auth.identity->get_tenant();
+
+  int ret = rgw_parse_url_bucket(t->url_bucket, auth_tenant,
                                  s->bucket_tenant, s->bucket_name);
   if (ret) {
     return ret;
-  }
-  if (s->auth.identity->get_identity_type() == TYPE_ROLE) {
-    s->bucket_tenant = s->auth.identity->get_role_tenant();
   }
 
   ldpp_dout(s, 10) << "s->object=" << s->object
@@ -4940,12 +4940,6 @@ int RGWHandler_REST_S3::postauth_init(optional_yield y)
   }
 
   if (!t->src_bucket.empty()) {
-    string auth_tenant;
-    if (s->auth.identity->get_identity_type() == TYPE_ROLE) {
-      auth_tenant = s->auth.identity->get_role_tenant();
-    } else {
-      auth_tenant = s->user->get_tenant();
-    }
     ret = rgw_parse_url_bucket(t->src_bucket, auth_tenant,
                                s->src_tenant_name, s->src_bucket_name);
     if (ret) {
@@ -5087,13 +5081,7 @@ int RGW_Auth_S3::authorize(const DoutPrefixProvider *dpp,
     return -EPERM;
   }
 
-  const auto ret = rgw::auth::Strategy::apply(dpp, auth_registry.get_s3_main(), s, y);
-  if (ret == 0) {
-    /* Populate the owner info. */
-    s->owner.id = s->user->get_id();
-    s->owner.display_name = s->user->get_display_name();
-  }
-  return ret;
+  return rgw::auth::Strategy::apply(dpp, auth_registry.get_s3_main(), s, y);
 }
 
 int RGWHandler_Auth_S3::init(rgw::sal::Driver* driver, req_state *state,
@@ -5190,8 +5178,6 @@ void update_attribute_map(const std::string& input, AttributeMap& map) {
 void parse_post_action(const std::string& post_body, req_state* s)
 {
   if (post_body.size() > 0) {
-    ldpp_dout(s, 10) << "Content of POST: " << post_body << dendl;
-
     if (post_body.find("Action") != string::npos) {
       const boost::char_separator<char> sep("&");
       const boost::tokenizer<boost::char_separator<char>> tokens(post_body, sep);
@@ -5300,14 +5286,10 @@ bool RGWHandler_REST_S3Website::web_dir() const {
 
   obj->set_atomic();
 
-  RGWObjState* state = nullptr;
-  if (obj->get_obj_state(s, &state, s->yield) < 0) {
+  if (obj->load_obj_state(s, s->yield) < 0) {
     return false;
   }
-  if (! state->exists) {
-    return false;
-  }
-  return state->exists;
+  return obj->exists();
 }
 
 int RGWHandler_REST_S3Website::init(rgw::sal::Driver* driver, req_state *s,
@@ -6307,6 +6289,14 @@ rgw::auth::s3::LocalEngine::authenticate(
     }
   }*/
 
+  std::optional<RGWAccountInfo> account;
+  std::vector<IAM::Policy> policies;
+  int ret = load_account_and_policies(dpp, y, driver, user->get_info(),
+                                      user->get_attrs(), account, policies);
+  if (ret < 0) {
+    return result_t::deny(-EPERM);
+  }
+
   const auto iter = user->get_info().access_keys.find(access_key_id);
   if (iter == std::end(user->get_info().access_keys)) {
     ldpp_dout(dpp, 0) << "ERROR: access key not encoded in user info" << dendl;
@@ -6316,8 +6306,9 @@ rgw::auth::s3::LocalEngine::authenticate(
 
   /* Ignore signature for HTTP OPTIONS */
   if (s->op_type == RGW_OP_OPTIONS_CORS) {
-    auto apl = apl_factory->create_apl_local(cct, s, user->get_info(),
-                                             k.subuser, std::nullopt, access_key_id);
+    auto apl = apl_factory->create_apl_local(
+        cct, s, user->get_info(), std::move(account), std::move(policies),
+        k.subuser, std::nullopt, access_key_id);
     return result_t::grant(std::move(apl), completer_factory(k.key));
   }
 
@@ -6336,8 +6327,9 @@ rgw::auth::s3::LocalEngine::authenticate(
     return result_t::reject(-ERR_SIGNATURE_NO_MATCH);
   }
 
-  auto apl = apl_factory->create_apl_local(cct, s, user->get_info(),
-                                           k.subuser, std::nullopt, access_key_id);
+  auto apl = apl_factory->create_apl_local(
+      cct, s, user->get_info(), std::move(account), std::move(policies),
+      k.subuser, std::nullopt, access_key_id);
   return result_t::grant(std::move(apl), completer_factory(k.key));
 }
 
@@ -6471,7 +6463,6 @@ rgw::auth::s3::STSEngine::authenticate(
   }
 
   // Get all the authorization info
-  std::unique_ptr<rgw::sal::User> user;
   rgw_user user_id;
   string role_id;
   rgw::auth::RoleApplier::Role r;
@@ -6483,24 +6474,29 @@ rgw::auth::s3::STSEngine::authenticate(
     }
     r.id = token.roleId;
     r.name = role->get_name();
+    r.path = role->get_path();
     r.tenant = role->get_tenant();
 
-    vector<string> role_policy_names = role->get_role_policy_names();
-    for (auto& policy_name : role_policy_names) {
-      string perm_policy;
-      if (int ret = role->get_role_policy(dpp, policy_name, perm_policy); ret == 0) {
-        r.role_policies.push_back(std::move(perm_policy));
+    const auto& account_id = role->get_account_id();
+    if (!account_id.empty()) {
+      r.account.emplace();
+      rgw::sal::Attrs attrs; // ignored
+      RGWObjVersionTracker objv; // ignored
+      int ret = driver->load_account_by_id(dpp, y, account_id,
+                                           *r.account, attrs, objv);
+      if (ret < 0) {
+        ldpp_dout(dpp, 1) << "ERROR: failed to load account "
+            << account_id << " for role " << r.name
+            << ": " << cpp_strerror(ret) << dendl;
+        return result_t::deny(-EPERM);
       }
     }
-  }
 
-  user = driver->get_user(token.user);
-  if (! token.user.empty() && token.acct_type != TYPE_ROLE) {
-    // get user info
-    int ret = user->load_user(dpp, y);
-    if (ret < 0) {
-      ldpp_dout(dpp, 5) << "ERROR: failed reading user info: uid=" << token.user << dendl;
-      return result_t::reject(-EPERM);
+    for (auto& [name, policy] : role->get_info().perm_policy_map) {
+      r.inline_policies.push_back(std::move(policy));
+    }
+    for (auto& arn : role->get_info().managed_policies.arns) {
+      r.managed_policies.push_back(std::move(arn));
     }
   }
 
@@ -6515,11 +6511,34 @@ rgw::auth::s3::STSEngine::authenticate(
     t_attrs.token_claims = std::move(token.token_claims);
     t_attrs.token_issued_at = std::move(token.issued_at);
     t_attrs.principal_tags = std::move(token.principal_tags);
-    auto apl = role_apl_factory->create_apl_role(cct, s, r, t_attrs);
+    auto apl = role_apl_factory->create_apl_role(cct, s, std::move(r),
+                                                 std::move(t_attrs));
     return result_t::grant(std::move(apl), completer_factory(token.secret_access_key));
-  } else { // This is for all local users of type TYPE_RGW or TYPE_NONE
+  } else { // This is for all local users of type TYPE_RGW|ROOT|NONE
+    if (token.user.empty()) {
+      ldpp_dout(dpp, 5) << "ERROR: got session token with empty user id" << dendl;
+      return result_t::reject(-EPERM);
+    }
+    // load user info
+    auto user = driver->get_user(token.user);
+    int ret = user->load_user(dpp, y);
+    if (ret < 0) {
+      ldpp_dout(dpp, 5) << "ERROR: failed reading user info: uid=" << token.user << dendl;
+      return result_t::reject(-EPERM);
+    }
+
+    std::optional<RGWAccountInfo> account;
+    std::vector<IAM::Policy> policies;
+    ret = load_account_and_policies(dpp, y, driver, user->get_info(),
+                                    user->get_attrs(), account, policies);
+    if (ret < 0) {
+      return result_t::deny(-EPERM);
+    }
+
     string subuser;
-    auto apl = local_apl_factory->create_apl_local(cct, s, user->get_info(), subuser, token.perm_mask, std::string(_access_key_id));
+    auto apl = local_apl_factory->create_apl_local(
+        cct, s, user->get_info(), std::move(account), std::move(policies),
+        subuser, token.perm_mask, std::string(_access_key_id));
     return result_t::grant(std::move(apl), completer_factory(token.secret_access_key));
   }
 }

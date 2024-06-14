@@ -6,6 +6,12 @@ roles:
   - mon.a
   - mgr.a
   - client.0
+overrides:
+  ceph:
+    log-ignorelist:
+      - CEPHADM_PAUSED
+    log-only-match:
+      - CEPHADM_
 tasks:
 - install:
 - cephadm:

@@ -26,6 +26,7 @@
 #include "MDLog.h"
 #include "Locker.h"
 #include "Mutation.h"
+#include "MDBalancer.h"
 
 #include "events/EUpdate.h"
 
@@ -328,6 +329,7 @@ CInode::CInode(MDCache *c, bool auth, snapid_t f, snapid_t l) :
     item_dirty_dirfrag_dir(this),
     item_dirty_dirfrag_nest(this),
     item_dirty_dirfrag_dirfragtree(this),
+    item_to_flush(this),
     pop(c->decayrate),
     quiescelock(this, &quiescelock_type),
     versionlock(this, &versionlock_type),
@@ -972,11 +974,25 @@ CInode *CInode::get_parent_inode()
   return NULL;
 }
 
-bool CInode::is_ancestor_of(const CInode *other) const
+bool CInode::is_ancestor_of(const CInode *other, std::unordered_map<CInode const*,bool>* visited) const
 {
+  std::vector<CInode const*> my_visited = {};
   while (other) {
-    if (other == this)
+    if (visited && other->is_dir()) {
+      if (auto it = visited->find(other); it != visited->end()) {
+        for (auto& in : my_visited) {
+          (*visited)[in] = it->second;
+        }
+        return it->second;
+      }
+      my_visited.push_back(other);  /* N.B.: this being non-empty means visited is assumed non-null */
+    }
+    if (other == this) {
+      for (auto& in : my_visited) {
+        (*visited)[in] = true;
+      }
       return true;
+    }
     const CDentry *pdn = other->get_oldest_parent_dn();
     if (!pdn) {
       ceph_assert(other->is_base());
@@ -984,6 +1000,22 @@ bool CInode::is_ancestor_of(const CInode *other) const
     }
     other = pdn->get_dir()->get_inode();
   }
+  for (auto& in : my_visited) {
+    (*visited)[in] = false;
+  }
+  return false;
+}
+
+bool CInode::is_any_ancestor_inode_a_replica() {
+  CDentry *pdn = get_parent_dn();
+  while (pdn) {
+    CInode *diri = pdn->get_dir()->get_inode();
+    if (!diri->is_auth()) {
+      return true;
+    }
+    pdn = diri->get_parent_dn();
+  }
+
   return false;
 }
 
@@ -2126,7 +2158,7 @@ void CInode::decode_lock_iflock(bufferlist::const_iterator& p)
 
 void CInode::encode_lock_ipolicy(bufferlist& bl)
 {
-  ENCODE_START(2, 1, bl);
+  ENCODE_START(3, 1, bl);
   if (is_dir()) {
     encode(get_inode()->version, bl);
     encode(get_inode()->ctime, bl);
@@ -2135,6 +2167,8 @@ void CInode::encode_lock_ipolicy(bufferlist& bl)
     encode(get_inode()->export_pin, bl);
     encode(get_inode()->flags, bl);
     encode(get_inode()->export_ephemeral_random_pin, bl);
+  } else {
+    encode(get_inode()->flags, bl);
   }
   ENCODE_FINISH(bl);
 }
@@ -2143,7 +2177,7 @@ void CInode::decode_lock_ipolicy(bufferlist::const_iterator& p)
 {
   ceph_assert(!is_auth());
   auto _inode = allocate_inode(*get_inode());
-  DECODE_START(1, p);
+  DECODE_START(3, p);
   if (is_dir()) {
     decode(_inode->version, p);
     utime_t tm;
@@ -2156,6 +2190,10 @@ void CInode::decode_lock_ipolicy(bufferlist::const_iterator& p)
     if (struct_v >= 2) {
       decode(_inode->flags, p);
       decode(_inode->export_ephemeral_random_pin, p);
+    }
+  } else {
+    if (struct_v >= 3) {
+      decode(_inode->flags, p);
     }
   }
   DECODE_FINISH(p);
@@ -2946,18 +2984,11 @@ void CInode::clear_ambiguous_auth()
 }
 
 // auth_pins
-bool CInode::can_auth_pin(int *err_ret, bool bypassfreezing) const {
+bool CInode::can_auth_pin(int *err_ret) const {
   int err;
   if (!is_auth()) {
     err = ERR_NOT_AUTH;
-  } else if (is_freezing_inode()) {
-    if (bypassfreezing) {
-      dout(20) << "allowing authpin with freezing" << dendl;
-      err = 0;
-    } else {
-      err = ERR_EXPORTING_INODE;
-    }
-  } else if (is_frozen_inode() || is_frozen_auth_pin()) {
+  } else if (is_freezing_inode() || is_frozen_inode() || is_frozen_auth_pin()) {
     err = ERR_EXPORTING_INODE;
   } else {
     if (parent)
@@ -3481,7 +3512,7 @@ void CInode::remove_client_cap(client_t client)
 
 void CInode::move_to_realm(SnapRealm *realm)
 {
-  dout(10) << __func__ << " joining realm " << *realm
+  dout(20) << __func__ << " joining realm " << *realm
 	   << ", leaving realm " << *containing_realm << dendl;
   for (auto& p : client_caps) {
     containing_realm->remove_cap(p.first, &p.second);
@@ -4818,7 +4849,11 @@ void CInode::validate_disk_state(CInode::validated_data *results,
           dout(20) << "divergent backtraces are acceptable when dn "
                       "is being purged or has been renamed or moved to a "
                       "different directory " << *in << dendl;
-        }
+        } else if (in->is_any_ancestor_inode_a_replica()) {
+          results->backtrace.passed = true;
+          dout(20) << "divergent backtraces are acceptable when some "
+	              "ancestor inodes are replicas " << *in << dendl;
+	}
       } else {
         results->backtrace.passed = true;
       }
@@ -5350,7 +5385,8 @@ void CInode::queue_export_pin(mds_rank_t export_pin)
 
 void CInode::maybe_export_pin(bool update)
 {
-  if (!g_conf()->mds_bal_export_pin)
+  auto&& balancer = mdcache->mds->balancer;
+  if (!balancer->get_bal_export_pin())
     return;
   if (!is_dir() || !is_normal())
     return;
@@ -5465,7 +5501,9 @@ void CInode::set_export_pin(mds_rank_t rank)
 
 mds_rank_t CInode::get_export_pin(bool inherit) const
 {
-  if (!g_conf()->mds_bal_export_pin)
+  auto&& balancer = mdcache->mds->balancer;
+  auto export_pin = balancer->get_bal_export_pin();
+  if (!export_pin)
     return MDS_RANK_NONE;
 
   /* An inode that is export pinned may not necessarily be a subtree root, we
@@ -5579,6 +5617,25 @@ void CInode::get_subtree_dirfrags(std::vector<CDir*>& v) const
     if (dir->is_subtree_root())
       v.push_back(dir);
   }
+}
+
+bool CInode::is_quiesced() const { 
+  if (!quiescelock.is_xlocked()) {
+    return false;
+  }
+  // check that it's the quiesce op that's holding the lock
+  auto mut = quiescelock.get_xlock_by();
+  ceph_assert(mut); /* that would be weird */
+  auto* mdr = dynamic_cast<MDRequestImpl*>(mut.get());
+  ceph_assert(mdr); /* also would be weird */
+  return mdr->internal_op == CEPH_MDS_OP_QUIESCE_INODE;
+}
+
+bool CInode::will_block_for_quiesce(const MDRequestRef& mdr) {
+  if (mdr && mdr->is_wrlocked(&quiescelock)) {
+    return false;
+  }
+  return !quiescelock.can_wrlock();
 }
 
 MEMPOOL_DEFINE_OBJECT_FACTORY(CInode, co_inode, mds_co);

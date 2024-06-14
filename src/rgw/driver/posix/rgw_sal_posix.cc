@@ -36,17 +36,6 @@ const std::string mp_ns = "multipart";
 const std::string MP_OBJ_PART_PFX = "part-";
 const std::string MP_OBJ_HEAD_NAME = MP_OBJ_PART_PFX + "00000";
 
-static inline bool get_attr(Attrs& attrs, const char* name, bufferlist& bl)
-{
-  auto iter = attrs.find(name);
-  if (iter == attrs.end()) {
-    return false;
-  }
-
-  bl = iter->second;
-  return true;
-}
-
 static inline rgw_obj_key decode_obj_key(const char* fname)
 {
   std::string dname, oname, ns;
@@ -373,7 +362,7 @@ std::string POSIXDriver::zone_unique_trans_id(const uint64_t unique_num)
 std::unique_ptr<Writer> POSIXDriver::get_append_writer(const DoutPrefixProvider *dpp,
 				  optional_yield y,
 				  rgw::sal::Object* _head_obj,
-				  const rgw_user& owner,
+				  const ACLOwner& owner,
 				  const rgw_placement_rule *ptail_placement_rule,
 				  const std::string& unique_tag,
 				  uint64_t position,
@@ -390,7 +379,7 @@ std::unique_ptr<Writer> POSIXDriver::get_append_writer(const DoutPrefixProvider 
 std::unique_ptr<Writer> POSIXDriver::get_atomic_writer(const DoutPrefixProvider *dpp,
 				  optional_yield y,
 				  rgw::sal::Object* _head_obj,
-				  const rgw_user& owner,
+				  const ACLOwner& owner,
 				  const rgw_placement_rule *ptail_placement_rule,
 				  uint64_t olh_epoch,
 				  const std::string& unique_tag)
@@ -444,7 +433,8 @@ int POSIXDriver::close()
 }
 
 // TODO: marker and other params
-int POSIXUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& marker,
+int POSIXDriver::list_buckets(const DoutPrefixProvider* dpp, const rgw_owner& owner,
+			     const std::string& tenant, const std::string& marker,
 			     const std::string& end_marker, uint64_t max,
 			     bool need_stats, BucketList &result, optional_yield y)
 {
@@ -457,7 +447,7 @@ int POSIXUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& ma
 
   /* it's not sufficient to dup(root_fd), as as the new fd would share
    * the file position of root_fd */
-  dfd = copy_dir_fd(driver->get_root_fd());
+  dfd = copy_dir_fd(get_root_fd());
   if (dfd == -1) {
     ret = errno;
     ldpp_dout(dpp, 0) << "ERROR: could not open root to list buckets: "
@@ -470,7 +460,7 @@ int POSIXUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& ma
     ret = errno;
     ldpp_dout(dpp, 0) << "ERROR: could not open root to list buckets: "
       << cpp_strerror(ret) << dendl;
-    close(dfd);
+    ::close(dfd);
     return -ret;
   }
 
@@ -486,7 +476,7 @@ int POSIXUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& ma
   while ((entry = readdir(dir)) != NULL) {
     struct statx stx;
 
-    ret = statx(driver->get_root_fd(), entry->d_name, AT_SYMLINK_NOFOLLOW, STATX_ALL, &stx);
+    ret = statx(get_root_fd(), entry->d_name, AT_SYMLINK_NOFOLLOW, STATX_ALL, &stx);
     if (ret < 0) {
       ret = errno;
       ldpp_dout(dpp, 0) << "ERROR: could not stat object " << entry->d_name << ": "
@@ -516,7 +506,7 @@ int POSIXUser::list_buckets(const DoutPrefixProvider* dpp, const std::string& ma
   }
   ret = errno;
   if (ret != 0) {
-    ldpp_dout(dpp, 0) << "ERROR: could not list buckets for " << get_display_name() << ": "
+    ldpp_dout(dpp, 0) << "ERROR: could not list buckets for " << owner << ": "
       << cpp_strerror(ret) << dendl;
     return -ret;
   }
@@ -607,7 +597,7 @@ int POSIXObject::fill_bde(const DoutPrefixProvider *dpp, optional_yield y, rgw_b
     bde.ver.epoch = 1;
     bde.exists = true;
     bde.meta.category = RGWObjCategory::Main;
-    bde.meta.size = get_obj_size();
+    bde.meta.size = get_size();
     bde.meta.mtime = get_mtime();
     if (owner) {
       bde.meta.owner = owner->get_id().to_str();
@@ -616,11 +606,11 @@ int POSIXObject::fill_bde(const DoutPrefixProvider *dpp, optional_yield y, rgw_b
       bde.meta.owner = "unknown";
       bde.meta.owner_display_name = "unknown";
     }
-    bde.meta.accounted_size = get_obj_size();
+    bde.meta.accounted_size = get_size();
     bde.meta.storage_class = RGW_STORAGE_CLASS_STANDARD;
     bde.meta.appendable = true;
     bufferlist etag_bl;
-    if (rgw::sal::get_attr(get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
+    if (get_attr(RGW_ATTR_ETAG, etag_bl)) {
       bde.meta.etag = etag_bl.to_str();
     }
 
@@ -642,7 +632,7 @@ int POSIXDriver::mint_listing_entry(const std::string &bname,
     obj = b->get_object(decode_obj_key(bde.key.name.c_str()));
     pobj = static_cast<POSIXObject *>(obj.get());
 
-    if (!pobj->exists(nullptr)) {
+    if (!pobj->check_exists(nullptr)) {
       ret = errno;
       return -ret;
     }
@@ -673,7 +663,7 @@ int POSIXBucket::fill_cache(const DoutPrefixProvider* dpp, optional_yield y,
     obj = get_object(decode_obj_key(name));
     pobj = static_cast<POSIXObject*>(obj.get());
 
-    if (!pobj->exists(dpp)) {
+    if (!pobj->check_exists(dpp)) {
       ret = errno;
       ldpp_dout(dpp, 0) << "ERROR: could not stat object " << name << ": "
 	<< cpp_strerror(ret) << dendl;
@@ -891,11 +881,11 @@ int POSIXBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
   }
   get_x_attrs(y, dpp, dir_fd, attrs, get_name());
 
-  bufferlist bl;
-  if (get_attr(attrs, RGW_POSIX_ATTR_BUCKET_INFO, bl)) {
+  auto iter = attrs.find(RGW_POSIX_ATTR_BUCKET_INFO);
+  if (iter != attrs.end()) {
     // Proper bucket with saved info
     try {
-      auto bufit = bl.cbegin();
+      auto bufit = iter->second.cbegin();
       decode(info, bufit);
     } catch (buffer::error &err) {
       ldout(driver->ctx(), 0) << "ERROR: " << __func__ << ": failed to decode " RGW_POSIX_ATTR_BUCKET_INFO " attr" << dendl;
@@ -967,8 +957,8 @@ int POSIXBucket::read_stats_async(const DoutPrefixProvider *dpp,
   return 0;
 }
 
-int POSIXBucket::sync_user_stats(const DoutPrefixProvider *dpp, optional_yield y,
-                                 RGWBucketEnt* ent)
+int POSIXBucket::sync_owner_stats(const DoutPrefixProvider *dpp, optional_yield y,
+                                  RGWBucketEnt* ent)
 {
   return 0;
 }
@@ -979,7 +969,7 @@ int POSIXBucket::check_bucket_shards(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int POSIXBucket::chown(const DoutPrefixProvider* dpp, const rgw_user& new_owner, optional_yield y)
+int POSIXBucket::chown(const DoutPrefixProvider* dpp, const rgw_owner& new_owner, optional_yield y)
 {
   /* TODO map user to UID/GID, and change it */
   return 0;
@@ -1282,7 +1272,7 @@ int POSIXBucket::rename(const DoutPrefixProvider* dpp, optional_yield y, Object*
   std::string dst_fname = to->get_fname();
   int flags = 0;
 
-  if (to->exists(dpp)) {
+  if (to->check_exists(dpp)) {
     flags = RENAME_EXCHANGE;
   }
   // swap
@@ -1403,7 +1393,7 @@ int POSIXBucket::copy(const DoutPrefixProvider *dpp, optional_yield y,
 
     sobj = this->get_object(decode_obj_key(name));
     sop = static_cast<POSIXObject*>(sobj.get());
-    if (!sop->exists(dpp)) {
+    if (!sop->check_exists(dpp)) {
       ret = errno;
       ldpp_dout(dpp, 0) << "ERROR: could not stat object " << name << ": "
 	<< cpp_strerror(ret) << dendl;
@@ -1487,7 +1477,8 @@ int POSIXObject::delete_object(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-int POSIXObject::copy_object(User* user,
+int POSIXObject::copy_object(const ACLOwner& owner,
+                              const rgw_user& remote_user,
                               req_info* info,
                               const rgw_zone_id& source_zone,
                               rgw::sal::Object* dest_object,
@@ -1527,7 +1518,7 @@ int POSIXObject::copy_object(User* user,
   }
 
   // Source must exist, and we need to know if it's a shadow obj
-  if (!exists(dpp)) {
+  if (!check_exists(dpp)) {
     ret = errno;
     ldpp_dout(dpp, 0) << "ERROR: could not stat object " << get_name() << ": "
                       << cpp_strerror(ret) << dendl;
@@ -1541,13 +1532,12 @@ int POSIXObject::copy_object(User* user,
   }
 }
 
-int POSIXObject::get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **pstate, optional_yield y, bool follow_olh)
+int POSIXObject::load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh)
 {
   int ret = stat(dpp);
   if (ret < 0) {
     return ret;
   }
-  *pstate = &state;
 
   return 0;
 }
@@ -1616,7 +1606,7 @@ int POSIXObject::delete_obj_attrs(const DoutPrefixProvider* dpp, const char* att
 bool POSIXObject::is_expired()
 {
   bufferlist bl;
-  if (get_attr(state.attrset, RGW_ATTR_DELETE_AT, bl)) {
+  if (get_attr(RGW_ATTR_DELETE_AT, bl)) {
     utime_t delete_at;
     try {
       auto bufit = bl.cbegin();
@@ -1650,7 +1640,7 @@ std::unique_ptr<MPSerializer> POSIXObject::get_serializer(const DoutPrefixProvid
 
 int MPPOSIXSerializer::try_lock(const DoutPrefixProvider *dpp, utime_t dur, optional_yield y)
 {
-  if (!obj->exists(dpp)) {
+  if (!obj->check_exists(dpp)) {
     return -ENOENT;
   }
 
@@ -1690,14 +1680,14 @@ int POSIXObject::dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y
     return 0;
 }
 
-int POSIXObject::swift_versioning_restore(bool& restored,
+int POSIXObject::swift_versioning_restore(const ACLOwner& owner, const rgw_user& remote_user, bool& restored,
 				       const DoutPrefixProvider* dpp, optional_yield y)
 {
   return 0;
 }
 
-int POSIXObject::swift_versioning_copy(const DoutPrefixProvider* dpp,
-				    optional_yield y)
+int POSIXObject::swift_versioning_copy(const ACLOwner& owner, const rgw_user& remote_user,
+				    const DoutPrefixProvider* dpp, optional_yield y)
 {
   return 0;
 }
@@ -1820,7 +1810,7 @@ int POSIXObject::get_owner(const DoutPrefixProvider *dpp, optional_yield y, std:
 {
   bufferlist bl;
   rgw_user u;
-  if (!rgw::sal::get_attr(get_attrs(), RGW_POSIX_ATTR_OWNER, bl)) {
+  if (!get_attr(RGW_POSIX_ATTR_OWNER, bl)) {
     ldpp_dout(dpp, 0) << "ERROR: " << __func__
         << ": No " RGW_POSIX_ATTR_OWNER " attr" << dendl;
     return -EINVAL;
@@ -2084,7 +2074,7 @@ int POSIXObject::POSIXReadOp::prepare(optional_yield y, const DoutPrefixProvider
     return ret;
 
   bufferlist etag_bl;
-  if (!rgw::sal::get_attr(source->get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
+  if (!source->get_attr(RGW_ATTR_ETAG, etag_bl)) {
     /* Sideloaded file.  Generate necessary attributes. Only done once. */
     int ret = source->generate_attrs(dpp, y);
     if (ret < 0) {
@@ -2093,7 +2083,7 @@ int POSIXObject::POSIXReadOp::prepare(optional_yield y, const DoutPrefixProvider
     }
   }
 
-  if (!rgw::sal::get_attr(source->get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
+  if (!source->get_attr(RGW_ATTR_ETAG, etag_bl)) {
     return -EINVAL;
   }
 
@@ -2185,7 +2175,7 @@ int POSIXObject::generate_attrs(const DoutPrefixProvider* dpp, optional_yield y)
 
 int POSIXObject::generate_mp_etag(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  int64_t count = 0;
+  int32_t count = 0;
   char etag_buf[CEPH_CRYPTO_MD5_DIGESTSIZE];
   char final_etag_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16];
   std::string etag;
@@ -2220,13 +2210,13 @@ int POSIXObject::generate_mp_etag(const DoutPrefixProvider* dpp, optional_yield 
 	return ret;
       }
       bufferlist etag_bl;
-      if (!get_attr(shadow_obj->get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
+      if (!shadow_obj->get_attr(RGW_ATTR_ETAG, etag_bl)) {
 	// Generate part's etag
 	ret = shadow_obj->generate_etag(dpp, y);
 	if (ret < 0)
 	  return ret;
       }
-      if (!get_attr(shadow_obj->get_attrs(), RGW_ATTR_ETAG, etag_bl)) {
+      if (!shadow_obj->get_attr(RGW_ATTR_ETAG, etag_bl)) {
 	// Can't get etag.
 	return -EINVAL;
       }
@@ -2241,7 +2231,7 @@ int POSIXObject::generate_mp_etag(const DoutPrefixProvider* dpp, optional_yield 
   buf_to_hex((unsigned char *)etag_buf, sizeof(etag_buf), final_etag_str);
   snprintf(&final_etag_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2],
 	   sizeof(final_etag_str) - CEPH_CRYPTO_MD5_DIGESTSIZE * 2,
-           "-%lld", (long long)count);
+           "-%" PRId32, count);
   etag = final_etag_str;
   ldpp_dout(dpp, 10) << "calculated etag: " << etag << dendl;
 
@@ -2254,7 +2244,7 @@ int POSIXObject::generate_mp_etag(const DoutPrefixProvider* dpp, optional_yield 
 
 int POSIXObject::generate_etag(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  int64_t left = get_obj_size();
+  int64_t left = get_size();
   int64_t cur_ofs = 0;
   MD5 hash;
   // Allow use of MD5 digest in FIPS mode for non-cryptographic purposes
@@ -2357,13 +2347,13 @@ int POSIXObject::POSIXReadOp::iterate(const DoutPrefixProvider* dpp, int64_t ofs
 
 int POSIXObject::POSIXReadOp::get_attr(const DoutPrefixProvider* dpp, const char* name, bufferlist& dest, optional_yield y)
 {
-  if (!source->exists(dpp)) {
+  if (!source->check_exists(dpp)) {
     return -ENOENT;
   }
   if (source->get_obj_attrs(y, dpp) < 0) {
     return -ENODATA;
   }
-  if (!rgw::sal::get_attr(source->get_attrs(), name, dest)) {
+  if (!source->get_attr(name, dest)) {
     return -ENODATA;
   }
 
@@ -2449,9 +2439,8 @@ int POSIXMultipartPart::load(const DoutPrefixProvider* dpp, optional_yield y,
 
   shadow = std::make_unique<POSIXObject>(driver, key, upload->get_shadow());
 
-  RGWObjState* pstate;
   // Stat the shadow object to get things like size
-  int ret = shadow->get_obj_state(dpp, &pstate, y);
+  int ret = shadow->load_obj_state(dpp, y);
   if (ret < 0) {
     return ret;
   }
@@ -2765,7 +2754,7 @@ int POSIXMultipartUpload::get_info(const DoutPrefixProvider *dpp, optional_yield
 	}
       }
       bufferlist bl;
-      if (!get_attr(meta_obj->get_attrs(), RGW_POSIX_ATTR_MPUPLOAD, bl)) {
+      if (!meta_obj->get_attr(RGW_POSIX_ATTR_MPUPLOAD, bl)) {
 	ldpp_dout(dpp, 0) << " ERROR: could not get meta object attrs for mp upload "
 	  << get_key() << dendl;
 	return ret;
@@ -2783,7 +2772,7 @@ std::unique_ptr<Writer> POSIXMultipartUpload::get_writer(
 				  const DoutPrefixProvider *dpp,
 				  optional_yield y,
 				  rgw::sal::Object* _head_obj,
-				  const rgw_user& owner,
+				  const ACLOwner& owner,
 				  const rgw_placement_rule *ptail_placement_rule,
 				  uint64_t part_num,
 				  const std::string& part_num_str)
@@ -2823,12 +2812,12 @@ int POSIXMultipartWriter::complete(size_t accounted_size, const std::string& eta
   if (if_match) {
     if (strcmp(if_match, "*") == 0) {
       // test the object is existing
-      if (!obj->exists(dpp)) {
+      if (!obj->check_exists(dpp)) {
         return -ERR_PRECONDITION_FAILED;
       }
     } else {
       bufferlist bl;
-      if (!get_attr(obj->get_attrs(), RGW_ATTR_ETAG, bl)) {
+      if (!obj->get_attr(RGW_ATTR_ETAG, bl)) {
         return -ERR_PRECONDITION_FAILED;
       }
       if (strncmp(if_match, bl.c_str(), bl.length()) != 0) {
@@ -2890,12 +2879,12 @@ int POSIXAtomicWriter::complete(size_t accounted_size, const std::string& etag,
   if (if_match) {
     if (strcmp(if_match, "*") == 0) {
       // test the object is existing
-      if (!obj.exists(dpp)) {
+      if (!obj.check_exists(dpp)) {
 	return -ERR_PRECONDITION_FAILED;
       }
     } else {
       bufferlist bl;
-      if (!get_attr(obj.get_attrs(), RGW_ATTR_ETAG, bl)) {
+      if (!obj.get_attr(RGW_ATTR_ETAG, bl)) {
         return -ERR_PRECONDITION_FAILED;
       }
       if (strncmp(if_match, bl.c_str(), bl.length()) != 0) {
@@ -2906,12 +2895,12 @@ int POSIXAtomicWriter::complete(size_t accounted_size, const std::string& etag,
   if (if_nomatch) {
     if (strcmp(if_nomatch, "*") == 0) {
       // test the object is not existing
-      if (obj.exists(dpp)) {
+      if (obj.check_exists(dpp)) {
 	return -ERR_PRECONDITION_FAILED;
       }
     } else {
       bufferlist bl;
-      if (!get_attr(obj.get_attrs(), RGW_ATTR_ETAG, bl)) {
+      if (!obj.get_attr(RGW_ATTR_ETAG, bl)) {
         return -ERR_PRECONDITION_FAILED;
       }
       if (strncmp(if_nomatch, bl.c_str(), bl.length()) == 0) {

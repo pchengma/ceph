@@ -515,8 +515,8 @@ int PyModule::load_notify_types()
 {
   PyObject *ls = PyObject_GetAttrString(pClass, "NOTIFY_TYPES");
   if (ls == nullptr) {
-    derr << "Module " << get_name() << " has missing NOTIFY_TYPES member" << dendl;
-    return -EINVAL;
+    dout(10) << "Module " << get_name() << " has no NOTIFY_TYPES member" << dendl;
+    return 0;
   }
   if (!PyObject_TypeCheck(ls, &PyList_Type)) {
     // Relatively easy mistake for human to make, e.g. defining COMMANDS
@@ -608,6 +608,13 @@ int PyModule::load_options()
       if (t >= 0) {
 	option.type = t;
       }
+    }
+    p = PyDict_GetItemString(pOption, "level");
+    if (p && PyLong_Check(p)) {
+      long v = PyLong_AsLong(p);
+      option.level = static_cast<Option::level_t>(v);
+    } else {
+      option.level = Option::level_t::LEVEL_ADVANCED;
     }
     p = PyDict_GetItemString(pOption, "desc");
     if (p && PyObject_TypeCheck(p, &PyUnicode_Type)) {

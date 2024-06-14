@@ -208,7 +208,10 @@ def normalize_hostnames(ctx):
 def download_cephadm(ctx, config, ref):
     cluster_name = config['cluster']
 
-    if config.get('cephadm_mode') != 'cephadm-package':
+    if 'cephadm_binary_url' in config:
+        url = config['cephadm_binary_url']
+        _download_cephadm(ctx, url)
+    elif config.get('cephadm_mode') != 'cephadm-package':
         if ctx.config.get('redhat'):
             _fetch_cephadm_from_rpm(ctx)
         # TODO: come up with a sensible way to detect if we need an "old, uncompiled"
@@ -316,28 +319,8 @@ def _fetch_cephadm_from_chachra(ctx, config, cluster_name):
             sha1=sha1,
     )
     log.info("Discovered cachra url: %s", url)
-    ctx.cluster.run(
-        args=[
-            'curl', '--silent', '-L', url,
-            run.Raw('>'),
-            ctx.cephadm,
-            run.Raw('&&'),
-            'ls', '-l',
-            ctx.cephadm,
-        ],
-    )
+    _download_cephadm(ctx, url)
 
-    # sanity-check the resulting file and set executable bit
-    cephadm_file_size = '$(stat -c%s {})'.format(ctx.cephadm)
-    ctx.cluster.run(
-        args=[
-            'test', '-s', ctx.cephadm,
-            run.Raw('&&'),
-            'test', run.Raw(cephadm_file_size), "-gt", run.Raw('1000'),
-            run.Raw('&&'),
-            'chmod', '+x', ctx.cephadm,
-        ],
-    )
 
 def _fetch_stable_branch_cephadm_from_chacra(ctx, config, cluster_name):
     branch = config.get('compiled_cephadm_branch', 'reef')
@@ -365,6 +348,11 @@ def _fetch_stable_branch_cephadm_from_chacra(ctx, config, cluster_name):
             branch=branch,
     )
     log.info("Discovered cachra url: %s", url)
+    _download_cephadm(ctx, url)
+
+
+def _download_cephadm(ctx, url):
+    log.info("Downloading cephadm from url: %s", url)
     ctx.cluster.run(
         args=[
             'curl', '--silent', '-L', url,
@@ -430,7 +418,7 @@ def ceph_log(ctx, config):
 
     finally:
         log.info('Checking cluster log for badness...')
-        def first_in_ceph_log(pattern, excludes):
+        def first_in_ceph_log(pattern, excludes, only_match):
             """
             Find the first occurrence of the pattern specified in the Ceph log,
             Returns None if none found.
@@ -445,6 +433,8 @@ def ceph_log(ctx, config):
                 '/var/log/ceph/{fsid}/ceph.log'.format(
                     fsid=fsid),
             ]
+            if only_match:
+                args.extend([run.Raw('|'), 'egrep', '|'.join(only_match)])
             if excludes:
                 for exclude in excludes:
                     args.extend([run.Raw('|'), 'egrep', '-v', exclude])
@@ -460,14 +450,22 @@ def ceph_log(ctx, config):
                 return stdout
             return None
 
+        # NOTE: technically the first and third arg to first_in_ceph_log
+        # are serving a similar purpose here of being something we
+        # look for in the logs. The reason they are separate args is that
+        # we want '\[ERR\]|\[WRN\]|\[SEC\]' to always have to be in the thing
+        # we match even if the test yaml specifies nothing else, and then the
+        # log-only-match options are for when a test only wants to fail on
+        # a specific subset of log lines that '\[ERR\]|\[WRN\]|\[SEC\]' matches
         if first_in_ceph_log('\[ERR\]|\[WRN\]|\[SEC\]',
-                             config.get('log-ignorelist')) is not None:
+                             config.get('log-ignorelist'),
+                             config.get('log-only-match')) is not None:
             log.warning('Found errors (ERR|WRN|SEC) in cluster log')
             ctx.summary['success'] = False
             # use the most severe problem as the failure reason
             if 'failure_reason' not in ctx.summary:
                 for pattern in ['\[SEC\]', '\[ERR\]', '\[WRN\]']:
-                    match = first_in_ceph_log(pattern, config['log-ignorelist'])
+                    match = first_in_ceph_log(pattern, config['log-ignorelist'], config.get('log-only-match'))
                     if match is not None:
                         ctx.summary['failure_reason'] = \
                             '"{match}" in cluster log'.format(
@@ -566,22 +564,31 @@ def ceph_crash(ctx, config):
 def pull_image(ctx, config):
     cluster_name = config['cluster']
     log.info(f'Pulling image {ctx.ceph[cluster_name].image} on all hosts...')
-    run.wait(
-        ctx.cluster.run(
-            args=[
-                'sudo',
-                ctx.cephadm,
-                '--image', ctx.ceph[cluster_name].image,
-                'pull',
-            ],
-            wait=False,
-        )
-    )
+    cmd = [
+        'sudo',
+        ctx.cephadm,
+        '--image',
+        ctx.ceph[cluster_name].image,
+        'pull',
+    ]
+    if config.get('registry-login'):
+        registry = config['registry-login']
+        login_cmd = [
+            'sudo',
+            ctx.cephadm,
+            'registry-login',
+            '--registry-url', registry['url'],
+            '--registry-username', registry['username'],
+            '--registry-password', registry['password'],
+        ]
+        cmd = login_cmd + [run.Raw('&&')] + cmd
+    run.wait(ctx.cluster.run(args=cmd, wait=False))
 
     try:
         yield
     finally:
         pass
+
 
 @contextlib.contextmanager
 def setup_ca_signed_keys(ctx, config):
@@ -1060,7 +1067,12 @@ def ceph_osds(ctx, config):
                 id_to_remote[int(id_)] = (osd, remote)
 
         cur = 0
+        raw = config.get('raw-osds', False)
         for osd_id in sorted(id_to_remote.keys()):
+            if raw:
+                raise ConfigError(
+                    "raw-osds is only supported without OSD roles"
+                )
             osd, remote = id_to_remote[osd_id]
             _, _, id_ = teuthology.split_role(osd)
             assert int(id_) == cur
@@ -1092,9 +1104,10 @@ def ceph_osds(ctx, config):
             cur += 1
 
         if cur == 0:
-            _shell(ctx, cluster_name, remote, [
-                'ceph', 'orch', 'apply', 'osd', '--all-available-devices',
-            ])
+            osd_cmd = ['ceph', 'orch', 'apply', 'osd', '--all-available-devices']
+            if raw:
+                osd_cmd.extend(['--method', 'raw'])
+            _shell(ctx, cluster_name, remote, osd_cmd)
             # expect the number of scratch devs
             num_osds = sum(map(len, devs_by_remote.values()))
             assert num_osds
@@ -1540,6 +1553,20 @@ def apply(ctx, config):
     )
 
 
+
+def _orch_ls(ctx, cluster_name):
+    r = _shell(
+        ctx=ctx,
+        cluster_name=cluster_name,
+        remote=ctx.ceph[cluster_name].bootstrap_remote,
+        args=[
+            'ceph', 'orch', 'ls', '-f', 'json',
+        ],
+        stdout=StringIO(),
+    )
+    return json.loads(r.stdout.getvalue())
+
+
 def wait_for_service(ctx, config):
     """
     Wait for a service to be fully started
@@ -1560,16 +1587,7 @@ def wait_for_service(ctx, config):
     )
     with contextutil.safe_while(sleep=1, tries=timeout) as proceed:
         while proceed():
-            r = _shell(
-                ctx=ctx,
-                cluster_name=cluster_name,
-                remote=ctx.ceph[cluster_name].bootstrap_remote,
-                args=[
-                    'ceph', 'orch', 'ls', '-f', 'json',
-                ],
-                stdout=StringIO(),
-            )
-            j = json.loads(r.stdout.getvalue())
+            j = _orch_ls(ctx, cluster_name)
             svc = None
             for s in j:
                 if s['service_name'] == service:
@@ -1581,6 +1599,28 @@ def wait_for_service(ctx, config):
                 )
                 if s['status']['running'] == s['status']['size']:
                     break
+
+
+def wait_for_service_not_present(ctx, config):
+    """Wait for a service to not be present.
+    Note that this doesn't ensure that the service was previously present.
+    """
+    cluster_name = config.get('cluster', 'ceph')
+    timeout = config.get('timeout', 120)
+    service = config.get('service')
+    assert service
+
+    log.info(
+        f'Waiting for {cluster_name} service {service} to be not present'
+        ' in service list'
+    )
+    with contextutil.safe_while(sleep=1, tries=timeout) as proceed:
+        while proceed():
+            j = _orch_ls(ctx, cluster_name)
+            services = {s['service_name'] for s in j}
+            log.debug('checking if %r in %r', service, services)
+            if service not in services:
+                break
 
 
 @contextlib.contextmanager
@@ -1706,6 +1746,63 @@ def crush_setup(ctx, config):
         args=['ceph', 'osd', 'crush', 'tunables', profile])
     yield
 
+
+@contextlib.contextmanager
+def module_setup(ctx, config):
+    cluster_name = config['cluster']
+    remote = ctx.ceph[cluster_name].bootstrap_remote
+
+    modules = config.get('mgr-modules', [])
+    for m in modules:
+        m = str(m)
+        cmd = [
+           'sudo',
+           'ceph',
+           '--cluster',
+           cluster_name,
+           'mgr',
+           'module',
+           'enable',
+           m,
+        ]
+        log.info("enabling module %s", m)
+        _shell(ctx, cluster_name, remote, args=cmd)
+    yield
+
+
+@contextlib.contextmanager
+def conf_setup(ctx, config):
+    cluster_name = config['cluster']
+    remote = ctx.ceph[cluster_name].bootstrap_remote
+
+    configs = config.get('cluster-conf', {})
+    procs = []
+    for section, confs in configs.items():
+        section = str(section)
+        for k, v in confs.items():
+            k = str(k).replace(' ', '_') # pre-pacific compatibility
+            v = str(v)
+            cmd = [
+                'ceph',
+                'config',
+                'set',
+                section,
+                k,
+                v,
+            ]
+            log.info("setting config [%s] %s = %s", section, k, v)
+            procs.append(_shell(ctx, cluster_name, remote, args=cmd, wait=False))
+    log.debug("set %d configs", len(procs))
+    for p in procs:
+        log.debug("waiting for %s", p)
+        p.wait()
+    yield
+
+@contextlib.contextmanager
+def conf_epoch(ctx, config):
+    cm = ctx.managers[config['cluster']]
+    cm.save_conf_epoch()
+    yield
 
 @contextlib.contextmanager
 def create_rbd_pool(ctx, config):
@@ -2209,7 +2306,9 @@ def task(ctx, config):
             lambda: crush_setup(ctx=ctx, config=config),
             lambda: ceph_mons(ctx=ctx, config=config),
             lambda: distribute_config_and_admin_keyring(ctx=ctx, config=config),
+            lambda: module_setup(ctx=ctx, config=config),
             lambda: ceph_mgrs(ctx=ctx, config=config),
+            lambda: conf_setup(ctx=ctx, config=config),
             lambda: ceph_osds(ctx=ctx, config=config),
             lambda: ceph_mdss(ctx=ctx, config=config),
             lambda: cephfs_setup(ctx=ctx, config=config),
@@ -2221,6 +2320,7 @@ def task(ctx, config):
             lambda: ceph_monitoring('grafana', ctx=ctx, config=config),
             lambda: ceph_clients(ctx=ctx, config=config),
             lambda: create_rbd_pool(ctx=ctx, config=config),
+            lambda: conf_epoch(ctx=ctx, config=config),
     ):
         try:
             if config.get('wait-for-healthy', True):

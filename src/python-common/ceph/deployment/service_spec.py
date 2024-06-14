@@ -1136,6 +1136,7 @@ class NFSServiceSpec(ServiceSpec):
                  networks: Optional[List[str]] = None,
                  port: Optional[int] = None,
                  virtual_ip: Optional[str] = None,
+                 enable_nlm: bool = False,
                  enable_haproxy_protocol: bool = False,
                  extra_container_args: Optional[GeneralArgList] = None,
                  extra_entrypoint_args: Optional[GeneralArgList] = None,
@@ -1153,6 +1154,7 @@ class NFSServiceSpec(ServiceSpec):
         self.virtual_ip = virtual_ip
         self.enable_haproxy_protocol = enable_haproxy_protocol
         self.idmap_conf = idmap_conf
+        self.enable_nlm = enable_nlm
 
     def get_port_start(self) -> List[int]:
         if self.port:
@@ -1315,13 +1317,16 @@ class NvmeofServiceSpec(ServiceSpec):
                  state_update_notify: Optional[bool] = True,
                  state_update_interval_sec: Optional[int] = 5,
                  enable_spdk_discovery_controller: Optional[bool] = False,
-                 omap_file_lock_duration: Optional[int] = 60,
-                 omap_file_lock_retries: Optional[int] = 15,
-                 omap_file_lock_retry_sleep_interval: Optional[int] = 5,
+                 omap_file_lock_duration: Optional[int] = 20,
+                 omap_file_lock_retries: Optional[int] = 30,
+                 omap_file_lock_retry_sleep_interval: Optional[float] = 1.0,
                  omap_file_update_reloads: Optional[int] = 10,
                  enable_prometheus_exporter: Optional[bool] = True,
                  bdevs_per_cluster: Optional[int] = 32,
                  verify_nqns: Optional[bool] = True,
+                 allowed_consecutive_spdk_ping_failures: Optional[int] = 1,
+                 spdk_ping_interval_in_seconds: Optional[float] = 2.0,
+                 ping_spdk_under_lock: Optional[bool] = False,
                  server_key: Optional[str] = None,
                  server_cert: Optional[str] = None,
                  client_key: Optional[str] = None,
@@ -1347,6 +1352,7 @@ class NvmeofServiceSpec(ServiceSpec):
                  max_log_directory_backups: Optional[int] = 10,
                  log_directory: Optional[str] = '/var/log/ceph/',
                  monitor_timeout: Optional[float] = 1.0,
+                 enable_monitor_client: bool = False,
                  placement: Optional[PlacementSpec] = None,
                  unmanaged: bool = False,
                  preview_only: bool = False,
@@ -1393,6 +1399,12 @@ class NvmeofServiceSpec(ServiceSpec):
         self.omap_file_lock_retry_sleep_interval = omap_file_lock_retry_sleep_interval
         #: ``omap_file_update_reloads`` number of attempt to reload OMAP when it differs from local
         self.omap_file_update_reloads = omap_file_update_reloads
+        #: ``allowed_consecutive_spdk_ping_failures`` # of ping failures before aborting gateway
+        self.allowed_consecutive_spdk_ping_failures = allowed_consecutive_spdk_ping_failures
+        #: ``spdk_ping_interval_in_seconds`` sleep interval in seconds between SPDK pings
+        self.spdk_ping_interval_in_seconds = spdk_ping_interval_in_seconds
+        #: ``ping_spdk_under_lock`` whether or not we should perform SPDK ping under the RPC lock
+        self.ping_spdk_under_lock = ping_spdk_under_lock
         #: ``bdevs_per_cluster`` number of bdevs per cluster
         self.bdevs_per_cluster = bdevs_per_cluster
         #: ``server_key`` gateway server key
@@ -1443,6 +1455,8 @@ class NvmeofServiceSpec(ServiceSpec):
         self.log_directory = log_directory or '/var/log/ceph/'
         #: ``monitor_timeout`` monitor connectivity timeout
         self.monitor_timeout = monitor_timeout
+        #: ``enable_monitor_client`` whether to connect to the ceph monitor or not
+        self.enable_monitor_client = enable_monitor_client
 
     def get_port_start(self) -> List[int]:
         return [5500, 4420, 8009]
@@ -1479,6 +1493,84 @@ class NvmeofServiceSpec(ServiceSpec):
                                            'notice', 'NOTICE']:
                 raise SpecValidationError(
                     'Invalid SPDK log level. Valid values are: DEBUG, INFO, WARNING, ERROR, NOTICE')
+
+        if (
+            self.spdk_ping_interval_in_seconds
+            and self.spdk_ping_interval_in_seconds < 1.0
+        ):
+            raise SpecValidationError("SPDK ping interval should be at least 1 second")
+
+        if (
+            self.allowed_consecutive_spdk_ping_failures
+            and self.allowed_consecutive_spdk_ping_failures < 1
+        ):
+            raise SpecValidationError("Allowed consecutive SPDK ping failures should be at least 1")
+
+        if (
+            self.state_update_interval_sec
+            and self.state_update_interval_sec < 0
+        ):
+            raise SpecValidationError("State update interval can't be negative")
+
+        if (
+            self.omap_file_lock_duration
+            and self.omap_file_lock_duration < 0
+        ):
+            raise SpecValidationError("OMAP file lock duration can't be negative")
+
+        if (
+            self.omap_file_lock_retries
+            and self.omap_file_lock_retries < 0
+        ):
+            raise SpecValidationError("OMAP file lock retries can't be negative")
+
+        if (
+            self.omap_file_update_reloads
+            and self.omap_file_update_reloads < 0
+        ):
+            raise SpecValidationError("OMAP file reloads can't be negative")
+
+        if (
+            self.spdk_timeout
+            and self.spdk_timeout < 0.0
+        ):
+            raise SpecValidationError("SPDK timeout can't be negative")
+
+        if (
+            self.conn_retries
+            and self.conn_retries < 0
+        ):
+            raise SpecValidationError("Connection retries can't be negative")
+
+        if (
+            self.max_log_file_size_in_mb
+            and self.max_log_file_size_in_mb < 0
+        ):
+            raise SpecValidationError("Log file size can't be negative")
+
+        if (
+            self.max_log_files_count
+            and self.max_log_files_count < 0
+        ):
+            raise SpecValidationError("Log files count can't be negative")
+
+        if (
+            self.max_log_directory_backups
+            and self.max_log_directory_backups < 0
+        ):
+            raise SpecValidationError("Log file directory backups can't be negative")
+
+        if (
+            self.monitor_timeout
+            and self.monitor_timeout < 0.0
+        ):
+            raise SpecValidationError("Monitor timeout can't be negative")
+
+        if self.port and self.port < 0:
+            raise SpecValidationError("Port can't be negative")
+
+        if self.discovery_port and self.discovery_port < 0:
+            raise SpecValidationError("Discovery port can't be negative")
 
 
 yaml.add_representer(NvmeofServiceSpec, ServiceSpec.yaml_representer)
@@ -1976,7 +2068,7 @@ class GrafanaSpec(MonitoringSpec):
                  port: Optional[int] = None,
                  protocol: Optional[str] = 'https',
                  initial_admin_password: Optional[str] = None,
-                 anonymous_access: Optional[bool] = True,
+                 anonymous_access: bool = True,
                  extra_container_args: Optional[GeneralArgList] = None,
                  extra_entrypoint_args: Optional[GeneralArgList] = None,
                  custom_configs: Optional[List[CustomConfig]] = None,
@@ -2010,6 +2102,24 @@ class GrafanaSpec(MonitoringSpec):
                        'must be set to true. Otherwise the grafana dashboard will '
                        'be inaccessible.')
             raise SpecValidationError(err_msg)
+
+    def to_json(self) -> "OrderedDict[str, Any]":
+        json_dict = super(GrafanaSpec, self).to_json()
+        if not self.anonymous_access:
+            # This field was added as a boolean that defaults
+            # to True, which makes it get dropped when the user
+            # sets it to False and it is converted to json. This means
+            # the in memory version of the spec will have the option set
+            # correctly, but the persistent version we store in the config-key
+            # store will always drop this option. It's already been backported to
+            # some release versions, or we'd probably just rename it to
+            # no_anonymous_access and default it to False. This block is to
+            # handle this option specially and in the future, we should avoid
+            # boolean fields that default to True.
+            if 'spec' not in json_dict:
+                json_dict['spec'] = {}
+            json_dict['spec']['anonymous_access'] = False
+        return json_dict
 
 
 yaml.add_representer(GrafanaSpec, ServiceSpec.yaml_representer)
@@ -2490,6 +2600,12 @@ class SMBSpec(ServiceSpec):
         # config-key store uri (example:
         # `rados:mon-config-key:smb/config/mycluster/join1.json`).
         join_sources: Optional[List[str]] = None,
+        # user_sources - a list of pseudo-uris that resolve to a (JSON) blob
+        # containing data the samba-container can use to create users (and/or
+        # groups). A ceph based samba container may typically use a rados uri
+        # or a mon config-key store uri (example:
+        # `rados:mon-config-key:smb/config/mycluster/join1.json`).
+        user_sources: Optional[List[str]] = None,
         # custom_dns -  a list of IP addresses that will be set up as custom
         # dns servers for the samba container.
         custom_dns: Optional[List[str]] = None,
@@ -2521,6 +2637,7 @@ class SMBSpec(ServiceSpec):
         self.features = features or []
         self.config_uri = config_uri
         self.join_sources = join_sources or []
+        self.user_sources = user_sources or []
         self.custom_dns = custom_dns or []
         self.include_ceph_users = include_ceph_users or []
         self.validate()

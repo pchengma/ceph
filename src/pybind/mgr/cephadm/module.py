@@ -120,9 +120,9 @@ os._exit = os_exit_noop   # type: ignore
 DEFAULT_IMAGE = 'quay.io/ceph/ceph'
 DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.43.0'
 DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v1.5.0'
-DEFAULT_NVMEOF_IMAGE = 'quay.io/ceph/nvmeof:1.0.0'
-DEFAULT_LOKI_IMAGE = 'docker.io/grafana/loki:2.4.0'
-DEFAULT_PROMTAIL_IMAGE = 'docker.io/grafana/promtail:2.4.0'
+DEFAULT_NVMEOF_IMAGE = 'quay.io/ceph/nvmeof:1.2.5'
+DEFAULT_LOKI_IMAGE = 'docker.io/grafana/loki:3.0.0'
+DEFAULT_PROMTAIL_IMAGE = 'docker.io/grafana/promtail:3.0.0'
 DEFAULT_ALERT_MANAGER_IMAGE = 'quay.io/prometheus/alertmanager:v0.25.0'
 DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/grafana:9.4.12'
 DEFAULT_HAPROXY_IMAGE = 'quay.io/ceph/haproxy:2.3'
@@ -729,6 +729,11 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         self.offline_watcher = OfflineHostWatcher(self)
         self.offline_watcher.start()
+
+        # Maps daemon names to timestamps (creation/removal time) for recently created or
+        # removed daemons. Daemons are added to the dict upon creation or removal and cleared
+        # as part of the handling of stray daemons
+        self.recently_altered_daemons: Dict[str, datetime.datetime] = {}
 
     def shutdown(self) -> None:
         self.log.debug('shutdown')
@@ -1521,7 +1526,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             output = to_format(self.keys.keys.values(), format, many=True, cls=ClientKeyringSpec)
         else:
             table = PrettyTable(
-                ['ENTITY', 'PLACEMENT', 'MODE', 'OWNER', 'PATH'],
+                ['ENTITY', 'PLACEMENT', 'MODE', 'OWNER', 'PATH', 'INCLUDE_CEPH_CONF'],
                 border=False)
             table.align = 'l'
             table.left_padding_width = 0
@@ -1532,6 +1537,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                     utils.file_mode_to_str(ks.mode),
                     f'{ks.uid}:{ks.gid}',
                     ks.path,
+                    ks.include_ceph_conf
                 ))
             output = table.get_string()
         return HandleCommandResult(stdout=output)
@@ -1543,6 +1549,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             placement: str,
             owner: Optional[str] = None,
             mode: Optional[str] = None,
+            no_ceph_conf: bool = False,
     ) -> HandleCommandResult:
         """
         Add or update client keyring under cephadm management
@@ -1565,7 +1572,14 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         else:
             imode = 0o600
         pspec = PlacementSpec.from_string(placement)
-        ks = ClientKeyringSpec(entity, pspec, mode=imode, uid=uid, gid=gid)
+        ks = ClientKeyringSpec(
+            entity,
+            pspec,
+            mode=imode,
+            uid=uid,
+            gid=gid,
+            include_ceph_conf=(not no_ceph_conf)
+        )
         self.keys.update(ks)
         self._kick_serve_loop()
         return HandleCommandResult()
@@ -1582,9 +1596,27 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self._kick_serve_loop()
         return HandleCommandResult()
 
-    def _get_container_image(self, daemon_name: str) -> Optional[str]:
+    def _get_container_image(self, daemon_name: str, use_current_daemon_image: bool = False) -> Optional[str]:
         daemon_type = daemon_name.split('.', 1)[0]  # type: ignore
         image: Optional[str] = None
+        # Try to use current image if specified. This is necessary
+        # because, if we're reconfiguring the daemon, we can
+        # run into issues during upgrade. For example if the default grafana
+        # image is changing and we pass the new image name when doing
+        # the reconfig, we could end up using the UID required by the
+        # new image as owner for the config files we write, while the
+        # unit.run will still reference the old image that requires those
+        # config files to be owned by a different UID
+        # Note that "current image" just means the one we picked up
+        # when we last ran "cephadm ls" on the host
+        if use_current_daemon_image:
+            try:
+                dd = self.cache.get_daemon(daemon_name=daemon_name)
+                if dd.container_image_name:
+                    return dd.container_image_name
+            except OrchestratorError:
+                self.log.debug(f'Could not find daemon {daemon_name} in cache '
+                               'while searching for its image')
         if daemon_type in CEPH_IMAGE_TYPES:
             # get container image
             image = str(self.get_foreign_ceph_option(
@@ -2232,11 +2264,17 @@ Then run the following:
             if service_name is not None and service_name != nm:
                 continue
 
-            if spec.service_type != 'osd':
-                size = spec.placement.get_target_count(self.cache.get_schedulable_hosts())
-            else:
+            if spec.service_type == 'osd':
                 # osd counting is special
                 size = 0
+            elif spec.service_type == 'node-proxy':
+                # we only deploy node-proxy daemons on hosts we have oob info for
+                # Let's make the expected daemon count `orch ls` displays reflect that
+                schedulable_hosts = self.cache.get_schedulable_hosts()
+                oob_info_hosts = [h for h in schedulable_hosts if h.hostname in self.node_proxy_cache.oob.keys()]
+                size = spec.placement.get_target_count(oob_info_hosts)
+            else:
+                size = spec.placement.get_target_count(self.cache.get_schedulable_hosts())
 
             sm[nm] = orchestrator.ServiceDescription(
                 spec=spec,
@@ -3021,6 +3059,14 @@ Then run the following:
         self.set_store(PrometheusService.USER_CFG_KEY, user)
         self.set_store(PrometheusService.PASS_CFG_KEY, password)
         return 'prometheus credentials updated correctly'
+
+    @handle_orch_error
+    def set_custom_prometheus_alerts(self, alerts_file: str) -> str:
+        self.set_store('services/prometheus/alerting/custom_alerts.yml', alerts_file)
+        # need to reconfig prometheus daemon(s) to pick up new alerts file
+        for prometheus_daemon in self.cache.get_daemons_by_type('prometheus'):
+            self._schedule_daemon_action(prometheus_daemon.name(), 'reconfig')
+        return 'Updated alerts file and scheduled reconfig of prometheus daemon(s)'
 
     @handle_orch_error
     def set_prometheus_target(self, url: str) -> str:

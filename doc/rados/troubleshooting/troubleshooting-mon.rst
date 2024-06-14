@@ -316,6 +316,12 @@ detail`` returns a message similar to the following::
 
 **What does it mean when a Monitor's state is ``leader`` or ``peon``?**
 
+  During normal Ceph operations when the cluster is in the ``HEALTH_OK`` state,
+  one monitor in the Ceph cluster is in the ``leader`` state and the rest of
+  the monitors are in the ``peon`` state. The state of a given monitor can be
+  determined by examining the value of the state key returned by the command
+  ``ceph tell <mon_name> mon_status``.
+
   If ``ceph health detail`` shows that the Monitor is in the ``leader`` state
   or in the ``peon`` state, it is likely that clock skew is present. Follow the
   instructions in `Clock Skews`_. If you have followed those instructions and
@@ -388,7 +394,11 @@ B. **Inject a monmap into the monitor.**
 
           In this example, the ID of the stopped Monitor is ``ID-FOO``.
 
-    #. Stop the Monitor into which the ``monmap`` will be injected. 
+    #. Stop the Monitor into which the ``monmap`` will be injected:
+
+       .. prompt:: bash 
+
+          service ceph -a stop mon.{mon-id}
 
     #. Inject the monmap into the stopped Monitor:
 
@@ -493,10 +503,10 @@ trying to connect to Ceph daemons. For example::
 
 It might also be necessary to add rules to iptables on your Ceph hosts to
 ensure that clients are able to access the TCP ports associated with your Ceph
-monitors (default: port 6789) and Ceph OSDs (default: 6800 through 7300). For
+monitors (default: port 6789) and Ceph OSDs (default: 6800 through 7568). For
 example::
 
-    iptables -A INPUT -m multiport -p tcp -s {ip-address}/{netmask} --dports 6789,6800:7300 -j ACCEPT
+    iptables -A INPUT -m multiport -p tcp -s {ip-address}/{netmask} --dports 6789,6800:7568 -j ACCEPT
 
 
 Monitor Store Failures

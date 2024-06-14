@@ -662,7 +662,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   bool is_file() const    { return get_inode()->is_file(); }
   bool is_symlink() const { return get_inode()->is_symlink(); }
   bool is_dir() const     { return get_inode()->is_dir(); }
-  bool is_quiesced() const { return quiescelock.is_xlocked(); }
+  bool is_quiesced() const;
+  bool will_block_for_quiesce(const MDRequestRef& mdr = MDRequestRef {});
 
   bool is_head() const { return last == CEPH_NOSNAP; }
 
@@ -706,6 +707,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   const CDir *get_projected_parent_dir() const;
   CDir *get_projected_parent_dir();
   CInode *get_parent_inode();
+
+  bool is_any_ancestor_inode_a_replica();
   
   bool is_lt(const MDSCacheObject *r) const override {
     const CInode *o = static_cast<const CInode*>(r);
@@ -714,7 +717,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   }
 
   // -- misc -- 
-  bool is_ancestor_of(const CInode *other) const;
+  bool is_ancestor_of(const CInode *other, std::unordered_map<CInode const*,bool>* visited=nullptr) const;
   bool is_projected_ancestor_of(const CInode *other) const;
 
   void make_path_string(std::string& s, bool projected=false, const CDentry *use_parent=NULL) const;
@@ -930,7 +933,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   mds_authority_t authority() const override;
 
   // -- auth pins --
-  bool can_auth_pin(int *err_ret=nullptr, bool bypassfreezing=false) const override;
+  bool can_auth_pin(int *err_ret=nullptr) const override;
   void auth_pin(void *by) override;
   void auth_unpin(void *by) override;
 
@@ -1084,6 +1087,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   elist<CInode*>::item item_dirty_dirfrag_dir;
   elist<CInode*>::item item_dirty_dirfrag_nest;
   elist<CInode*>::item item_dirty_dirfrag_dirfragtree;
+  elist<CInode*>::item item_to_flush;
 
   // also update RecoveryQueue::RecoveryQueue() if you change this
   elist<CInode*>::item& item_recover_queue = item_dirty_dirfrag_dir;

@@ -196,14 +196,6 @@ local timeSeries = import 'timeseries_panel.libsonnet';
                         title=title,
                         valueName=valueName),
 
-  addTableSchema(datasource, description, sort, styles, title, transform)::
-    g.tablePanel.new(datasource=datasource,
-                     description=description,
-                     sort=sort,
-                     styles=styles,
-                     title=title,
-                     transform=transform),
-
   addStyle(alias,
            colorMode,
            colors,
@@ -228,44 +220,28 @@ local timeSeries = import 'timeseries_panel.libsonnet';
       unit: unit,
       valueMaps: valueMaps,
     },
+
   matchers()::
-    local jobMatcher = 'job=~"$job"';
     local clusterMatcher = '%s=~"$cluster"' % $._config.clusterLabel;
     {
       // Common labels
-      jobMatcher: jobMatcher,
-      clusterMatcher: (if $._config.showMultiCluster then clusterMatcher else ''),
-      matchers: jobMatcher +
-                (if $._config.showMultiCluster then ', ' + clusterMatcher else ''),
+      matchers: (if $._config.showMultiCluster then clusterMatcher + ', ' else ''),
     },
+
 
   addClusterTemplate()::
     $.addTemplateSchema(
       'cluster',
       '$datasource',
-      'label_values(ceph_osd_metadata, %s)' % $._config.clusterLabel,
+      'label_values(ceph_health_status, %s)' % $._config.clusterLabel,
       1,
-      true,
+      false,
       1,
       'cluster',
       '(.*)',
       if !$._config.showMultiCluster then 'variable' else '',
-      multi=true,
-      allValues='.+',
-    ),
-
-  addJobTemplate()::
-    $.addTemplateSchema(
-      'job',
-      '$datasource',
-      'label_values(ceph_osd_metadata{%(clusterMatcher)s}, job)' % $.matchers(),
-      1,
-      true,
-      1,
-      'job',
-      '(.*)',
-      multi=true,
-      allValues='.+',
+      multi=false,
+      allValues=null,
     ),
 
   overviewStyle(alias,
@@ -503,7 +479,7 @@ local timeSeries = import 'timeseries_panel.libsonnet';
   addGaugePanel(title='',
                 description='',
                 transparent=false,
-                datasource='${DS_PROMETHEUS}',
+                datasource='$datasource',
                 gridPosition={},
                 pluginVersion='9.1.3',
                 unit='percentunit',
@@ -661,7 +637,9 @@ local timeSeries = import 'timeseries_panel.libsonnet';
     tooltip={},
     pieType='pie',
     values=[],
-    colorMode='auto'
+    colorMode='auto',
+    overrides=[],
+    reduceOptions={},
   )::
     pieChartPanel.new(
       title,
@@ -675,7 +653,9 @@ local timeSeries = import 'timeseries_panel.libsonnet';
       tooltip=tooltip,
       pieType=pieType,
       values=values,
-      colorMode=colorMode
+      colorMode=colorMode,
+      overrides=overrides,
+      reduceOptions=reduceOptions,
     ),
 
   heatMapPanel(

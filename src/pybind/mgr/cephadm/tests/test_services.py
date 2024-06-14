@@ -345,6 +345,7 @@ log_to_file = False"""
                             },
                         }
                     }),
+                    use_current_daemon_image=False,
                 )
 
 
@@ -396,10 +397,14 @@ enable_prometheus_exporter = True
 prometheus_exporter_ssl = False
 prometheus_port = 10008
 verify_nqns = True
-omap_file_lock_duration = 60
-omap_file_lock_retries = 15
-omap_file_lock_retry_sleep_interval = 5
+omap_file_lock_duration = 20
+omap_file_lock_retries = 30
+omap_file_lock_retry_sleep_interval = 1.0
 omap_file_update_reloads = 10
+allowed_consecutive_spdk_ping_failures = 1
+spdk_ping_interval_in_seconds = 2.0
+ping_spdk_under_lock = False
+enable_monitor_client = False
 
 [gateway-logs]
 log_level = INFO
@@ -477,6 +482,7 @@ timeout = 1.0\n"""
                             }
                         }
                     }),
+                    use_current_daemon_image=False,
                 )
 
 
@@ -587,6 +593,7 @@ class TestMonitoring:
                             "peers": [],
                         }
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -682,6 +689,7 @@ class TestMonitoring:
                             'web_config': '/etc/alertmanager/web.yml',
                         }
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -736,6 +744,9 @@ class TestMonitoring:
                     - source_labels: [__address__]
                       target_label: cluster
                       replacement: fsid
+                    - source_labels: [instance]
+                      target_label: instance
+                      replacement: 'ceph_cluster'
                     http_sd_configs:
                     - url: http://[::1]:8765/sd/prometheus/sd-config?service=mgr-prometheus
 
@@ -816,6 +827,7 @@ class TestMonitoring:
                             'ip_to_bind_to': '1.2.3.1',
                         },
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -895,6 +907,10 @@ class TestMonitoring:
                     tls_config:
                       ca_file: mgr_prometheus_cert.pem
                     honor_labels: true
+                    relabel_configs:
+                    - source_labels: [instance]
+                      target_label: instance
+                      replacement: 'ceph_cluster'
                     http_sd_configs:
                     - url: https://[::1]:8765/sd/prometheus/sd-config?service=mgr-prometheus
                       basic_auth:
@@ -994,6 +1010,7 @@ class TestMonitoring:
                             'web_config': '/etc/prometheus/web.yml',
                         },
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -1031,6 +1048,13 @@ class TestMonitoring:
                       schema: v11
                       index:
                         prefix: index_
+                        period: 24h
+                    - from: 2024-05-03
+                      store: tsdb
+                      object_store: filesystem
+                      schema: v13
+                      index:
+                        prefix: index_
                         period: 24h""").lstrip()
 
                 _run_cephadm.assert_called_with(
@@ -1062,6 +1086,7 @@ class TestMonitoring:
                             },
                         },
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -1120,6 +1145,7 @@ class TestMonitoring:
                             },
                         },
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -1231,6 +1257,7 @@ class TestMonitoring:
                             "files": files,
                         },
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('{}'))
@@ -1405,6 +1432,7 @@ spec:
                             },
                             "config_blobs": {},
                         }),
+                        use_current_daemon_image=True,
                     )
 
 
@@ -1511,6 +1539,7 @@ class TestSNMPGateway:
                         },
                         "config_blobs": config,
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -1558,6 +1587,7 @@ class TestSNMPGateway:
                         },
                         "config_blobs": config,
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -1609,6 +1639,7 @@ class TestSNMPGateway:
                         },
                         "config_blobs": config,
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -1665,6 +1696,7 @@ class TestSNMPGateway:
                         },
                         "config_blobs": config,
                     }),
+                    use_current_daemon_image=False,
                 )
 
 
@@ -1842,6 +1874,10 @@ class TestIngressService:
                         {
                             'keepalived.conf':
                                 '# This file is generated by cephadm.\n'
+                                'global_defs {\n    '
+                                'enable_script_security\n    '
+                                'script_user root\n'
+                                '}\n\n'
                                 'vrrp_script check_backend {\n    '
                                 'script "/usr/bin/curl http://1.2.3.7:8999/health"\n    '
                                 'weight -20\n    '
@@ -1965,6 +2001,10 @@ class TestIngressService:
                         {
                             'keepalived.conf':
                                 '# This file is generated by cephadm.\n'
+                                'global_defs {\n    '
+                                'enable_script_security\n    '
+                                'script_user root\n'
+                                '}\n\n'
                                 'vrrp_script check_backend {\n    '
                                 'script "/usr/bin/curl http://[1::4]:8999/health"\n    '
                                 'weight -20\n    '
@@ -2091,6 +2131,10 @@ class TestIngressService:
                         {
                             'keepalived.conf':
                                 '# This file is generated by cephadm.\n'
+                                'global_defs {\n    '
+                                'enable_script_security\n    '
+                                'script_user root\n'
+                                '}\n\n'
                                 'vrrp_script check_backend {\n    '
                                 'script "/usr/bin/curl http://1.2.3.7:8999/health"\n    '
                                 'weight -20\n    '
@@ -2225,6 +2269,10 @@ class TestIngressService:
                             {
                                 'keepalived.conf':
                                     '# This file is generated by cephadm.\n'
+                                    'global_defs {\n    '
+                                    'enable_script_security\n    '
+                                    'script_user root\n'
+                                    '}\n\n'
                                     'vrrp_script check_backend {\n    '
                                     'script "/usr/bin/curl http://1.2.3.1:8999/health"\n    '
                                     'weight -20\n    '
@@ -2416,6 +2464,10 @@ class TestIngressService:
                         {
                             'keepalived.conf':
                                 '# This file is generated by cephadm.\n'
+                                'global_defs {\n    '
+                                'enable_script_security\n    '
+                                'script_user root\n'
+                                '}\n\n'
                                 'vrrp_script check_backend {\n    '
                                 'script "/usr/bin/false"\n    '
                                 'weight -20\n    '
@@ -2492,6 +2544,7 @@ class TestIngressService:
                 hosts=['host1', 'host2']),
             port=12049,
             enable_haproxy_protocol=True,
+            enable_nlm=True,
         )
 
         ispec = IngressSpec(
@@ -2561,7 +2614,7 @@ class TestIngressService:
         nfs_ganesha_txt = (
             "# This file is generated by cephadm.\n"
             'NFS_CORE_PARAM {\n'
-            '        Enable_NLM = false;\n'
+            '        Enable_NLM = true;\n'
             '        Enable_RQUOTA = false;\n'
             '        Protocols = 4;\n'
             '        NFS_Port = 2049;\n'
@@ -2732,6 +2785,7 @@ class TestJaeger:
                         },
                         "config_blobs": config,
                     }),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -2771,6 +2825,7 @@ class TestJaeger:
                         },
                         "config_blobs": es_config,
                     }),
+                    use_current_daemon_image=False,
                 )
                 with with_service(cephadm_module, collector_spec):
                     _run_cephadm.assert_called_with(
@@ -2798,6 +2853,7 @@ class TestJaeger:
                             },
                             "config_blobs": collector_config,
                         }),
+                        use_current_daemon_image=False,
                     )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -2837,6 +2893,7 @@ class TestJaeger:
                         },
                         "config_blobs": collector_config,
                     }),
+                    use_current_daemon_image=False,
                 )
                 with with_service(cephadm_module, agent_spec):
                     _run_cephadm.assert_called_with(
@@ -2864,6 +2921,7 @@ class TestJaeger:
                             },
                             "config_blobs": agent_config,
                         }),
+                        use_current_daemon_image=False,
                     )
 
 
@@ -2920,6 +2978,7 @@ class TestCustomContainer:
                             },
                         }
                     ),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -3006,6 +3065,7 @@ class TestCustomContainer:
                     ['_orch', 'deploy'],
                     [],
                     stdin=json.dumps(expected),
+                    use_current_daemon_image=False,
                 )
 
 
@@ -3056,6 +3116,7 @@ class TestSMB:
                     ['_orch', 'deploy'],
                     [],
                     stdin=json.dumps(expected),
+                    use_current_daemon_image=False,
                 )
 
     @patch("cephadm.module.CephadmOrchestrator.get_unique_name")
@@ -3125,4 +3186,5 @@ class TestSMB:
                     ['_orch', 'deploy'],
                     [],
                     stdin=json.dumps(expected),
+                    use_current_daemon_image=False,
                 )

@@ -195,6 +195,9 @@ class CephadmServe:
             val = None
         else:
             total_mem *= 1024   # kb -> bytes
+            self.log.debug(f'Autotuning memory for host {host} with '
+                           f'{total_mem} total bytes of memory and '
+                           f'{self.mgr.autotune_memory_target_ratio} target ratio')
             total_mem *= self.mgr.autotune_memory_target_ratio
             a = MemoryAutotuner(
                 daemons=self.mgr.cache.get_daemons_by_host(host),
@@ -231,6 +234,9 @@ class CephadmServe:
             # options as users may be using them. Since there is no way to set autotuning
             # on/off at a host level, best we can do is check if it is globally on.
             if self.mgr.get_foreign_ceph_option('osd', 'osd_memory_target_autotune'):
+                self.mgr.log.debug(f'Removing osd_memory_target for OSDs on {host}'
+                                   ' as either there were no OSDs to tune or the '
+                                   ' per OSD memory calculation result was <= 0')
                 self.mgr.check_mon_command({
                     'prefix': 'config rm',
                     'who': f'osd/host:{host.split(".")[0]}',
@@ -466,6 +472,11 @@ class CephadmServe:
         for k in ['CEPHADM_STRAY_HOST',
                   'CEPHADM_STRAY_DAEMON']:
             self.mgr.remove_health_warning(k)
+        # clear recently altered daemons that were created/removed more than 60 seconds ago
+        self.mgr.recently_altered_daemons = {
+            d: t for (d, t) in self.mgr.recently_altered_daemons.items()
+            if ((datetime_now() - t).total_seconds() < 60)
+        }
         if self.mgr.warn_on_stray_hosts or self.mgr.warn_on_stray_daemons:
             ls = self.mgr.list_servers()
             self.log.debug(ls)
@@ -504,6 +515,11 @@ class CephadmServe:
                         # and don't have a way to check if the daemon is part of iscsi service
                         # we assume that all tcmu-runner daemons are managed by cephadm
                         managed.append(name)
+                    # Don't mark daemons we just created/removed in the last minute as stray.
+                    # It may take some time for the mgr to become aware the daemon
+                    # had been created/removed.
+                    if name in self.mgr.recently_altered_daemons:
+                        continue
                     if host not in self.mgr.inventory:
                         missing_names.append(name)
                         host_num_daemons += 1
@@ -994,9 +1010,11 @@ class CephadmServe:
                 hosts_altered.add(d.hostname)
                 self.mgr.spec_store.mark_needs_configuration(spec.service_name())
 
-            self.mgr.remote('progress', 'complete', progress_id)
+            if progress_total:
+                self.mgr.remote('progress', 'complete', progress_id)
         except Exception as e:
-            self.mgr.remote('progress', 'fail', progress_id, str(e))
+            if progress_total:
+                self.mgr.remote('progress', 'fail', progress_id, str(e))
             raise
         finally:
             if self.mgr.spec_store.needs_configuration(spec.service_name()):
@@ -1232,11 +1250,12 @@ class CephadmServe:
                     if host not in client_files:
                         client_files[host] = {}
                     ceph_conf = (0o644, 0, 0, bytes(config), str(config_digest))
-                    client_files[host]['/etc/ceph/ceph.conf'] = ceph_conf
-                    client_files[host][f'{cluster_cfg_dir}/ceph.conf'] = ceph_conf
-                    ceph_admin_key = (ks.mode, ks.uid, ks.gid, keyring.encode('utf-8'), digest)
-                    client_files[host][ks.path] = ceph_admin_key
-                    client_files[host][f'{cluster_cfg_dir}/{os.path.basename(ks.path)}'] = ceph_admin_key
+                    if ks.include_ceph_conf:
+                        client_files[host]['/etc/ceph/ceph.conf'] = ceph_conf
+                        client_files[host][f'{cluster_cfg_dir}/ceph.conf'] = ceph_conf
+                    client_key = (ks.mode, ks.uid, ks.gid, keyring.encode('utf-8'), digest)
+                    client_files[host][ks.path] = client_key
+                    client_files[host][f'{cluster_cfg_dir}/{os.path.basename(ks.path)}'] = client_key
             except Exception as e:
                 self.log.warning(
                     f'unable to calc client keyring {ks.entity} placement {ks.placement}: {e}')
@@ -1373,6 +1392,7 @@ class CephadmServe:
                         ),
                         config_blobs=daemon_spec.final_config,
                     ).dump_json_str(),
+                    use_current_daemon_image=reconfig,
                 )
 
                 if daemon_spec.daemon_type == 'agent':
@@ -1407,6 +1427,7 @@ class CephadmServe:
                     what = 'reconfigure' if reconfig else 'deploy'
                     self.mgr.events.for_daemon(
                         daemon_spec.name(), OrchestratorEvent.ERROR, f'Failed to {what}: {err}')
+                self.mgr.recently_altered_daemons[daemon_spec.name()] = datetime_now()
                 return msg
             except OrchestratorError:
                 redeploy = daemon_spec.name() in self.mgr.cache.get_daemon_names()
@@ -1506,6 +1527,7 @@ class CephadmServe:
                                                             daemon_type)].post_remove(daemon, is_failed_deploy=False))
                     self.mgr._kick_serve_loop()
 
+            self.mgr.recently_altered_daemons[name] = datetime_now()
             return "Removed {} from host '{}'".format(name, host)
 
     async def _run_cephadm_json(self,
@@ -1517,11 +1539,12 @@ class CephadmServe:
                                 error_ok: Optional[bool] = False,
                                 image: Optional[str] = "",
                                 log_output: Optional[bool] = True,
+                                use_current_daemon_image: bool = False,
                                 ) -> Any:
         try:
             out, err, code = await self._run_cephadm(
                 host, entity, command, args, no_fsid=no_fsid, error_ok=error_ok,
-                image=image, log_output=log_output)
+                image=image, log_output=log_output, use_current_daemon_image=use_current_daemon_image)
             if code:
                 raise OrchestratorError(f'host {host} `cephadm {command}` returned {code}: {err}')
         except Exception as e:
@@ -1546,6 +1569,7 @@ class CephadmServe:
                            env_vars: Optional[List[str]] = None,
                            log_output: Optional[bool] = True,
                            timeout: Optional[int] = None,  # timeout in seconds
+                           use_current_daemon_image: bool = False,
                            ) -> Tuple[List[str], List[str], int]:
         """
         Run cephadm on the remote host with the given command + args
@@ -1566,7 +1590,10 @@ class CephadmServe:
         # Skip the image check for daemons deployed that are not ceph containers
         if not str(entity).startswith(bypass_image):
             if not image and entity is not cephadmNoImage:
-                image = self.mgr._get_container_image(entity)
+                image = self.mgr._get_container_image(
+                    entity,
+                    use_current_daemon_image=use_current_daemon_image
+                )
 
         final_args = []
 

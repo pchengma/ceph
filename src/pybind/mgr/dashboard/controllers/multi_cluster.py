@@ -2,13 +2,17 @@
 
 import base64
 import json
+import re
+import tempfile
 import time
+from urllib.parse import urlparse
 
 import requests
 
 from .. import mgr
 from ..exceptions import DashboardException
 from ..security import Scope
+from ..services.orchestrator import OrchClient
 from ..settings import Settings
 from ..tools import configure_cors
 from . import APIDoc, APIRouter, CreatePermission, DeletePermission, Endpoint, \
@@ -34,8 +38,14 @@ class MultiCluster(RESTController):
                     'Accept': 'application/vnd.ceph.api.v1.0+json',
                     'Content-Type': 'application/json',
                 }
+            cert_file_path = verify
+            if verify:
+                with tempfile.NamedTemporaryFile(delete=False) as cert_file:
+                    cert_file.write(cert.encode('utf-8'))
+                    cert_file_path = cert_file.name
             response = requests.request(method, base_url + path, params=params,
-                                        json=payload, verify=verify, cert=cert, headers=headers)
+                                        json=payload, verify=cert_file_path,
+                                        headers=headers)
         except Exception as e:
             raise DashboardException(
                 "Could not reach {}, {}".format(base_url+path, e),
@@ -54,8 +64,7 @@ class MultiCluster(RESTController):
     @CreatePermission
     @EndpointDoc("Authenticate to a remote cluster")
     def auth(self, url: str, cluster_alias: str, username: str,
-             password=None, token=None, hub_url=None, cluster_fsid=None,
-             prometheus_api_url=None, ssl_verify=False, ssl_certificate=None):
+             password=None, hub_url=None, ssl_verify=False, ssl_certificate=None, ttl=None):
         try:
             hub_fsid = mgr.get('config')['fsid']
         except KeyError:
@@ -64,20 +73,25 @@ class MultiCluster(RESTController):
         if password:
             payload = {
                 'username': username,
-                'password': password
+                'password': password,
+                'ttl': ttl
             }
             cluster_token = self.check_cluster_connection(url, payload, username,
                                                           ssl_verify, ssl_certificate)
 
-            self._proxy('PUT', url, 'ui-api/multi-cluster/set_cors_endpoint',
-                        payload={'url': hub_url}, token=cluster_token, verify=ssl_verify,
-                        cert=ssl_certificate)
+            cors_endpoints_string = self.get_cors_endpoints_string(hub_url)
 
-            fsid = self._proxy('GET', url, 'api/health/get_cluster_fsid', token=cluster_token)
+            self._proxy('PUT', url, 'ui-api/multi-cluster/set_cors_endpoint',
+                        payload={'url': cors_endpoints_string}, token=cluster_token,
+                        verify=ssl_verify, cert=ssl_certificate)
+
+            fsid = self._proxy('GET', url, 'api/health/get_cluster_fsid', token=cluster_token,
+                               verify=ssl_verify, cert=ssl_certificate)
 
             managed_by_clusters_content = self._proxy('GET', url,
                                                       'api/settings/MANAGED_BY_CLUSTERS',
-                                                      token=cluster_token)
+                                                      token=cluster_token,
+                                                      verify=ssl_verify, cert=ssl_certificate)
 
             managed_by_clusters_config = managed_by_clusters_content['value']
 
@@ -89,25 +103,51 @@ class MultiCluster(RESTController):
                         verify=ssl_verify, cert=ssl_certificate)
 
             # add prometheus targets
-            prometheus_url = self._proxy('GET', url, 'api/settings/PROMETHEUS_API_HOST',
-                                         token=cluster_token)
+            prometheus_url = self._proxy('GET', url, 'api/multi-cluster/get_prometheus_api_url',
+                                         token=cluster_token, verify=ssl_verify,
+                                         cert=ssl_certificate)
 
-            _set_prometheus_targets(prometheus_url['value'])
+            _set_prometheus_targets(prometheus_url)
 
             self.set_multi_cluster_config(fsid, username, url, cluster_alias,
-                                          cluster_token, prometheus_url['value'],
+                                          cluster_token, prometheus_url,
                                           ssl_verify, ssl_certificate)
             return True
 
-        if token and cluster_fsid and prometheus_api_url:
-            _set_prometheus_targets(prometheus_api_url)
-            self.set_multi_cluster_config(cluster_fsid, username, url,
-                                          cluster_alias, token, prometheus_api_url,
-                                          ssl_verify, ssl_certificate)
-        return True
+        return False
+
+    def get_cors_endpoints_string(self, hub_url):
+        parsed_url = urlparse(hub_url)
+        hostname = parsed_url.hostname
+        cors_endpoints_set = set()
+        cors_endpoints_set.add(hub_url)
+
+        orch = OrchClient.instance()
+        inventory_hosts = [host.to_json() for host in orch.hosts.list()]
+
+        for host in inventory_hosts:
+            host_addr = host['addr']
+            host_ip_url = hub_url.replace(hostname, host_addr)
+            host_hostname_url = hub_url.replace(hostname, host['hostname'])
+
+            cors_endpoints_set.add(host_ip_url)
+            cors_endpoints_set.add(host_hostname_url)
+
+        cors_endpoints_string = ", ".join(cors_endpoints_set)
+        return cors_endpoints_string
 
     def check_cluster_connection(self, url, payload, username, ssl_verify, ssl_certificate):
         try:
+            hub_cluster_version = mgr.version.split('ceph version ')[1]
+            multi_cluster_content = self._proxy('GET', url, 'api/multi-cluster/get_config',
+                                                verify=ssl_verify, cert=ssl_certificate)
+            if 'status' in multi_cluster_content and multi_cluster_content['status'] == '404 Not Found':   # noqa E501 #pylint: disable=line-too-long
+                raise DashboardException(msg=f'The ceph cluster you are attempting to connect \
+                                         to does not support the multi-cluster feature. \
+                                         Please ensure that the cluster you are connecting \
+                                         to is upgraded to { hub_cluster_version } to enable the \
+                                         multi-cluster functionality.',
+                                         code='invalid_version', component='multi-cluster')
             content = self._proxy('POST', url, 'api/auth', payload=payload,
                                   verify=ssl_verify, cert=ssl_certificate)
             if 'token' not in content:
@@ -115,7 +155,8 @@ class MultiCluster(RESTController):
                                          component='multi-cluster')
 
             user_content = self._proxy('GET', url, f'api/user/{username}',
-                                       token=content['token'])
+                                       token=content['token'], verify=ssl_verify,
+                                       cert=ssl_certificate)
 
             if 'status' in user_content and user_content['status'] == '403 Forbidden':
                 raise DashboardException(msg='User is not an administrator',
@@ -134,7 +175,8 @@ class MultiCluster(RESTController):
         cluster_token = content['token']
 
         managed_by_clusters_content = self._proxy('GET', url, 'api/settings/MANAGED_BY_CLUSTERS',
-                                                  token=cluster_token)
+                                                  token=cluster_token, verify=ssl_verify,
+                                                  cert=ssl_certificate)
 
         managed_by_clusters_config = managed_by_clusters_content['value']
 
@@ -198,13 +240,14 @@ class MultiCluster(RESTController):
     @Endpoint('PUT')
     @UpdatePermission
     # pylint: disable=W0613
-    def reconnect_cluster(self, url: str, username=None, password=None, token=None,
-                          ssl_verify=False, ssl_certificate=None):
+    def reconnect_cluster(self, url: str, username=None, password=None,
+                          ssl_verify=False, ssl_certificate=None, ttl=None):
         multicluster_config = self.load_multi_cluster_config()
         if username and password:
             payload = {
                 'username': username,
-                'password': password
+                'password': password,
+                'ttl': ttl
             }
 
             cluster_token = self.check_cluster_connection(url, payload, username,
@@ -216,19 +259,23 @@ class MultiCluster(RESTController):
                     for cluster in cluster_details:
                         if cluster["url"] == url and cluster["user"] == username:
                             cluster['token'] = cluster_token
+                            cluster['ssl_verify'] = ssl_verify
+                            cluster['ssl_certificate'] = ssl_certificate
             Settings.MULTICLUSTER_CONFIG = multicluster_config
         return True
 
     @Endpoint('PUT')
     @UpdatePermission
     # pylint: disable=unused-variable
-    def edit_cluster(self, url, cluster_alias, username):
+    def edit_cluster(self, url, cluster_alias, username, verify=False, ssl_certificate=None):
         multicluster_config = self.load_multi_cluster_config()
         if "config" in multicluster_config:
             for key, cluster_details in multicluster_config["config"].items():
                 for cluster in cluster_details:
                     if cluster["url"] == url and cluster["user"] == username:
                         cluster['cluster_alias'] = cluster_alias
+                        cluster['ssl_verify'] = verify
+                        cluster['ssl_certificate'] = ssl_certificate if verify else ''
         Settings.MULTICLUSTER_CONFIG = multicluster_config
         return Settings.MULTICLUSTER_CONFIG
 
@@ -260,7 +307,9 @@ class MultiCluster(RESTController):
 
                     managed_by_clusters_content = self._proxy('GET', cluster_url,
                                                               'api/settings/MANAGED_BY_CLUSTERS',
-                                                              token=cluster_token)
+                                                              token=cluster_token,
+                                                              verify=cluster_ssl_verify,
+                                                              cert=cluster_ssl_certificate)
 
                     managed_by_clusters_config = managed_by_clusters_content['value']
                     for cluster in managed_by_clusters_config:
@@ -290,6 +339,15 @@ class MultiCluster(RESTController):
         current_time = time.time()
         return expiration_time < current_time
 
+    def get_time_left(self, jwt_token):
+        split_message = jwt_token.split(".")
+        base64_message = split_message[1]
+        decoded_token = json.loads(base64.urlsafe_b64decode(base64_message + "===="))
+        expiration_time = decoded_token['exp']
+        current_time = time.time()
+        time_left = expiration_time - current_time
+        return max(0, time_left)
+
     def check_token_status_expiration(self, token):
         if self.is_token_expired(token):
             return 1
@@ -303,7 +361,9 @@ class MultiCluster(RESTController):
             token = item['token']
             user = item['user']
             status = self.check_token_status_expiration(token)
-            token_status_map[cluster_name] = {'status': status, 'user': user}
+            time_left = self.get_time_left(token)
+            token_status_map[cluster_name] = {'status': status, 'user': user,
+                                              'time_left': time_left}
 
         return token_status_map
 
@@ -312,6 +372,25 @@ class MultiCluster(RESTController):
     def check_token_status(self, clustersTokenMap=None):
         clusters_token_map = json.loads(clustersTokenMap)
         return self.check_token_status_array(clusters_token_map)
+
+    @Endpoint()
+    @ReadPermission
+    def get_prometheus_api_url(self):
+        prometheus_url = Settings.PROMETHEUS_API_HOST
+        if prometheus_url is not None:
+            # check if is url is already in IP format
+            pattern = r'^(?:https?|http):\/\/(?:\d{1,3}\.){3}\d{1,3}:\d+$'
+            valid_ip_url = bool(re.match(pattern, prometheus_url))
+            if not valid_ip_url:
+                parsed_url = urlparse(prometheus_url)
+                hostname = parsed_url.hostname
+                orch = OrchClient.instance()
+                inventory_hosts = [host.to_json() for host in orch.hosts.list()]
+                for host in inventory_hosts:
+                    if host['hostname'] == hostname or host['hostname'] in hostname:
+                        node_ip = host['addr']
+                prometheus_url = prometheus_url.replace(hostname, node_ip)
+        return prometheus_url
 
 
 @UIRouter('/multi-cluster', Scope.CONFIG_OPT)

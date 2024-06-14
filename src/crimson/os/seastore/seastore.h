@@ -3,14 +3,15 @@
 
 #pragma once
 
-#include <string>
-#include <unordered_map>
 #include <map>
+#include <optional>
+#include <string>
 #include <typeinfo>
+#include <unordered_map>
 #include <vector>
 
-#include <optional>
 #include <seastar/core/future.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/metrics_types.hh>
 
 #include "include/uuid.h"
@@ -158,6 +159,8 @@ public:
 
     seastar::future<CollectionRef> create_new_collection(const coll_t& cid) final;
     seastar::future<CollectionRef> open_collection(const coll_t& cid) final;
+    seastar::future<> set_collection_opts(CollectionRef c,
+                                        const pool_opts_t& opts) final;
 
     seastar::future<> do_transaction_no_callbacks(
       CollectionRef ch,
@@ -200,6 +203,8 @@ public:
     seastar::future<> mkfs_managers();
 
     void init_managers();
+
+    device_stats_t get_device_stats(bool report_detail) const;
 
   private:
     struct internal_context_t {
@@ -253,9 +258,9 @@ public:
 	    ctx.reset_preserve_handle(*transaction_manager);
 	    return std::invoke(f, ctx);
 	  }).handle_error(
-	    crimson::ct_error::eagain::pass_further{},
 	    crimson::ct_error::all_same_way([&ctx](auto e) {
 	      on_error(ctx.ext_transaction);
+	      return seastar::now();
 	    })
 	  );
 	}).then([this, op_type, &ctx] {
@@ -491,6 +496,9 @@ public:
 
   mkfs_ertr::future<> mkfs(uuid_d new_osd_fsid) final;
   seastar::future<store_statfs_t> stat() const final;
+  seastar::future<store_statfs_t> pool_statfs(int64_t pool_id) const final;
+
+  seastar::future<> report_stats() final;
 
   uuid_d get_fsid() const final {
     ceph_assert(seastar::this_shard_id() == primary_core);
@@ -544,6 +552,10 @@ private:
   DeviceRef device;
   std::vector<DeviceRef> secondaries;
   seastar::sharded<SeaStore::Shard> shard_stores;
+
+  mutable seastar::lowres_clock::time_point last_tp =
+    seastar::lowres_clock::time_point::min();
+  mutable std::vector<device_stats_t> shard_device_stats;
 };
 
 std::unique_ptr<SeaStore> make_seastore(

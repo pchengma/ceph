@@ -3,13 +3,13 @@
     dashboardTags: ['ceph-mixin'],
 
     clusterLabel: 'cluster',
-    showMultiCluster: false,
+    showMultiCluster: true,
 
     CephNodeNetworkPacketDropsThreshold: 0.005,
     CephNodeNetworkPacketDropsPerSec: 10,
     CephRBDMirrorImageTransferBandwidthThreshold: 0.8,
     CephRBDMirrorImagesPerDaemonThreshold: 100,
-    NVMeoFMaxGatewaysPerGroup: 2,
+    NVMeoFMaxGatewaysPerGroup: 4,
     NVMeoFMaxGatewaysPerCluster: 4,
     NVMeoFHighGatewayCPU: 80,
     NVMeoFMaxSubsystemsPerGateway: 16,
