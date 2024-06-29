@@ -372,6 +372,164 @@ def test_generate_config_ad(thandler):
     assert cfg['globals']['foo']['options']['realm'] == 'dom1.example.com'
 
 
+def test_generate_config_with_login_control(thandler):
+    thandler.internal_store.overwrite(
+        {
+            'clusters.foo': {
+                'resource_type': 'ceph.smb.cluster',
+                'cluster_id': 'foo',
+                'auth_mode': 'active-directory',
+                'intent': 'present',
+                'domain_settings': {
+                    'realm': 'dom1.example.com',
+                    'join_sources': [
+                        {
+                            'source_type': 'resource',
+                            'ref': 'foo1',
+                        }
+                    ],
+                },
+            },
+            'join_auths.foo1': {
+                'resource_type': 'ceph.smb.join.auth',
+                'auth_id': 'foo1',
+                'intent': 'present',
+                'auth': {
+                    'username': 'testadmin',
+                    'password': 'Passw0rd',
+                },
+            },
+            'shares.foo.s1': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'foo',
+                'share_id': 's1',
+                'intent': 'present',
+                'name': 'Ess One',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/',
+                    'provider': 'samba-vfs',
+                },
+                'login_control': [
+                    {
+                        'name': 'dom1\\alan',
+                        'category': 'user',
+                        'access': 'read',
+                    },
+                    {
+                        'name': 'dom1\\betsy',
+                        'category': 'user',
+                        'access': 'read-write',
+                    },
+                    {
+                        'name': 'dom1\\chuck',
+                        'category': 'user',
+                        'access': 'admin',
+                    },
+                    {
+                        'name': 'dom1\\ducky',
+                        'category': 'user',
+                        'access': 'none',
+                    },
+                    {
+                        'name': 'dom1\\eggbert',
+                        'category': 'user',
+                        'access': 'read',
+                    },
+                    {
+                        'name': 'dom1\\guards',
+                        'category': 'group',
+                        'access': 'read-write',
+                    },
+                ],
+            },
+        }
+    )
+
+    cfg = thandler.generate_config('foo')
+    assert cfg
+    assert cfg['shares']['Ess One']['options']
+    shopts = cfg['shares']['Ess One']['options']
+    assert shopts['invalid users'] == 'dom1\\ducky'
+    assert shopts['read list'] == 'dom1\\alan dom1\\eggbert'
+    assert shopts['write list'] == 'dom1\\betsy @dom1\\guards'
+    assert shopts['admin users'] == 'dom1\\chuck'
+
+
+def test_generate_config_with_login_control_restricted(thandler):
+    thandler.internal_store.overwrite(
+        {
+            'clusters.foo': {
+                'resource_type': 'ceph.smb.cluster',
+                'cluster_id': 'foo',
+                'auth_mode': 'active-directory',
+                'intent': 'present',
+                'domain_settings': {
+                    'realm': 'dom1.example.com',
+                    'join_sources': [
+                        {
+                            'source_type': 'resource',
+                            'ref': 'foo1',
+                        }
+                    ],
+                },
+            },
+            'join_auths.foo1': {
+                'resource_type': 'ceph.smb.join.auth',
+                'auth_id': 'foo1',
+                'intent': 'present',
+                'auth': {
+                    'username': 'testadmin',
+                    'password': 'Passw0rd',
+                },
+            },
+            'shares.foo.s1': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'foo',
+                'share_id': 's1',
+                'intent': 'present',
+                'name': 'Ess One',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/',
+                    'provider': 'samba-vfs',
+                },
+                'restrict_access': True,
+                'login_control': [
+                    {
+                        'name': 'dom1\\alan',
+                        'category': 'user',
+                        'access': 'read',
+                    },
+                    {
+                        'name': 'dom1\\betsy',
+                        'category': 'user',
+                        'access': 'read-write',
+                    },
+                    {
+                        'name': 'dom1\\chuck',
+                        'category': 'user',
+                        'access': 'none',
+                    },
+                ],
+            },
+        }
+    )
+
+    cfg = thandler.generate_config('foo')
+    assert cfg
+    assert cfg['shares']['Ess One']['options']
+    shopts = cfg['shares']['Ess One']['options']
+    assert shopts['invalid users'] == 'dom1\\chuck'
+    assert shopts['valid users'] == 'dom1\\alan dom1\\betsy'
+    assert shopts['read list'] == 'dom1\\alan'
+    assert shopts['write list'] == 'dom1\\betsy'
+
+
 def test_error_result():
     share = smb.resources.Share(
         cluster_id='foo',
@@ -1116,3 +1274,91 @@ def test_rand_name():
     assert len(name) == 18
     name = smb.handler.rand_name('')
     assert len(name) == 8
+
+
+def test_apply_with_create_only(thandler):
+    test_apply_full_cluster_create(thandler)
+
+    to_apply = [
+        smb.resources.Cluster(
+            cluster_id='mycluster1',
+            auth_mode=smb.enums.AuthMode.ACTIVE_DIRECTORY,
+            domain_settings=smb.resources.DomainSettings(
+                realm='MYDOMAIN.EXAMPLE.ORG',
+                join_sources=[
+                    smb.resources.JoinSource(
+                        source_type=smb.enums.JoinSourceType.RESOURCE,
+                        ref='join1',
+                    ),
+                ],
+            ),
+            custom_dns=['192.168.76.204'],
+        ),
+        smb.resources.Share(
+            cluster_id='mycluster1',
+            share_id='homedirs',
+            name='Altered Home Directries',
+            cephfs=smb.resources.CephFSStorage(
+                volume='cephfs',
+                subvolume='homedirs',
+                path='/',
+            ),
+        ),
+        smb.resources.Share(
+            cluster_id='mycluster1',
+            share_id='foodirs',
+            name='Foo Directries',
+            cephfs=smb.resources.CephFSStorage(
+                volume='cephfs',
+                subvolume='homedirs',
+                path='/foo',
+            ),
+        ),
+    ]
+    results = thandler.apply(to_apply, create_only=True)
+    assert not results.success
+    rs = results.to_simplified()
+    assert len(rs['results']) == 3
+    assert (
+        rs['results'][0]['msg']
+        == 'a resource with the same ID already exists'
+    )
+    assert (
+        rs['results'][1]['msg']
+        == 'a resource with the same ID already exists'
+    )
+
+    # no changes to the store
+    assert (
+        'shares',
+        'mycluster1.foodirs',
+    ) not in thandler.internal_store.data
+    assert ('shares', 'mycluster1.homedirs') in thandler.internal_store.data
+    assert (
+        thandler.internal_store.data[('shares', 'mycluster1.homedirs')][
+            'name'
+        ]
+        == 'Home Directries'
+    )
+
+    # foodirs share is new, it can be applied separately
+    to_apply = [
+        smb.resources.Share(
+            cluster_id='mycluster1',
+            share_id='foodirs',
+            name='Foo Directries',
+            cephfs=smb.resources.CephFSStorage(
+                volume='cephfs',
+                subvolume='homedirs',
+                path='/foo',
+            ),
+        ),
+    ]
+    results = thandler.apply(to_apply, create_only=True)
+    assert results.success
+    rs = results.to_simplified()
+    assert len(rs['results']) == 1
+    assert (
+        'shares',
+        'mycluster1.foodirs',
+    ) in thandler.internal_store.data

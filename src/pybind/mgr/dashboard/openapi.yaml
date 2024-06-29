@@ -635,6 +635,8 @@ paths:
                 force:
                   default: false
                   type: boolean
+                image_mirror_mode:
+                  type: string
                 metadata:
                   type: string
                 mirror_mode:
@@ -5008,6 +5010,9 @@ paths:
                                 balancer:
                                   description: ''
                                   type: string
+                                btime:
+                                  description: ''
+                                  type: string
                                 compat:
                                   description: ''
                                   properties:
@@ -5127,6 +5132,7 @@ paths:
                               - failed
                               - metadata_pool
                               - epoch
+                              - btime
                               - stopped
                               - max_mds
                               - compat
@@ -10615,6 +10621,9 @@ paths:
                   type: string
                 placement_target:
                   type: string
+                replication:
+                  default: 'false'
+                  type: string
                 tags:
                   type: string
                 uid:
@@ -10932,6 +10941,8 @@ paths:
                 mfa_token_pin:
                   type: string
                 mfa_token_serial:
+                  type: string
+                replication:
                   type: string
                 tags:
                   type: string

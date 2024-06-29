@@ -14,7 +14,7 @@ from ..rest_client import RequestException
 from ..security import Permission, Scope
 from ..services.auth import AuthManager, JwtManager
 from ..services.ceph_service import CephService
-from ..services.rgw_client import NoRgwDaemonsException, RgwClient, RgwMultisite
+from ..services.rgw_client import _SYNC_GROUP_ID, NoRgwDaemonsException, RgwClient, RgwMultisite
 from ..tools import json_str_to_object, str_to_bool
 from . import APIDoc, APIRouter, BaseController, CreatePermission, \
     CRUDCollectionMethod, CRUDEndpoint, DeletePermission, Endpoint, \
@@ -242,6 +242,7 @@ class RgwDaemon(RESTController):
                     'server_hostname': hostname,
                     'realm_name': metadata['realm_name'],
                     'zonegroup_name': metadata['zonegroup_name'],
+                    'zonegroup_id': metadata['zonegroup_id'],
                     'zone_name': metadata['zone_name'],
                     'default': instance.daemon.name == metadata['id'],
                     'port': int(port) if port else None
@@ -307,6 +308,8 @@ class RgwSite(RgwRESTController):
             return RgwClient.admin_instance(daemon_name=daemon_name).get_realms()
         if query == 'default-realm':
             return RgwClient.admin_instance(daemon_name=daemon_name).get_default_realm()
+        if query == 'default-zonegroup':
+            return RgwMultisite().get_all_zonegroups_info()['default_zonegroup']
 
         # @TODO: for multisite: by default, retrieve cluster topology/map.
         raise DashboardException(http_status_code=501, component='rgw', msg='Not Implemented')
@@ -396,6 +399,25 @@ class RgwBucket(RgwRESTController):
         rgw_client = RgwClient.instance(owner, daemon_name)
         return rgw_client.set_acl(bucket_name, acl)
 
+    def _set_replication(self, bucket_name: str, replication: bool, owner, daemon_name):
+        multisite = RgwMultisite()
+        # return immediately if the multisite is not configured
+        if not multisite.get_multisite_status():
+            return None
+
+        rgw_client = RgwClient.instance(owner, daemon_name)
+        zonegroup_name = RgwClient.admin_instance(daemon_name=daemon_name).get_default_zonegroup()
+
+        policy_exists = multisite.policy_group_exists(_SYNC_GROUP_ID, zonegroup_name)
+        if replication and not policy_exists:
+            multisite.create_dashboard_admin_sync_group(zonegroup_name=zonegroup_name)
+
+        return rgw_client.set_bucket_replication(bucket_name, replication)
+
+    def _get_replication(self, bucket_name: str, owner, daemon_name):
+        rgw_client = RgwClient.instance(owner, daemon_name)
+        return rgw_client.get_bucket_replication(bucket_name)
+
     @staticmethod
     def strip_tenant_from_bucket_name(bucket_name):
         # type (str) -> str
@@ -450,6 +472,7 @@ class RgwBucket(RgwRESTController):
         result['mfa_delete'] = versioning['MfaDelete']
         result['bucket_policy'] = self._get_policy(bucket_name, daemon_name, result['owner'])
         result['acl'] = self._get_acl(bucket_name, daemon_name, result['owner'])
+        result['replication'] = self._get_replication(bucket_name, result['owner'], daemon_name)
 
         # Append the locking configuration.
         locking = self._get_locking(result['owner'], daemon_name, bucket_name)
@@ -463,9 +486,11 @@ class RgwBucket(RgwRESTController):
                lock_retention_period_days=None,
                lock_retention_period_years=None, encryption_state='false',
                encryption_type=None, key_id=None, tags=None,
-               bucket_policy=None, canned_acl=None, daemon_name=None):
+               bucket_policy=None, canned_acl=None, replication='false',
+               daemon_name=None):
         lock_enabled = str_to_bool(lock_enabled)
         encryption_state = str_to_bool(encryption_state)
+        replication = str_to_bool(replication)
         try:
             rgw_client = RgwClient.instance(uid, daemon_name)
             result = rgw_client.create_bucket(bucket, zonegroup,
@@ -488,6 +513,8 @@ class RgwBucket(RgwRESTController):
             if canned_acl:
                 self._set_acl(bucket, canned_acl, uid, daemon_name)
 
+            if replication:
+                self._set_replication(bucket, replication, uid, daemon_name)
             return result
         except RequestException as e:  # pragma: no cover - handling is too obvious
             raise DashboardException(e, http_status_code=500, component='rgw')
@@ -498,8 +525,10 @@ class RgwBucket(RgwRESTController):
             mfa_delete=None, mfa_token_serial=None, mfa_token_pin=None,
             lock_mode=None, lock_retention_period_days=None,
             lock_retention_period_years=None, tags=None, bucket_policy=None,
-            canned_acl=None, daemon_name=None):
+            canned_acl=None, replication=None, daemon_name=None):
         encryption_state = str_to_bool(encryption_state)
+        if replication is not None:
+            replication = str_to_bool(replication)
         # When linking a non-tenant-user owned bucket to a tenanted user, we
         # need to prefix bucket name with '/'. e.g. photos -> /photos
         if '$' in uid and '/' not in bucket:
@@ -544,6 +573,8 @@ class RgwBucket(RgwRESTController):
             self._set_policy(bucket_name, bucket_policy, daemon_name, uid)
         if canned_acl:
             self._set_acl(bucket_name, canned_acl, uid, daemon_name)
+        if replication is not None:
+            self._set_replication(bucket_name, replication, uid, daemon_name)
         return self._append_bid(result)
 
     def delete(self, bucket, purge_objects='true', daemon_name=None):

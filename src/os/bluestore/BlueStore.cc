@@ -11305,6 +11305,22 @@ void BlueStore::inject_bluefs_file(std::string_view dir, std::string_view name, 
   bluefs->close_writer(p_handle);
 }
 
+int BlueStore::compact()
+{
+  int r = 0;
+  ceph_assert(db);
+  if (cct->_conf.get_val<bool>("bluestore_async_db_compaction")) {
+    dout(1) << __func__ << " starting async.." << dendl;
+    db->compact_async();
+    r = -EINPROGRESS;
+  } else {
+    dout(1) << __func__ << " starting sync.." << dendl;
+    db->compact();
+    dout(1) << __func__ << " finished." << dendl;
+  }
+  return r;
+}
+
 void BlueStore::collect_metadata(map<string,string> *pm)
 {
   dout(10) << __func__ << dendl;
@@ -18722,7 +18738,7 @@ void RocksDBBlueFSVolumeSelector::dump(ostream& sout) {
        << ", l_multi=" << byte_u_t(level_multiplier)
        << std::endl;
   constexpr std::array<const char*, 8> names{ {
-    "DEV/LEV",
+    "LEV/DEV",
     "WAL",
     "DB",
     "SLOW",

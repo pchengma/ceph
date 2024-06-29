@@ -187,6 +187,11 @@ class PgScrubber : public ScrubPgIF,
   /// are we waiting for resource reservation grants form our replicas?
   [[nodiscard]] bool is_reserving() const final;
 
+  Scrub::schedule_result_t start_scrub_session(
+      Scrub::OSDRestrictions osd_restrictions,
+      Scrub::ScrubPGPreconds,
+      const requested_scrub_t& requested_flags) final;
+
   void initiate_regular_scrub(epoch_t epoch_queued) final;
 
   void initiate_scrub_after_repair(epoch_t epoch_queued) final;
@@ -456,9 +461,6 @@ class PgScrubber : public ScrubPgIF,
 
   int build_replica_map_chunk() final;
 
-  bool set_reserving_now() final;
-  void clear_reserving_now() final;
-
   [[nodiscard]] bool was_epoch_changed() const final;
 
   void set_queued_or_active() final;
@@ -560,6 +562,11 @@ class PgScrubber : public ScrubPgIF,
 
   // 'query' command data for an active scrub
   void dump_active_scrubber(ceph::Formatter* f, bool is_deep) const;
+
+  /// calls penalize_next_scrub() to push the 'not before' to a later time
+  /// (for now. The fuller implementation will also push the scrub job back
+  /// into the queue).
+  void requeue_penalized(Scrub::delay_cause_t cause);
 
   // -----     methods used to verify the relevance of incoming events:
 
@@ -794,6 +801,31 @@ class PgScrubber : public ScrubPgIF,
    */
   Scrub::sched_params_t determine_scrub_time(
       const pool_opts_t& pool_conf) const;
+
+  /// should we perform deep scrub?
+  bool is_time_for_deep(
+      Scrub::ScrubPGPreconds pg_cond,
+      const requested_scrub_t& planned) const;
+
+  /**
+   * Validate the various 'next scrub' flags against configuration
+   * and scrub-related timestamps.
+   *
+   * @returns an updated copy of the m_planned_flags (or nothing if no scrubbing)
+   */
+  std::optional<requested_scrub_t> validate_scrub_mode(
+      Scrub::OSDRestrictions osd_restrictions,
+      Scrub::ScrubPGPreconds pg_cond) const;
+
+  std::optional<requested_scrub_t> validate_periodic_mode(
+      Scrub::ScrubPGPreconds pg_cond,
+      bool time_for_deep,
+      const requested_scrub_t& planned) const;
+
+  std::optional<requested_scrub_t> validate_initiated_scrub(
+      Scrub::ScrubPGPreconds pg_cond,
+      bool time_for_deep,
+      const requested_scrub_t& planned) const;
 
   /*
    * Select a range of objects to scrub.

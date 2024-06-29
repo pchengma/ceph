@@ -4,6 +4,7 @@ import logging
 import uuid
 from io import StringIO
 from os.path import join as os_path_join
+import re
 from time import sleep
 
 from teuthology.exceptions import CommandFailedError
@@ -16,23 +17,88 @@ from tasks.cephfs.caps_helper import (CapTester, gen_mon_cap_str,
                                       gen_osd_cap_str, gen_mds_cap_str)
 
 log = logging.getLogger(__name__)
+MDS_RESTART_GRACE = 60
 
 class TestLabeledPerfCounters(CephFSTestCase):
     CLIENTS_REQUIRED = 2
     MDSS_REQUIRED = 1
 
-    def test_per_client_labeled_perf_counters(self):
-        """
-        That the per-client labelled perf counters depict the clients
-        performaing IO.
-        """
-        def get_counters_for(filesystem, client_id):
-            dump = self.fs.rank_tell(["counter", "dump"])
-            per_client_metrics_key = f'mds_client_metrics-{filesystem}'
-            counters = [c["counters"] for \
-                        c in dump[per_client_metrics_key] if c["labels"]["client"] == client_id]
-            return counters[0]
+    def _get_counters_for(self, filesystem, client_id):
+        dump = self.fs.rank_tell(["counter", "dump"])
+        per_client_metrics_key = f'mds_client_metrics-{filesystem}'
+        counters = [c["counters"] for \
+                    c in dump[per_client_metrics_key] if c["labels"]["client"] == client_id]
+        return counters[0]
 
+    def test_per_client_labeled_perf_counters_on_client_disconnect(self):
+        """
+        That the per-client labelled metrics are unavailable during client disconnect
+        """
+        mount_a_id = f'client.{self.mount_a.get_global_id()}'
+        self.mount_a.teardown()
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
+            while proceed():
+                dump = self.fs.rank_tell(["counter", "dump"])
+                per_client_metrics_key = f"mds_client_metrics-{dump['mds_client_metrics'][0]['labels']['fs_name']}"
+                clients = [c["labels"]["client"] for c in dump.get(per_client_metrics_key, {})]
+                if clients and mount_a_id not in clients:
+                    # success, no metrics.
+                    return True
+
+    def test_per_client_labeled_perf_counters_on_client_reconnect(self):
+        """
+        That the per-client labelled metrics are generated during client reconnect
+        """
+        # fail active mds and wait for reconnect
+        mds = self.fs.get_active_names()[0]
+        self.mds_cluster.mds_fail(mds)
+        self.fs.wait_for_state('up:active', rank=0, timeout=MDS_RESTART_GRACE)
+        mount_a_id = f'client.{self.mount_a.get_global_id()}'
+        mount_b_id = f'client.{self.mount_b.get_global_id()}'
+        fs_suffix = ""
+
+        with safe_while(sleep=1, tries=30, action='wait for counters') as proceed:
+            while proceed():
+                dump = self.fs.rank_tell(["counter", "dump"])
+                fs_suffix = dump['mds_client_metrics'][0]['labels']['fs_name']
+                per_client_metrics_key = f"mds_client_metrics-{fs_suffix}"
+                clients = [c["labels"]["client"] for c in dump.get(per_client_metrics_key, {})]
+                if mount_a_id in clients and mount_b_id in clients:
+                    # success, got metrics.
+                    break # break to continue the test
+
+        # Post reconnecting, validate the io perf counters
+        # write workload
+        self.mount_a.create_n_files("test_dir/test_file", 1000, sync=True)
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
+            while proceed():
+                counters_dump_a = self._get_counters_for(fs_suffix, mount_a_id)
+                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0 and \
+                   counters_dump_a["avg_write_latency"] >= 0 and counters_dump_a["avg_metadata_latency"] >= 0 and  \
+                   counters_dump_a["opened_files"] >= 0 and counters_dump_a["opened_inodes"] > 0 and \
+                   counters_dump_a["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_a["pinned_icaps"] > 0:
+                    break # break to continue the test
+
+        # read from the other client
+        for i in range(100):
+            self.mount_b.open_background(basename=f'test_dir/test_file_{i}', write=False)
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_b_id}') as proceed:
+            while proceed():
+                counters_dump_b = self._get_counters_for(fs_suffix, mount_b_id)
+                if counters_dump_b["total_read_ops"] >= 0 and counters_dump_b["total_read_size"] >= 0 and \
+                   counters_dump_b["avg_read_latency"] >= 0 and counters_dump_b["avg_metadata_latency"] >= 0 and \
+                   counters_dump_b["opened_files"] >= 0 and counters_dump_b["opened_inodes"] >= 0 and \
+                   counters_dump_b["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_b["pinned_icaps"] > 0:
+                    break # break to continue the test
+        self.mount_a.teardown()
+        self.mount_b.teardown()
+
+    def test_per_client_labeled_perf_counters_io(self):
+        """
+        That the per-client labelled perf counters depict the clients performing IO.
+        """
         # sleep a bit so that we get updated clients...
         sleep(10)
 
@@ -53,21 +119,29 @@ class TestLabeledPerfCounters(CephFSTestCase):
         # write workload
         self.mount_a.create_n_files("test_dir/test_file", 1000, sync=True)
         with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
-            counters_dump_a = get_counters_for(fs_suffix, mount_a_id)
             while proceed():
-                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0:
-                    return True
+                counters_dump_a = self._get_counters_for(fs_suffix, mount_a_id)
+                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0 and \
+                   counters_dump_a["avg_write_latency"] >= 0 and counters_dump_a["avg_metadata_latency"] >= 0 and  \
+                   counters_dump_a["opened_files"] >= 0 and counters_dump_a["opened_inodes"] > 0 and \
+                   counters_dump_a["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_a["pinned_icaps"] > 0:
+                    break # break to continue the test
 
         # read from the other client
         for i in range(100):
             self.mount_b.open_background(basename=f'test_dir/test_file_{i}', write=False)
         with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_b_id}') as proceed:
-            counters_dump_b = get_counters_for(fs_suffix, mount_b_id)
             while proceed():
-                if counters_dump_b["total_read_ops"] > 0 and counters_dump_b["total_read_size"] > 0:
-                    return True
-
-        self.fs.teardown()
+                counters_dump_b = self._get_counters_for(fs_suffix, mount_b_id)
+                if counters_dump_b["total_read_ops"] >= 0 and counters_dump_b["total_read_size"] >= 0 and \
+                   counters_dump_b["avg_read_latency"] >= 0 and counters_dump_b["avg_metadata_latency"] >= 0 and \
+                   counters_dump_b["opened_files"] >= 0 and counters_dump_b["opened_inodes"] >= 0 and \
+                   counters_dump_b["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_b["pinned_icaps"] > 0:
+                    break # break to continue the test
+        self.mount_a.teardown()
+        self.mount_b.teardown()
 
 class TestAdminCommands(CephFSTestCase):
     """
@@ -122,6 +196,108 @@ class TestAdminCommands(CephFSTestCase):
                 if health_warn in health_report['checks']:
                     return
 
+
+class TestMdsLastSeen(CephFSTestCase):
+    """
+    Tests for `mds last-seen` command.
+    """
+
+    MDSS_REQUIRED = 2
+
+    def test_in_text(self):
+        """
+        That `mds last-seen` returns 0 for an MDS currently in the map.
+        """
+
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        s = self.get_ceph_cmd_stdout("mds", "last-seen", r0['name'])
+        seconds = int(re.match(r"^(\d+)s$", s).group(1))
+        self.assertEqual(seconds, 0)
+
+    def test_in_json(self):
+        """
+        That `mds last-seen` returns 0 for an MDS currently in the map.
+        """
+
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", r0['name'])
+        J = json.loads(s)
+        seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+        self.assertEqual(seconds, 0)
+
+    def test_unknown(self):
+        """
+        That `mds last-seen` returns ENOENT for an mds not in recent maps.
+        """
+
+        try:
+            self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", 'foo')
+        except CommandFailedError as e:
+            self.assertEqual(e.exitstatus, errno.ENOENT)
+        else:
+            self.fail("non-existent mds should fail ENOENT")
+
+    def test_standby(self):
+        """
+        That `mds last-seen` returns 0 for a standby.
+        """
+
+        status = self.fs.status()
+        for info in status.get_standbys():
+            s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", info['name'])
+            J = json.loads(s)
+            seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+            self.assertEqual(seconds, 0)
+
+    def test_stopped(self):
+        """
+        That `mds last-seen` returns >0 for mds that is stopped.
+        """
+
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        self.fs.mds_stop(mds_id=r0['name'])
+        self.fs.rank_fail()
+        sleep(2)
+        with safe_while(sleep=1, tries=self.fs.beacon_timeout, action='wait for last-seen >0') as proceed:
+            while proceed():
+                s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", r0['name'])
+                J = json.loads(s)
+                seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+                if seconds == 0:
+                    continue
+                self.assertGreater(seconds, 1)
+                break
+
+    def test_gc(self):
+        """
+        That historical mds information is eventually garbage collected.
+        """
+
+        prune_time = 20
+        sleep_time = 2
+        self.config_set('mon', 'mon_fsmap_prune_threshold', prune_time)
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        self.fs.mds_stop(mds_id=r0['name'])
+        self.fs.rank_fail()
+        last = 0
+        for i in range(prune_time):
+            sleep(sleep_time) # we will sleep twice prune_time
+            try:
+                s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", r0['name'])
+                J = json.loads(s)
+                seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+                self.assertGreater(seconds, last)
+                log.debug("last_seen: %ds", seconds)
+                last = seconds
+            except CommandFailedError as e:
+                self.assertEqual(e.exitstatus, errno.ENOENT)
+                self.assertGreaterEqual(last + sleep_time + 1, prune_time) # rounding error add 1
+                return
+        self.fail("map was no garbage collected as expected")
 
 @classhook('_add_valid_tell')
 class TestValidTell(TestAdminCommands):
@@ -715,10 +891,12 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
+
         self.run_ceph_cmd(f'fs set {new_fs_name} joinable true')
         self.run_ceph_cmd(f'fs set {new_fs_name} refuse_client_session false')
-        sleep(5)
+        self.fs.wait_for_daemons()
 
         # authorize a cephx ID access to the renamed file system.
         # use the ID to write to the file system.
@@ -754,11 +932,13 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
+
         self.run_ceph_cmd(f'fs set {new_fs_name} joinable true')
         self.run_ceph_cmd(f'fs set {new_fs_name} refuse_client_session false')
-        sleep(5)
+        self.fs.wait_for_daemons()
 
         # original file system name does not appear in `fs ls` command
         self.assertFalse(self.fs.exists())
@@ -777,13 +957,16 @@ class TestRenameCommand(TestAdminCommands):
         new_fs_name = 'new_cephfs'
         data_pool = self.fs.get_data_pool_name()
         metadata_pool = self.fs.get_metadata_pool_name()
+
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
+
         self.run_ceph_cmd(f'fs set {new_fs_name} joinable true')
         self.run_ceph_cmd(f'fs set {new_fs_name} refuse_client_session false')
-        sleep(5)
+        self.fs.wait_for_daemons()
 
         try:
             self.run_ceph_cmd(f"fs new {orig_fs_name} {metadata_pool} {data_pool}")
@@ -823,6 +1006,7 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd(f"fs rename {self.fs.name} new_fs")
         except CommandFailedError as ce:
@@ -832,25 +1016,28 @@ class TestRenameCommand(TestAdminCommands):
         else:
             self.fail("expected renaming of file system without the "
                       "'--yes-i-really-mean-it' flag to fail ")
+
         self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
+        self.fs.wait_for_daemons()
 
     def test_fs_rename_fails_for_non_existent_fs(self):
         """
         That renaming a non-existent file system fails.
         """
-        self.skipTest('This test is broken ATM; see '
-                      'https://tracker.ceph.com/issues/66088')
-
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd("fs rename non_existent_fs new_fs --yes-i-really-mean-it")
         except CommandFailedError as ce:
             self.assertEqual(ce.exitstatus, errno.ENOENT, "invalid error code on renaming a non-existent fs")
         else:
             self.fail("expected renaming of a non-existent file system to fail")
+        self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
+        self.fs.wait_for_daemons()
+        self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
 
     def test_fs_rename_fails_new_name_already_in_use(self):
         """
@@ -861,6 +1048,7 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd(f"fs rename {self.fs.name} {self.fs2.name} --yes-i-really-mean-it")
         except CommandFailedError as ce:
@@ -868,8 +1056,10 @@ class TestRenameCommand(TestAdminCommands):
                              "invalid error code on renaming to a fs name that is already in use")
         else:
             self.fail("expected renaming to a new file system name that is already in use to fail.")
+
         self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
+        self.fs.wait_for_daemons()
 
     def test_fs_rename_fails_with_mirroring_enabled(self):
         """
@@ -882,15 +1072,18 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
         except CommandFailedError as ce:
             self.assertEqual(ce.exitstatus, errno.EPERM, "invalid error code on renaming a mirrored file system")
         else:
             self.fail("expected renaming of a mirrored file system to fail")
+
         self.run_ceph_cmd(f'fs mirror disable {orig_fs_name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
+        self.fs.wait_for_daemons()
 
     def test_rename_when_fs_is_online(self):
         '''
@@ -901,6 +1094,7 @@ class TestRenameCommand(TestAdminCommands):
         new_fs_name = 'new_cephfs'
 
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
+
         self.negtest_ceph_cmd(
             args=(f'fs rename {self.fs.name} {new_fs_name} '
                    '--yes-i-really-mean-it'),
@@ -908,6 +1102,7 @@ class TestRenameCommand(TestAdminCommands):
                       "renaming a CephFS, it must be marked as down. See "
                       "`ceph fs fail`."),
             retval=errno.EPERM)
+
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
 
         self.fs.getinfo()
@@ -932,6 +1127,7 @@ class TestRenameCommand(TestAdminCommands):
         self.mount_a.umount_wait(require_clean=True)
 
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
+
         self.negtest_ceph_cmd(
             args=f"fs rename {self.fs.name} new_fs --yes-i-really-mean-it",
             errmsgs=(f"CephFS '{self.fs.name}' doesn't refuse clients. "
@@ -939,6 +1135,7 @@ class TestRenameCommand(TestAdminCommands):
                       "'refuse_client_session' must be set. See "
                       "`ceph fs set`."),
             retval=errno.EPERM)
+
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
 
 
