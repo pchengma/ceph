@@ -136,8 +136,10 @@ class CephadmServe:
 
     def _check_certificates(self) -> None:
         for d in self.mgr.cache.get_daemons_by_type('grafana'):
-            cert = self.mgr.get_store(f'{d.hostname}/grafana_crt')
-            key = self.mgr.get_store(f'{d.hostname}/grafana_key')
+            host = d.hostname
+            assert host is not None
+            cert = self.mgr.cert_key_store.get_cert('grafana_cert', host=host)
+            key = self.mgr.cert_key_store.get_key('grafana_key', host=host)
             if (not cert or not cert.strip()) and (not key or not key.strip()):
                 # certificate/key are empty... nothing to check
                 return
@@ -1093,7 +1095,7 @@ class CephadmServe:
                 action = 'reconfig'
                 # we need only redeploy if secure_monitoring_stack value has changed:
                 if dd.daemon_type in ['prometheus', 'node-exporter', 'alertmanager']:
-                    diff = list(set(last_deps) - set(deps))
+                    diff = list(set(last_deps).symmetric_difference(set(deps)))
                     if any('secure_monitoring_stack' in e for e in diff):
                         action = 'redeploy'
                 elif dd.daemon_type == 'jaeger-agent':
