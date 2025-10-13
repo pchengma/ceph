@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,11 +17,11 @@
 
 #include <string.h>
 #include "common/ceph_context.h"
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include "crimson/common/config_proxy.h"
 #endif
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 namespace ceph::global {
 int __attribute__((weak)) g_conf_set_val(const std::string& key, const std::string& s) {
   return 0;
@@ -38,14 +39,14 @@ int __attribute__((weak)) g_conf_rm_val(const std::string& key) {
 namespace TOPNSPC::global {
 CephContext *g_ceph_context = NULL;
 ConfigProxy& g_conf() {
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
   return crimson::common::local_conf();
 #else
   return g_ceph_context->_conf;
 #endif
 }
 
-#ifdef WITH_ALIEN
+#ifndef WITH_CRIMSON
 int g_conf_set_val(const std::string& key, const std::string& s)
 {
   if (g_ceph_context != NULL)

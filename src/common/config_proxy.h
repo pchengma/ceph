@@ -1,7 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 
 #pragma once
 
+#include <iosfwd>
 #include <type_traits>
 #include "common/config.h"
 #include "common/config_obs.h"
@@ -31,7 +32,6 @@ class ConfigProxy {
   using rev_obs_map_t = ObsMgr::rev_obs_map;
 
   void _call_observers(rev_obs_map_t& rev_obs) {
-    ceph_assert(!ceph::mutex_debugging || !ceph_mutex_is_locked_by_me(lock));
     for (auto& [obs, keys] : rev_obs) {
       (*obs)->handle_conf_change(*this, keys);
     }
@@ -84,7 +84,7 @@ public:
     return values;
   }
   void set_config_values(const ConfigValues& val) {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
     std::lock_guard l{lock};
 #endif
     values = val;

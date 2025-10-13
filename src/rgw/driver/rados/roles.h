@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -25,6 +25,7 @@ namespace ceph { class Formatter; }
 class DoutPrefixProvider;
 class optional_yield;
 struct rgw_raw_obj;
+struct RGWRoleInfo;
 
 
 namespace rgwrados::roles {
@@ -34,7 +35,7 @@ int add(const DoutPrefixProvider* dpp,
         optional_yield y,
         librados::Rados& rados,
         const rgw_raw_obj& obj,
-        const rgw::sal::RGWRoleInfo& role,
+        const RGWRoleInfo& role,
         bool exclusive, uint32_t limit);
 
 /// Look up a role's id by name in the list.
@@ -79,7 +80,7 @@ struct resource_metadata {
   }
 
   void dump(ceph::Formatter* f) const;
-  static void generate_test_instances(std::list<resource_metadata*>& o);
+  static std::list<resource_metadata> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(resource_metadata);
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 #define CEPH_DISPATCHQUEUE_H
 
 #include <atomic>
-#include <map>
+#include <set>
 #include <queue>
 #include <boost/intrusive_ptr.hpp>
 #include "include/ceph_assert.h"
@@ -38,6 +39,9 @@ struct Connection;
  * See Messenger::dispatch_entry for details.
  */
 class DispatchQueue {
+  using ArrivalSet = std::multiset<double>;
+  ArrivalSet marrival;
+
   class QueueItem {
     int type;
     ConnectionRef con;
@@ -60,6 +64,13 @@ class DispatchQueue {
       ceph_assert(is_code());
       return con.get();
     }
+
+    /**
+     * An iterator into #marrival.  This field is only initialized if
+     * `!is_code()`.  It is set by add_arrival() and used by
+     * remove_arrival().
+     */
+    ArrivalSet::iterator arrival;
   };
 
   CephContext *cct;
@@ -69,21 +80,11 @@ class DispatchQueue {
 
   PrioritizedQueue<QueueItem, uint64_t> mqueue;
 
-  std::set<std::pair<double, ceph::ref_t<Message>>> marrival;
-  std::map<ceph::ref_t<Message>, decltype(marrival)::iterator> marrival_map;
-  void add_arrival(const ceph::ref_t<Message>& m) {
-    marrival_map.insert(
-      make_pair(
-	m,
-	marrival.insert(std::make_pair(m->get_recv_stamp(), m)).first
-	)
-      );
+  void add_arrival(QueueItem &item) {
+    item.arrival = marrival.insert(item.get_message()->get_recv_stamp());
   }
-  void remove_arrival(const ceph::ref_t<Message>& m) {
-    auto it = marrival_map.find(m);
-    ceph_assert(it != marrival_map.end());
-    marrival.erase(it->second);
-    marrival_map.erase(it);
+  void remove_arrival(QueueItem &item) {
+    marrival.erase(item.arrival);
   }
 
   std::atomic<uint64_t> next_id;

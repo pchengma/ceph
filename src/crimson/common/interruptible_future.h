@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -408,7 +408,7 @@ public:
   template <typename U>
   using interrupt_futurize_t =
     typename interruptor<InterruptCond>::template futurize_t<U>;
-  using core_type::get0;
+  using core_type::get;
   using core_type::core_type;
   using core_type::get_exception;
   using core_type::ignore_ready_future;
@@ -719,7 +719,7 @@ class [[nodiscard]] interruptible_future_detail<
 {
 public:
   using core_type = ErroratedFuture<crimson::errorated_future_marker<T>>;
-  using core_type::unsafe_get0;
+  using core_type::unsafe_get;
   using errorator_type = typename core_type::errorator_type;
   using interrupt_errorator_type =
     interruptible_errorator<InterruptCond, errorator_type>;
@@ -1179,7 +1179,7 @@ public:
       std::move(ic),
       std::forward<OpFunc>(opfunc),
       std::forward<Params>(params)...
-    ).template handle_interruption(std::move(efunc));
+    ).handle_interruption(std::move(efunc));
   }
 
   template <typename OpFunc, typename OnInterrupt,
@@ -1330,6 +1330,27 @@ public:
       );
     }
   }
+
+  template <InvokeReturnsInterruptibleFuture AsyncAction>
+  [[gnu::always_inline]]
+  static auto repeat_eagain(AsyncAction&& action) {
+    return seastar::do_with(
+      std::forward<AsyncAction>(action),
+      [] (auto &f) {
+      return repeat([&f] {
+	return std::invoke(f
+	).si_then([] {
+	  return seastar::stop_iteration::yes;
+	}).handle_error_interruptible(
+	  [](const crimson::ct_error::eagain &e) {
+	    return seastar::stop_iteration::no;
+	  },
+	  crimson::ct_error::pass_further_all{}
+	);
+      });
+    });
+  }
+
   template <typename AsyncAction>
   requires (!InvokeReturnsInterruptibleFuture<AsyncAction>)
   [[gnu::always_inline]]
@@ -1382,9 +1403,8 @@ public:
       auto f = seastar::futurize_invoke(decorated_func, *begin++);
       if (!f.available() || f.failed()) {
 	if (!s) {
-	  using itraits = std::iterator_traits<Iterator>;
 	  auto n = (seastar::internal::iterator_range_estimate_vector_capacity(
-		begin, end, typename itraits::iterator_category()) + 1);
+		begin, end) + 1);
 	  s = new parallel_for_each_state<InterruptCond, ResultType>(n);
 	}
 	s->add_future(std::move(f));
@@ -1421,7 +1441,7 @@ public:
         ret = seastar::futurize_invoke(mapper, *begin++).then_wrapped_interruptible(
 	    [s = s.get(), ret = std::move(ret)] (auto f) mutable {
             try {
-                s->result = s->reduce(std::move(s->result), std::move(f.get0()));
+                s->result = s->reduce(std::move(s->result), std::move(f.get()));
                 return std::move(ret);
             } catch (...) {
                 return std::move(ret).then_wrapped_interruptible([ex = std::current_exception()] (auto f) {
@@ -1465,6 +1485,17 @@ public:
     return ::seastar::internal::when_all_succeed_impl(
 	futurize_invoke_if_func(std::forward<FutOrFuncs>(fut_or_funcs))...);
   }
+
+  // This is a simpler implemation than seastar::when_all_succeed.
+  // We are not using ::seastar::internal::complete_when_all
+  template <typename T>
+  static inline auto when_all_succeed(std::vector<interruptible_future<InterruptCond, T>>&& futures) noexcept {
+    return interruptor::parallel_for_each(futures,
+    [] (auto&& ifut) -> interruptible_future<InterruptCond, T> {
+      return std::move(ifut);
+    });
+  }
+
 
   template <typename Func,
 	    typename Result = futurize_t<std::invoke_result_t<Func>>>

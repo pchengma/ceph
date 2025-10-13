@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -15,29 +15,42 @@
 
 #include "osd/object_state.h"
 
+class MOSDPGBackfillRemove;
+
 namespace crimson::osd {
 class UrgentRecovery;
-}
-
-class MOSDPGBackfillRemove;
+class PglogBasedRecovery;
 class PGBackend;
 
 class PGRecovery : public crimson::osd::BackfillState::BackfillListener {
 public:
+  using interruptor =
+    ::crimson::interruptible::interruptor<
+      ::crimson::osd::IOInterruptCondition>;
   template <typename T = void>
   using interruptible_future = RecoveryBackend::interruptible_future<T>;
   PGRecovery(PGRecoveryListener* pg) : pg(pg) {}
   virtual ~PGRecovery() {}
   void start_pglogbased_recovery();
 
-  interruptible_future<bool> start_recovery_ops(
+  interruptible_future<seastar::stop_iteration> start_recovery_ops(
     RecoveryBackend::RecoveryBlockingEvent::TriggerI&,
+    crimson::osd::PglogBasedRecovery &recover_op,
     size_t max_to_start);
+  void on_activate_complete();
   void on_backfill_reserved();
   void dispatch_backfill_event(
     boost::intrusive_ptr<const boost::statechart::event_base> evt);
+  void backfill_target_finished() {
+    backfill_state->backfill_target_done();
+  }
 
   seastar::future<> stop() { return seastar::now(); }
+  void on_pg_clean();
+  void enqueue_push(
+    const hobject_t& obj,
+    const eversion_t& v,
+    const std::vector<pg_shard_t> &peers) final;
 private:
   PGRecoveryListener* pg;
   size_t start_primary_recovery_ops(
@@ -54,7 +67,9 @@ private:
   }
   RecoveryBackend::interruptible_future<> recover_missing(
     RecoveryBackend::RecoveryBlockingEvent::TriggerI&,
-    const hobject_t &soid, eversion_t need);
+    const hobject_t &soid,
+    eversion_t need,
+    bool with_throttle);
   RecoveryBackend::interruptible_future<> prep_object_replica_deletes(
     RecoveryBackend::RecoveryBlockingEvent::TriggerI& trigger,
     const hobject_t& soid,
@@ -86,6 +101,18 @@ private:
   friend class ReplicatedRecoveryBackend;
   friend class crimson::osd::UrgentRecovery;
 
+  interruptible_future<> recover_object_with_throttle(
+    hobject_t soid,
+    eversion_t need);
+
+  interruptible_future<> recover_object(
+    const hobject_t &soid,
+    eversion_t need) {
+    auto backend = pg->get_recovery_backend();
+    assert(backend);
+    return backend->recover_object(soid, need);
+  }
+
   // backfill begin
   std::unique_ptr<crimson::osd::BackfillState> backfill_state;
   std::map<pg_shard_t,
@@ -94,15 +121,13 @@ private:
   template <class EventT>
   void start_backfill_recovery(
     const EventT& evt);
+  void backfill_suspended();
   void request_replica_scan(
     const pg_shard_t& target,
     const hobject_t& begin,
     const hobject_t& end) final;
   void request_primary_scan(
     const hobject_t& begin) final;
-  void enqueue_push(
-    const hobject_t& obj,
-    const eversion_t& v) final;
   void enqueue_drop(
     const pg_shard_t& target,
     const hobject_t& obj,
@@ -111,8 +136,16 @@ private:
   void update_peers_last_backfill(
     const hobject_t& new_last_backfill) final;
   bool budget_available() const final;
+
+  template <typename T>
+  void start_peering_event_operation_listener(T &&evt, float delay = 0);
   void backfilled() final;
+  void request_backfill();
+  void all_replicas_recovered();
+
   friend crimson::osd::BackfillState::PGFacade;
   friend crimson::osd::PG;
   // backfill end
 };
+
+}

@@ -1,12 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
+#include "include/types.h" // for epoch_t
 #include "include/utime.h"
 #include "common/Formatter.h"
 
 #include <stack>
+#include <tuple>
 #include <vector>
 #include <boost/circular_buffer.hpp>
 

@@ -1,6 +1,6 @@
 #include "gtest/gtest.h"
 
-#include "common/Formatter.h"
+#include "common/TableFormatter.h"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -247,6 +247,23 @@ TEST(tableformatter, multiline_keyval)
     "key::integer=\"10\" key::float=\"10\" key::string=\"string\" \n"
     "key::integer=\"20\" key::float=\"20\" key::string=\"string\" \n";
 
+  EXPECT_EQ(cmp, sout.str());
+}
+
+TEST(tableformatter, dump_large_item) {
+  std::stringstream sout;
+  TableFormatter* formatter = (TableFormatter*) Formatter::create("table-kv");
+
+  std::string base_url("http://example.com");
+  std::string bucket_name("bucket");
+  std::string object_key(1024, 'a');
+
+  std::string full_url = base_url + "/" + bucket_name + "/" + object_key;
+  formatter->dump_format("Location", "%s/%s/%s", base_url.c_str(), bucket_name.c_str(), object_key.c_str());
+  formatter->flush(sout);
+  delete formatter;
+
+  std::string cmp = "key::Location=\"" + full_url + "\" \n";
   EXPECT_EQ(cmp, sout.str());
 }
 

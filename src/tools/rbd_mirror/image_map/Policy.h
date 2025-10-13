@@ -1,14 +1,17 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_MIRROR_IMAGE_MAP_POLICY_H
 #define CEPH_RBD_MIRROR_IMAGE_MAP_POLICY_H
 
 #include <map>
+#include <set>
+#include <string>
 #include <tuple>
 #include <boost/optional.hpp>
 
 #include "cls/rbd/cls_rbd_types.h"
+#include "common/ceph_mutex.h"
 #include "include/rados/librados.hpp"
 #include "tools/rbd_mirror/image_map/StateTransition.h"
 #include "tools/rbd_mirror/image_map/Types.h"

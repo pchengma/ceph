@@ -1,17 +1,18 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
-
-#include "common/errno.h"
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_user.h"
+#include "common/errno.h"
+
 
 #include "rgw_account.h"
 #include "rgw_bucket.h"
+#include "rgw_metadata.h"
+#include "rgw_metadata_lister.h"
 #include "rgw_quota.h"
 #include "rgw_rest_iam.h" // validate_iam_user_name()
 
 #include "services/svc_user.h"
-#include "services/svc_meta.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -29,33 +30,6 @@ static string key_type_to_str(int key_type) {
       return "s3";
       break;
   }
-}
-
-static bool char_is_unreserved_url(char c)
-{
-  if (isalnum(c))
-    return true;
-
-  switch (c) {
-  case '-':
-  case '.':
-  case '_':
-  case '~':
-    return true;
-  default:
-    return false;
-  }
-}
-
-static bool validate_access_key(string& key)
-{
-  const char *p = key.c_str();
-  while (*p) {
-    if (!char_is_unreserved_url(*p))
-      return false;
-    p++;
-  }
-  return true;
 }
 
 static void set_err_msg(std::string *sink, std::string msg)
@@ -188,6 +162,11 @@ static void dump_user_info(Formatter *f, RGWUserInfo &info,
   }
   encode_json("type", user_source_type, f);
   encode_json("mfa_ids", info.mfa_ids, f);
+  encode_json("account_id", info.account_id, f);
+  encode_json("path", info.path, f);
+  encode_json("create_date", info.create_date, f);
+  encode_json("tags", info.tags, f);
+  encode_json("group_ids", info.group_ids, f);
   if (stats) {
     encode_json("stats", *stats, f);
   }
@@ -494,41 +473,6 @@ int RGWAccessKeyPool::check_op(RGWUserAdminOpState& op_state,
     op_state.set_access_key_exist();
   }
   return 0;
-}
-
-void rgw_generate_secret_key(CephContext* cct,
-                             std::string& secret_key)
-{
-  char secret_key_buf[SECRET_KEY_LEN + 1];
-  gen_rand_alphanumeric_plain(cct, secret_key_buf, sizeof(secret_key_buf));
-  secret_key = secret_key_buf;
-}
-
-int rgw_generate_access_key(const DoutPrefixProvider* dpp,
-                            optional_yield y,
-                            rgw::sal::Driver* driver,
-                            std::string& access_key_id)
-{
-  std::string id;
-  int r = 0;
-
-  do {
-    id.resize(PUBLIC_ID_LEN + 1);
-    gen_rand_alphanumeric_upper(dpp->get_cct(), id.data(), id.size());
-    id.pop_back(); // remove trailing null
-
-    if (!validate_access_key(id))
-      continue;
-
-    std::unique_ptr<rgw::sal::User> duplicate_check;
-    r = driver->get_user_by_access_key(dpp, id, y, &duplicate_check);
-  } while (r == 0);
-
-  if (r == -ENOENT) {
-    access_key_id = std::move(id);
-    return 0;
-  }
-  return r;
 }
 
 // Generate a new random key
@@ -1552,6 +1496,7 @@ static void rename_swift_keys(const rgw_user& user,
   user.to_str(user_id);
 
   auto modify_keys = std::move(keys);
+  keys = {};
   for ([[maybe_unused]] auto& [k, key] : modify_keys) {
     std::string id = user_id + ":" + key.subuser;
     key.id = id;
@@ -1681,8 +1626,8 @@ static int adopt_user_bucket(const DoutPrefixProvider* dpp,
                              optional_yield y,
                              rgw::sal::Driver* driver,
                              const rgw_bucket& bucketid,
-                             const rgw_owner& new_owner)
-{
+                             const rgw_owner& new_owner,
+                             const std::string& new_owner_name) {
   // retry in case of racing writes to the bucket instance metadata
   static constexpr auto max_retries = 10;
   int tries = 0;
@@ -1699,7 +1644,7 @@ static int adopt_user_bucket(const DoutPrefixProvider* dpp,
       return r;
     }
 
-    r = bucket->chown(dpp, new_owner, y);
+    r = bucket->chown(dpp, new_owner, new_owner_name, y);
     if (r < 0) {
       ldpp_dout(dpp, 1) << "failed to chown bucket " << bucketid
           << ": " << cpp_strerror(r) << dendl;
@@ -1712,8 +1657,8 @@ static int adopt_user_bucket(const DoutPrefixProvider* dpp,
 
 static int adopt_user_buckets(const DoutPrefixProvider* dpp, optional_yield y,
                               rgw::sal::Driver* driver, const rgw_user& user,
-                              const rgw_account_id& account_id)
-{
+                              const rgw_account_id& account_id,
+                              const std::string& account_name) {
   const size_t max_chunk = dpp->get_cct()->_conf->rgw_list_buckets_max_chunk;
   constexpr bool need_stats = false;
 
@@ -1729,7 +1674,8 @@ static int adopt_user_buckets(const DoutPrefixProvider* dpp, optional_yield y,
     }
 
     for (const auto& ent : listing.buckets) {
-      r = adopt_user_bucket(dpp, y, driver, ent.bucket, account_id);
+      r = adopt_user_bucket(dpp, y, driver, ent.bucket, account_id,
+                            account_name);
       if (r < 0 && r != -ENOENT) {
         return r;
       }
@@ -1753,7 +1699,11 @@ int RGWUser::execute_add(const DoutPrefixProvider *dpp, RGWUserAdminOpState& op_
   user_info.display_name = display_name;
   user_info.type = TYPE_RGW;
 
-  // tenant must not look like a valid account id
+  // user/tenant must not look like a valid account id
+  if (rgw::account::validate_id(uid.id)) {
+    set_err_msg(err_msg, "uid must not be formatted as an account id");
+    return -EINVAL;
+  }
   if (rgw::account::validate_id(uid.tenant)) {
     set_err_msg(err_msg, "tenant must not be formatted as an account id");
     return -EINVAL;
@@ -2158,9 +2108,19 @@ int RGWUser::execute_modify(const DoutPrefixProvider *dpp, RGWUserAdminOpState& 
         set_err_msg(err_msg, err);
         return ret;
       }
+      RGWAccountInfo account_info;
+      rgw::sal::Attrs attrs;
+      RGWObjVersionTracker objv;
+      int r = driver->load_account_by_id(dpp, y, op_state.account_id,
+                                         account_info,
+                                         attrs, objv);
+      if (r < 0) {
+        err = "Failed to load account by id";
+        return r;
+      }
       // change account on user's buckets
       ret = adopt_user_buckets(dpp, y, driver, user_info.user_id,
-                               user_info.account_id);
+                               user_info.account_id, account_info.name);
       if (ret < 0) {
         set_err_msg(err_msg, "failed to change ownership of user's buckets");
         return ret;
@@ -2700,42 +2660,48 @@ int RGWUserAdminOp_Caps::remove(const DoutPrefixProvider *dpp,
   return 0;
 }
 
-class RGWUserMetadataHandler : public RGWMetadataHandler_GenericMetaBE {
-public:
-  struct Svc {
-    RGWSI_User *user{nullptr};
-  } svc;
+struct RGWUserCompleteInfo {
+  RGWUserInfo info;
+  std::map<std::string, bufferlist> attrs;
+  bool has_attrs{false};
 
-  RGWUserMetadataHandler(RGWSI_User *user_svc) {
-    base_init(user_svc->ctx(), user_svc->get_be_handler());
-    svc.user = user_svc;
+  void dump(Formatter * const f) const {
+    info.dump(f);
+    encode_json("attrs", attrs, f);
   }
 
-  ~RGWUserMetadataHandler() {}
+  void decode_json(JSONObj *obj) {
+    decode_json_obj(info, obj);
+    has_attrs = JSONDecoder::decode_json("attrs", attrs, obj);
+  }
+};
+
+class RGWUserMetadataObject : public RGWMetadataObject {
+  RGWUserCompleteInfo uci;
+public:
+  RGWUserMetadataObject(const RGWUserCompleteInfo& uci,
+                        const obj_version& v, ceph::real_time m)
+    : RGWMetadataObject(v, m), uci(uci) {}
+
+  void dump(Formatter *f) const override {
+    uci.dump(f);
+  }
+
+  RGWUserCompleteInfo& get_uci() {
+    return uci;
+  }
+};
+
+class RGWUserMetadataHandler : public RGWMetadataHandler {
+  RGWSI_User *svc_user{nullptr};
+ public:
+  explicit RGWUserMetadataHandler(RGWSI_User* svc_user)
+    : svc_user(svc_user) {}
 
   string get_type() override { return "user"; }
 
-  int do_get(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWMetadataObject **obj, optional_yield y, const DoutPrefixProvider *dpp) override {
-    RGWUserCompleteInfo uci;
-    RGWObjVersionTracker objv_tracker;
-    real_time mtime;
-
-    rgw_user user = RGWSI_User::user_from_meta_key(entry);
-
-    int ret = svc.user->read_user_info(op->ctx(), user, &uci.info, &objv_tracker,
-                                       &mtime, nullptr, &uci.attrs,
-                                       y, dpp);
-    if (ret < 0) {
-      return ret;
-    }
-
-    RGWUserMetadataObject *mdo = new RGWUserMetadataObject(uci, objv_tracker.read_version, mtime);
-    *obj = mdo;
-
-    return 0;
-  }
-
-  RGWMetadataObject *get_meta_obj(JSONObj *jo, const obj_version& objv, const ceph::real_time& mtime) override {
+  RGWMetadataObject *get_meta_obj(JSONObj *jo, const obj_version& objv,
+                                  const ceph::real_time& mtime) override {
     RGWUserCompleteInfo uci;
 
     try {
@@ -2747,74 +2713,74 @@ public:
     return new RGWUserMetadataObject(uci, objv, mtime);
   }
 
-  int do_put(RGWSI_MetaBackend_Handler::Op *op, string& entry,
-             RGWMetadataObject *obj,
-             RGWObjVersionTracker& objv_tracker,
-             optional_yield y, const DoutPrefixProvider *dpp,
-             RGWMDLogSyncType type, bool from_remote_zone) override;
+  int get(std::string& entry, RGWMetadataObject** obj, optional_yield y,
+          const DoutPrefixProvider *dpp) override;
+  int put(std::string& entry, RGWMetadataObject* obj,
+          RGWObjVersionTracker& objv_tracker,
+          optional_yield y, const DoutPrefixProvider* dpp,
+          RGWMDLogSyncType type, bool from_remote_zone) override;
+  int remove(std::string& entry, RGWObjVersionTracker& objv_tracker,
+             optional_yield y, const DoutPrefixProvider *dpp) override;
 
-  int do_remove(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWObjVersionTracker& objv_tracker,
-                optional_yield y, const DoutPrefixProvider *dpp) override {
-    RGWUserInfo info;
+  int mutate(const std::string& entry, const ceph::real_time& mtime,
+             RGWObjVersionTracker* objv_tracker, optional_yield y,
+             const DoutPrefixProvider* dpp, RGWMDLogStatus op_type,
+             std::function<int()> f) override;
 
-    rgw_user user = RGWSI_User::user_from_meta_key(entry);
-
-    int ret = svc.user->read_user_info(op->ctx(), user, &info, nullptr,
-                                       nullptr, nullptr, nullptr,
-                                       y, dpp);
-    if (ret < 0) {
-      return ret;
-    }
-
-    return svc.user->remove_user_info(op->ctx(), info, &objv_tracker,
-                                      y, dpp);
-  }
+  int list_keys_init(const DoutPrefixProvider* dpp, const std::string& marker,
+                     void** phandle) override;
+  int list_keys_next(const DoutPrefixProvider* dpp, void* handle, int max,
+                     std::list<std::string>& keys, bool* truncated) override;
+  void list_keys_complete(void *handle) override;
+  std::string get_marker(void *handle) override;
 };
 
-class RGWMetadataHandlerPut_User : public RGWMetadataHandlerPut_SObj
+int RGWUserMetadataHandler::get(std::string& entry, RGWMetadataObject **obj,
+                                optional_yield y, const DoutPrefixProvider *dpp)
 {
-  RGWUserMetadataHandler *uhandler;
-  RGWUserMetadataObject *uobj;
-public:
-  RGWMetadataHandlerPut_User(RGWUserMetadataHandler *_handler,
-                             RGWSI_MetaBackend_Handler::Op *op, string& entry,
-                             RGWMetadataObject *obj, RGWObjVersionTracker& objv_tracker,
-                             optional_yield y,
-                             RGWMDLogSyncType type, bool from_remote_zone) : RGWMetadataHandlerPut_SObj(_handler, op, entry, obj, objv_tracker, y, type, from_remote_zone),
-                                                                uhandler(_handler) {
-    uobj = static_cast<RGWUserMetadataObject *>(obj);
+  RGWUserCompleteInfo uci;
+  RGWObjVersionTracker objv_tracker;
+  real_time mtime;
+
+  rgw_user user = RGWSI_User::user_from_meta_key(entry);
+
+  int ret = svc_user->read_user_info(user, &uci.info, &objv_tracker,
+                                     &mtime, nullptr, &uci.attrs,
+                                     y, dpp);
+  if (ret < 0) {
+    return ret;
   }
 
-  int put_checked(const DoutPrefixProvider *dpp) override;
-};
-
-int RGWUserMetadataHandler::do_put(RGWSI_MetaBackend_Handler::Op *op, string& entry,
-                                   RGWMetadataObject *obj,
-                                   RGWObjVersionTracker& objv_tracker,
-                                   optional_yield y, const DoutPrefixProvider *dpp,
-                                   RGWMDLogSyncType type, bool from_remote_zone)
-{
-  RGWMetadataHandlerPut_User put_op(this, op, entry, obj, objv_tracker, y, type, from_remote_zone);
-  return do_put_operate(&put_op, dpp);
+  *obj = new RGWUserMetadataObject(uci, objv_tracker.read_version, mtime);
+  return 0;
 }
 
-int RGWMetadataHandlerPut_User::put_checked(const DoutPrefixProvider *dpp)
+int RGWUserMetadataHandler::put(std::string& entry, RGWMetadataObject *obj,
+                                RGWObjVersionTracker& objv_tracker,
+                                optional_yield y, const DoutPrefixProvider *dpp,
+                                RGWMDLogSyncType type, bool from_remote_zone)
 {
-  RGWUserMetadataObject *orig_obj = static_cast<RGWUserMetadataObject *>(old_obj);
-  RGWUserCompleteInfo& uci = uobj->get_uci();
+  const rgw_user user = RGWSI_User::user_from_meta_key(entry);
 
-  map<string, bufferlist> *pattrs{nullptr};
-  if (uci.has_attrs) {
-    pattrs = &uci.attrs;
+  // read existing user info
+  std::optional old = RGWUserCompleteInfo{};
+  int ret = svc_user->read_user_info(user, &old->info, &objv_tracker,
+                                     nullptr, nullptr, &old->attrs, y, dpp);
+  if (ret == -ENOENT) {
+    old = std::nullopt;
+  } else if (ret < 0) {
+    return ret;
   }
+  RGWUserInfo* pold_info = (old ? &old->info : nullptr);
 
-  RGWUserInfo *pold_info = (orig_obj ? &orig_obj->get_uci().info : nullptr);
-
+  // store the updated user info
+  auto newobj = static_cast<RGWUserMetadataObject*>(obj);
+  RGWUserCompleteInfo& uci = newobj->get_uci();
+  auto pattrs = (uci.has_attrs ? &uci.attrs : nullptr);
   auto mtime = obj->get_mtime();
 
-  int ret = uhandler->svc.user->store_user_info(op->ctx(), uci.info, pold_info,
-                                               &objv_tracker, mtime,
-                                               false, pattrs, y, dpp);
+  ret = svc_user->store_user_info(uci.info, pold_info, &objv_tracker,
+                                  mtime, false, pattrs, y, dpp);
   if (ret < 0) {
     return ret;
   }
@@ -2822,13 +2788,69 @@ int RGWMetadataHandlerPut_User::put_checked(const DoutPrefixProvider *dpp)
   return STATUS_APPLIED;
 }
 
+int RGWUserMetadataHandler::remove(std::string& entry, RGWObjVersionTracker& objv_tracker,
+                                   optional_yield y, const DoutPrefixProvider *dpp)
+{
+  RGWUserInfo info;
 
-RGWUserCtl::RGWUserCtl(RGWSI_Zone *zone_svc,
-                       RGWSI_User *user_svc,
-                       RGWUserMetadataHandler *_umhandler) : umhandler(_umhandler) {
+  rgw_user user = RGWSI_User::user_from_meta_key(entry);
+
+  int ret = svc_user->read_user_info(user, &info, nullptr,
+                                     nullptr, nullptr, nullptr,
+                                     y, dpp);
+  if (ret < 0) {
+    return ret;
+  }
+
+  return svc_user->remove_user_info(info, &objv_tracker, y, dpp);
+};
+
+int RGWUserMetadataHandler::mutate(const std::string& entry, const ceph::real_time& mtime,
+                                   RGWObjVersionTracker* objv_tracker, optional_yield y,
+                                   const DoutPrefixProvider* dpp, RGWMDLogStatus op_type,
+                                   std::function<int()> f)
+{
+  return -ENOTSUP; // unused
+}
+
+int RGWUserMetadataHandler::list_keys_init(const DoutPrefixProvider* dpp,
+                                           const std::string& marker,
+                                           void** phandle)
+{
+  std::unique_ptr<RGWMetadataLister> lister;
+  int ret = svc_user->create_lister(dpp, marker, lister);
+  if (ret < 0) {
+    return ret;
+  }
+  *phandle = lister.release(); // release ownership
+  return 0;
+}
+
+int RGWUserMetadataHandler::list_keys_next(const DoutPrefixProvider* dpp,
+                                           void* handle, int max,
+                                           std::list<std::string>& keys,
+                                           bool* truncated)
+{
+  auto lister = static_cast<RGWMetadataLister*>(handle);
+  return lister->get_next(dpp, max, keys, truncated);
+}
+
+void RGWUserMetadataHandler::list_keys_complete(void *handle)
+{
+  delete static_cast<RGWMetadataLister*>(handle);
+}
+
+std::string RGWUserMetadataHandler::get_marker(void *handle)
+{
+  auto lister = static_cast<RGWMetadataLister*>(handle);
+  return lister->get_marker();
+}
+
+
+RGWUserCtl::RGWUserCtl(RGWSI_Zone *zone_svc, RGWSI_User *user_svc)
+{
   svc.zone = zone_svc;
   svc.user = user_svc;
-  be_handler = umhandler->get_be_handler();
 }
 
 template <class T>
@@ -2863,17 +2885,14 @@ int RGWUserCtl::get_info_by_uid(const DoutPrefixProvider *dpp,
                                 const GetParams& params)
 
 {
-  return be_handler->call([&](RGWSI_MetaBackend_Handler::Op *op) {
-    return svc.user->read_user_info(op->ctx(),
-                                    uid,
-                                    info,
-                                    params.objv_tracker,
-                                    params.mtime,
-                                    params.cache_info,
-                                    params.attrs,
-                                    y,
-                                    dpp);
-  });
+  return svc.user->read_user_info(uid,
+                                  info,
+                                  params.objv_tracker,
+                                  params.mtime,
+                                  params.cache_info,
+                                  params.attrs,
+                                  y,
+                                  dpp);
 }
 
 int RGWUserCtl::get_info_by_email(const DoutPrefixProvider *dpp, 
@@ -2882,15 +2901,13 @@ int RGWUserCtl::get_info_by_email(const DoutPrefixProvider *dpp,
                                   optional_yield y,
                                   const GetParams& params)
 {
-  return be_handler->call([&](RGWSI_MetaBackend_Handler::Op *op) {
-    return svc.user->get_user_info_by_email(op->ctx(), email,
-                                            info,
-                                            params.objv_tracker,
-                                            params.attrs,
-                                            params.mtime,
-                                            y,
-                                            dpp);
-  });
+  return svc.user->get_user_info_by_email(email,
+                                          info,
+                                          params.objv_tracker,
+                                          params.attrs,
+                                          params.mtime,
+                                          y,
+                                          dpp);
 }
 
 int RGWUserCtl::get_info_by_swift(const DoutPrefixProvider *dpp, 
@@ -2899,15 +2916,13 @@ int RGWUserCtl::get_info_by_swift(const DoutPrefixProvider *dpp,
                                   optional_yield y,
                                   const GetParams& params)
 {
-  return be_handler->call([&](RGWSI_MetaBackend_Handler::Op *op) {
-    return svc.user->get_user_info_by_swift(op->ctx(), swift_name,
-                                            info,
-                                            params.objv_tracker,
-                                            params.attrs,
-                                            params.mtime,
-                                            y,
-                                            dpp);
-  });
+  return svc.user->get_user_info_by_swift(swift_name,
+                                          info,
+                                          params.objv_tracker,
+                                          params.attrs,
+                                          params.mtime,
+                                          y,
+                                          dpp);
 }
 
 int RGWUserCtl::get_info_by_access_key(const DoutPrefixProvider *dpp, 
@@ -2916,15 +2931,13 @@ int RGWUserCtl::get_info_by_access_key(const DoutPrefixProvider *dpp,
                                        optional_yield y,
                                        const GetParams& params)
 {
-  return be_handler->call([&](RGWSI_MetaBackend_Handler::Op *op) {
-    return svc.user->get_user_info_by_access_key(op->ctx(), access_key,
-                                                 info,
-                                                 params.objv_tracker,
-                                                 params.attrs,
-                                                 params.mtime,
-                                                 y,
-                                                 dpp);
-  });
+  return svc.user->get_user_info_by_access_key(access_key,
+                                               info,
+                                               params.objv_tracker,
+                                               params.attrs,
+                                               params.mtime,
+                                               y,
+                                               dpp);
 }
 
 int RGWUserCtl::get_attrs_by_uid(const DoutPrefixProvider *dpp, 
@@ -2944,18 +2957,14 @@ int RGWUserCtl::store_info(const DoutPrefixProvider *dpp,
                            const RGWUserInfo& info, optional_yield y,
                            const PutParams& params)
 {
-  string key = RGWSI_User::get_meta_key(info.user_id);
-
-  return be_handler->call([&](RGWSI_MetaBackend_Handler::Op *op) {
-    return svc.user->store_user_info(op->ctx(), info,
-                                     params.old_info,
-                                     params.objv_tracker,
-                                     params.mtime,
-                                     params.exclusive,
-                                     params.attrs,
-                                     y,
-                                     dpp);
-  });
+  return svc.user->store_user_info(info,
+                                   params.old_info,
+                                   params.objv_tracker,
+                                   params.mtime,
+                                   params.exclusive,
+                                   params.attrs,
+                                   y,
+                                   dpp);
 }
 
 int RGWUserCtl::remove_info(const DoutPrefixProvider *dpp, 
@@ -2963,17 +2972,13 @@ int RGWUserCtl::remove_info(const DoutPrefixProvider *dpp,
                             const RemoveParams& params)
 
 {
-  string key = RGWSI_User::get_meta_key(info.user_id);
-
-  return be_handler->call([&](RGWSI_MetaBackend_Handler::Op *op) {
-    return svc.user->remove_user_info(op->ctx(), info,
-                                      params.objv_tracker,
-                                      y, dpp);
-  });
+  return svc.user->remove_user_info(info, params.objv_tracker, y, dpp);
 }
 
-RGWMetadataHandler *RGWUserMetaHandlerAllocator::alloc(RGWSI_User *user_svc) {
-  return new RGWUserMetadataHandler(user_svc);
+auto create_user_metadata_handler(RGWSI_User *user_svc)
+    -> std::unique_ptr<RGWMetadataHandler>
+{
+  return std::make_unique<RGWUserMetadataHandler>(user_svc);
 }
 
 void rgw_user::dump(Formatter *f) const

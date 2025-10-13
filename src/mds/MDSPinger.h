@@ -1,19 +1,16 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_MDS_PINGER_H
 #define CEPH_MDS_PINGER_H
 
 #include <map>
 
-#include "include/types.h"
-
-#include "msg/msg_types.h"
+#include "mdstypes.h" // for mds_rank_t
 #include "common/ceph_mutex.h"
 #include "common/ceph_time.h"
-#include "messages/MMDSPing.h"
-
-#include "mdstypes.h"
+#include "include/types.h" // for version_t
+#include "msg/msg_types.h" // for entity_addrvec_t
 
 class MDSRank;
 

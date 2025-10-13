@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  *
  * Copyright (C) 2012 CohortFS, LLC.
@@ -45,6 +46,7 @@ class BarrierContext;
 class C_Block_Sync;
 
 typedef boost::intrusive::list< C_Block_Sync,
+				boost::intrusive::constant_time_size<false>,
 				boost::intrusive::member_hook<
 				  C_Block_Sync,
 				  boost::intrusive::list_member_hook<>,
@@ -68,6 +70,7 @@ public:
 };
 
 typedef boost::intrusive::list< Barrier,
+				boost::intrusive::constant_time_size<false>,
 				boost::intrusive::member_hook<
 				  Barrier,
 				  boost::intrusive::list_member_hook<>,

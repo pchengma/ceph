@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -35,7 +35,8 @@ seastar::future<> RecoverySubRequest::with_pg(
   return interruptor::with_interruption([this, pgref] {
     LOG_PREFIX(RecoverySubRequest::with_pg);
     DEBUGI("{}: {}", "RecoverySubRequest::with_pg", *this);
-    return pgref->get_recovery_backend()->handle_recovery_op(m, r_conn
+    return pgref->get_recovery_backend()->handle_recovery_op(
+      m, get_remote_connection()
     ).then_interruptible([this] {
       LOG_PREFIX(RecoverySubRequest::with_pg);
       DEBUGI("{}: complete", *this);
@@ -43,7 +44,7 @@ seastar::future<> RecoverySubRequest::with_pg(
     });
   }, [](std::exception_ptr) {
     return seastar::now();
-  }, pgref).finally([this, opref=std::move(opref), pgref] {
+  }, pgref, pgref->get_osdmap_epoch()).finally([this, opref=std::move(opref), pgref] {
     logger().debug("{}: exit", *this);
     track_event<CompletionEvent>();
     handle.exit();

@@ -1,4 +1,4 @@
-export enum Promqls {
+export enum UtilizationCardQueries {
   USEDCAPACITY = 'ceph_cluster_total_used_bytes',
   WRITEIOPS = 'sum(rate(ceph_pool_wr[1m]))',
   READIOPS = 'sum(rate(ceph_pool_rd[1m]))',
@@ -9,10 +9,15 @@ export enum Promqls {
   RECOVERYBYTES = 'sum(rate(ceph_osd_recovery_bytes[1m]))'
 }
 
+export enum CapacityCardQueries {
+  OSD_NEARFULL = 'ceph_osd_nearfull_ratio',
+  OSD_FULL = 'ceph_osd_full_ratio'
+}
+
 export enum RgwPromqls {
   RGW_REQUEST_PER_SECOND = 'sum(rate(ceph_rgw_req[1m]))',
-  AVG_GET_LATENCY = 'sum(rate(ceph_rgw_op_get_obj_lat_sum[1m])) / sum(rate(ceph_rgw_op_get_obj_lat_count[1m]))',
-  AVG_PUT_LATENCY = 'sum(rate(ceph_rgw_op_put_obj_lat_sum[1m])) / sum(rate(ceph_rgw_op_put_obj_lat_count[1m]))',
+  AVG_GET_LATENCY = '(sum(rate(ceph_rgw_op_get_obj_lat_sum[1m])) / sum(rate(ceph_rgw_op_get_obj_lat_count[1m]))) * 1000',
+  AVG_PUT_LATENCY = '(sum(rate(ceph_rgw_op_put_obj_lat_sum[1m])) / sum(rate(ceph_rgw_op_put_obj_lat_count[1m]))) * 1000',
   GET_BANDWIDTH = 'sum(rate(ceph_rgw_op_get_obj_bytes[1m]))',
   PUT_BANDWIDTH = 'sum(rate(ceph_rgw_op_put_obj_bytes[1m]))'
 }
@@ -34,9 +39,10 @@ export enum MultiClusterPromqls {
   CRITICAL_ALERTS_COUNT = 'count(ALERTS{alertstate="firing",severity="critical"}) or vector(0)',
   WARNING_ALERTS_COUNT = 'count(ALERTS{alertstate="firing",severity="warning"}) or vector(0)',
   ALERTS = 'ALERTS{alertstate="firing"}',
-  HOSTS = 'count_values("hostname", ceph_mon_metadata) by (cluster) or vector (0)',
-  TOTAL_HOSTS = 'count(sum by (hostname) (ceph_osd_metadata)) or vector(0)',
-  CLUSTER_ALERTS = 'count by (cluster) (ALERTS{alertstate="firing"}) or vector(0)'
+  HOSTS = 'sum by (hostname, cluster) (group by (hostname, cluster) (ceph_osd_metadata)) or vector(0)',
+  TOTAL_HOSTS = 'count by (cluster) (ceph_osd_metadata) or vector(0)',
+  CLUSTER_ALERTS = 'count by (cluster) (ALERTS{alertstate="firing"}) or vector(0)',
+  FEDERATE_UP_METRIC = 'up'
 }
 
 export enum MultiClusterPromqlsForClusterUtilization {

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,8 +16,10 @@
 #ifndef CEPH_MCOMMANDREPLY_H
 #define CEPH_MCOMMANDREPLY_H
 
+#include <string>
 #include <string_view>
 
+#include "include/types.h" // for errorcode32_t
 #include "msg/Message.h"
 #include "MCommand.h"
 
@@ -31,6 +34,9 @@ public:
     : Message{MSG_COMMAND_REPLY}, r(_r) {
     header.tid = m->get_tid();
   }
+  // MDS now uses host errors, as defined in errno.cc, for current platform.
+  // errorcode32_t is converting, internally, the error code from host to ceph, when encoding, and vice versa,
+  // when decoding, resulting having LINUX codes on the wire, and HOST code on the receiver.
   MCommandReply(int _r, std::string_view s)
     : Message{MSG_COMMAND_REPLY},
       r(_r), rs(s) { }

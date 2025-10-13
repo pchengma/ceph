@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -46,6 +47,19 @@ public:
 
   ~ErasureCodeClay() override;
 
+  uint64_t get_supported_optimizations() const override {
+    if (m == 1) {
+      // PARTIAL_WRITE optimization can be supported in
+      // the corner case of m = 1
+      return FLAG_EC_PLUGIN_PARTIAL_READ_OPTIMIZATION |
+	FLAG_EC_PLUGIN_PARTIAL_WRITE_OPTIMIZATION |
+        FLAG_EC_PLUGIN_REQUIRE_SUB_CHUNKS |
+        FLAG_EC_PLUGIN_CRC_ENCODE_DECODE_SUPPORT;
+    }
+    return FLAG_EC_PLUGIN_PARTIAL_READ_OPTIMIZATION |
+      FLAG_EC_PLUGIN_REQUIRE_SUB_CHUNKS;
+  }
+
   unsigned int get_chunk_count() const override {
     return k+m;
   }
@@ -60,20 +74,44 @@ public:
 
   unsigned int get_chunk_size(unsigned int stripe_width) const override;
 
+  size_t get_minimum_granularity() override;
+
+  using ErasureCode::minimum_to_decode;
   int minimum_to_decode(const std::set<int> &want_to_read,
 			const std::set<int> &available,
 			std::map<int, std::vector<std::pair<int, int>>> *minimum) override;
 
+  using ErasureCode::decode;
   int decode(const std::set<int> &want_to_read,
              const std::map<int, ceph::bufferlist> &chunks,
              std::map<int, ceph::bufferlist> *decoded, int chunk_size) override;
 
+  [[deprecated]]
   int encode_chunks(const std::set<int> &want_to_encode,
 	            std::map<int, ceph::bufferlist> *encoded) override;
 
+  // Stub for new encode chunks interface. Can be deleted once new EC is
+  // supported for all plugins.
+  int encode_chunks(const shard_id_map<bufferptr> &in,
+                          shard_id_map<bufferptr> &out) override
+  {
+    ceph_abort_msg("Not implemented for this plugin");
+  }
+
+  [[deprecated]]
   int decode_chunks(const std::set<int> &want_to_read,
 		    const std::map<int, ceph::bufferlist> &chunks,
 		    std::map<int, ceph::bufferlist> *decoded) override;
+
+
+  // Stub for new encode chunks interface. Can be deleted once new EC is
+  // supported for all plugins.
+  virtual int decode_chunks(const shard_id_set &want_to_read,
+                          shard_id_map<bufferptr> &in,
+                          shard_id_map<bufferptr> &out)
+  {
+    ceph_abort_msg("Not implemented for this plugin");
+  }
 
   int init(ceph::ErasureCodeProfile &profile, std::ostream *ss) override;
 

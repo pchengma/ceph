@@ -19,6 +19,7 @@ export class Permissions {
   monitor: Permission;
   rbdImage: Permission;
   iscsi: Permission;
+  nvmeof: Permission;
   rbdMirroring: Permission;
   rgw: Permission;
   cephfs: Permission;
@@ -28,6 +29,7 @@ export class Permissions {
   grafana: Permission;
   prometheus: Permission;
   nfs: Permission;
+  smb: Permission;
 
   constructor(serverPermissions: any) {
     this.hosts = new Permission(serverPermissions['hosts']);
@@ -37,6 +39,7 @@ export class Permissions {
     this.monitor = new Permission(serverPermissions['monitor']);
     this.rbdImage = new Permission(serverPermissions['rbd-image']);
     this.iscsi = new Permission(serverPermissions['iscsi']);
+    this.nvmeof = new Permission(serverPermissions['nvme-of']);
     this.rbdMirroring = new Permission(serverPermissions['rbd-mirroring']);
     this.rgw = new Permission(serverPermissions['rgw']);
     this.cephfs = new Permission(serverPermissions['cephfs']);
@@ -46,5 +49,6 @@ export class Permissions {
     this.grafana = new Permission(serverPermissions['grafana']);
     this.prometheus = new Permission(serverPermissions['prometheus']);
     this.nfs = new Permission(serverPermissions['nfs-ganesha']);
+    this.smb = new Permission(serverPermissions['smb']);
   }
 }

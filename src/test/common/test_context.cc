@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,11 +20,15 @@
  *
  *
  */
+
+#include <iostream> // for std::cout
+
 #include "gtest/gtest.h"
 #include "include/types.h"
 #include "include/msgr.h"
 #include "common/ceph_context.h"
 #include "common/config_proxy.h"
+#include "common/Formatter.h"
 #include "log/Log.h"
 
 using namespace std;

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_opa.h"
 #include "rgw_http_client.h"
@@ -71,7 +71,7 @@ int rgw_opa_authorize(RGWOp *& op,
   req.set_send_length(ss.str().length());
 
   /* send request */
-  ret = req.process(null_yield);
+  ret = req.process(op, s->yield);
   if (ret < 0) {
     ldpp_dout(op, 2) << "OPA process error:" << bl.c_str() << dendl;
     return ret;

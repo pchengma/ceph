@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -28,11 +29,13 @@
 #include "Message.h"
 #include "Dispatcher.h"
 #include "Policy.h"
+#include "common/Formatter.h"
 #include "common/Throttle.h"
 #include "include/Context.h"
 #include "include/types.h"
 #include "include/ceph_features.h"
 #include "auth/Crypto.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/item_history.h"
 #include "auth/AuthRegistry.h"
 #include "compressor_registry.h"
@@ -105,6 +108,17 @@ private:
   std::vector<PriorityDispatcher> fast_dispatchers;
 
   ZTracer::Endpoint trace_endpoint;
+
+  static void insert_head(std::vector<PriorityDispatcher>& v,
+                          PriorityDispatcher d)
+  {
+    v.insert(std::lower_bound(v.begin(), v.end(), d), d);
+  }
+  static void insert_tail(std::vector<PriorityDispatcher>& v,
+                          PriorityDispatcher d)
+  {
+    v.insert(std::upper_bound(v.begin(), v.end(), d), d);
+  }
 
 protected:
   void set_endpoint_addr(const entity_addr_t& a,
@@ -286,13 +300,13 @@ public:
    * Get the number of Messages which the Messenger has received
    * but not yet dispatched.
    */
-  virtual int get_dispatch_queue_len() = 0;
+  virtual int get_dispatch_queue_len() const = 0;
 
   /**
    * Get age of oldest undelivered message
    * (0 if the queue is empty)
    */
-  virtual double get_dispatch_queue_max_age(utime_t now) = 0;
+  virtual double get_dispatch_queue_max_age(utime_t now) const = 0;
 
   /**
    * @} // Accessors
@@ -401,11 +415,10 @@ public:
    */
   void add_dispatcher_head(Dispatcher *d, PriorityDispatcher::priority_t priority=Dispatcher::PRIORITY_DEFAULT) {
     bool first = dispatchers.empty();
-    dispatchers.insert(dispatchers.begin(), PriorityDispatcher{priority, d});
-    std::stable_sort(dispatchers.begin(), dispatchers.end());
+    const PriorityDispatcher entry{priority, d};
+    insert_head(dispatchers, entry);
     if (d->ms_can_fast_dispatch_any()) {
-      fast_dispatchers.insert(fast_dispatchers.begin(), PriorityDispatcher{priority, d});
-      std::stable_sort(fast_dispatchers.begin(), fast_dispatchers.end());
+      insert_head(fast_dispatchers, entry);
     }
     if (first)
       ready();
@@ -419,11 +432,10 @@ public:
    */
   void add_dispatcher_tail(Dispatcher *d, PriorityDispatcher::priority_t priority=Dispatcher::PRIORITY_DEFAULT) {
     bool first = dispatchers.empty();
-    dispatchers.push_back(PriorityDispatcher{priority, d});
-    std::stable_sort(dispatchers.begin(), dispatchers.end());
+    const PriorityDispatcher entry{priority, d};
+    insert_tail(dispatchers, entry);
     if (d->ms_can_fast_dispatch_any()) {
-      fast_dispatchers.push_back(PriorityDispatcher{priority, d});
-      std::stable_sort(fast_dispatchers.begin(), fast_dispatchers.end());
+      insert_tail(fast_dispatchers, entry);
     }
     if (first)
       ready();
@@ -511,6 +523,10 @@ public:
   /**
    * @} // Startup/Shutdown
    */
+
+  virtual void dump(
+      Formatter* f, std::function<bool(const std::string&)> filter =
+                        [](const std::string&) { return true; }) const = 0;
 
   /**
    * @defgroup Messaging
@@ -727,11 +743,17 @@ public:
    */
   void ms_deliver_dispatch(const ceph::ref_t<Message> &m) {
     m->set_dispatch_stamp(ceph_clock_now());
+    bool acked = false;
     for ([[maybe_unused]] const auto& [priority, dispatcher] : dispatchers) {
-      if (dispatcher->ms_dispatch2(m)) {
+      auto r = Dispatcher::fold_dispatch_result(dispatcher->ms_dispatch2(m));
+      if (std::holds_alternative<Dispatcher::HANDLED>(r)) {
         return;
+      } else if (std::holds_alternative<Dispatcher::ACKNOWLEDGED>(r)) {
+        acked = true;
       }
     }
+    if (acked)
+      return;
     lsubdout(cct, ms, 0) << "ms_deliver_dispatch: unhandled message " << m << " " << *m << " from "
 			 << m->get_source_inst() << dendl;
     ceph_assert(!cct->_conf->ms_die_on_unhandled_msg);

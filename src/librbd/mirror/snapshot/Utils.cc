@@ -1,11 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "common/dout.h"
 #include "common/errno.h"
 #include "include/stringify.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/mirror/snapshot/Utils.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 
@@ -28,12 +30,15 @@ bool get_rollback_snap_id(
     uint64_t *rollback_snap_id) {
 
   for (; it != end; it++) {
-    auto mirror_ns = std::get<cls::rbd::MirrorSnapshotNamespace>(
-      it->second.snap_namespace);
-    if (mirror_ns.state != cls::rbd::MIRROR_SNAPSHOT_STATE_NON_PRIMARY) {
+    auto mirror_ns = std::get_if<cls::rbd::MirrorSnapshotNamespace>(
+      &it->second.snap_namespace);
+    if (mirror_ns == nullptr) {
+      continue;
+    }
+    if (mirror_ns->state != cls::rbd::MIRROR_SNAPSHOT_STATE_NON_PRIMARY) {
       break;
     }
-    if (mirror_ns.complete) {
+    if (mirror_ns->complete) {
       break;
     }
   }

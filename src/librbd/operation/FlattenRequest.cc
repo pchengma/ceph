@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/operation/FlattenRequest.h"
 #include "librbd/AsyncObjectThrottle.h"
@@ -17,6 +17,8 @@
 #include "osdc/Striper.h"
 #include <boost/lambda/bind.hpp>
 #include <boost/lambda/construct.hpp>
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -47,15 +49,6 @@ public:
         !image_ctx.exclusive_lock->is_lock_owner()) {
       ldout(cct, 1) << "lost exclusive lock during flatten" << dendl;
       return -ERESTART;
-    }
-
-    {
-      std::shared_lock image_lock{image_ctx.image_lock};
-      if (image_ctx.object_map != nullptr &&
-          !image_ctx.object_map->object_may_not_exist(m_object_no)) {
-        // can skip because the object already exists
-        return 1;
-      }
     }
 
     if (!io::util::trigger_copyup(

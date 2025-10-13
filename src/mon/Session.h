@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,13 +16,18 @@
 #ifndef CEPH_MON_SESSION_H
 #define CEPH_MON_SESSION_H
 
+#include <map>
+#include <set>
 #include <string>
 #include <string_view>
 
+#include "common/Clock.h" // for ceph_clock_now()
+#include "common/RefCountedObj.h"
 #include "include/utime.h"
 #include "include/xlist.h"
 
 #include "global/global_context.h"
+#include "msg/Connection.h" // for ConnectionRef
 #include "msg/msg_types.h"
 #include "mon/mon_types.h"
 

@@ -5,6 +5,7 @@ set(jerasure_utils_src
   ErasureCodeJerasure.cc)
 
 add_library(jerasure_utils OBJECT ${jerasure_utils_src})
+target_link_libraries(jerasure_utils legacy-option-headers)
 
 # Set the CFLAGS correctly for gf-complete based on SIMD compiler support
 set(GF_COMPILE_FLAGS)
@@ -79,6 +80,7 @@ set(jerasure_srcs
   jerasure/src/reed_sol.c
   jerasure_init.cc)
 add_library(jerasure_objs OBJECT ${jerasure_srcs}) 
+target_compile_options(jerasure_objs PRIVATE "-Wno-unused-but-set-variable")
 
 set(ec_jerasure_objs
   $<TARGET_OBJECTS:gf-complete_objs>

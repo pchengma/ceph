@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef RBD_MIRROR_THROTTLER_H
 #define RBD_MIRROR_THROTTLER_H
@@ -53,7 +53,6 @@ private:
 
   CephContext *m_cct;
   const std::string m_config_key;
-  mutable const char* m_config_keys[2];
 
   ceph::mutex m_lock;
   uint32_t m_max_concurrent_ops;
@@ -61,7 +60,9 @@ private:
   std::map<Id, Context *> m_queued_ops;
   std::set<Id> m_inflight_ops;
 
-  const char **get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override {
+    return std::vector<std::string>{m_config_key};
+  }
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set<std::string> &changed) override;
 };

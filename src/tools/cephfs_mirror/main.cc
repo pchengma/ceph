@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "common/ceph_argparse.h"
 #include "common/config.h"
@@ -9,6 +9,7 @@
 #include "common/Preforker.h"
 #include "global/global_init.h"
 #include "global/signal_handler.h"
+#include "log/Log.h"
 #include "mon/MonClient.h"
 #include "msg/Messenger.h"
 #include "Mirror.h"

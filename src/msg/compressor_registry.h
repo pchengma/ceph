@@ -1,15 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include <map>
+#include <mutex> // for std::scoped_lock
 #include <vector>
 
 #include "compressor/Compressor.h"
 #include "common/ceph_mutex.h"
 #include "common/ceph_context.h"
 #include "common/config_cacher.h"
+#include "common/config_obs.h"
+#include "include/common_fwd.h" // for CephContext
+#include "include/msgr.h" // for CEPH_ENTITY_TYPE_OSD
 
 class CompressorRegistry : public md_config_obs_t {
 public:
@@ -21,7 +25,7 @@ public:
     _refresh_config();
   }
 
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set<std::string>& changed) override;
 

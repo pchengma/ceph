@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,11 +18,15 @@
 
 #include "common/ceph_argparse.h"
 #include "common/errno.h"
+#include "common/JSONFormatter.h"
 #include "common/safe_io.h"
+#include "common/strtol.h" // for strict_strtoll()
+#include "crush/CrushWrapper.h"
 #include "include/random.h"
 #include "mon/health_check.h"
 #include <time.h>
 #include <algorithm>
+#include <unordered_map>
 
 #include "global/global_init.h"
 #include "osd/OSDMap.h"
@@ -887,7 +892,7 @@ skip_upmap:
     while (1) {
       cout << "pass " << ++pass << std::endl;
 
-      ceph::unordered_map<pg_t,vector<int> > m;
+      std::unordered_map<pg_t, vector<int>> m;
       for (map<int64_t,pg_pool_t>::const_iterator p = osdmap.get_pools().begin();
 	   p != osdmap.get_pools().end();
 	   ++p) {

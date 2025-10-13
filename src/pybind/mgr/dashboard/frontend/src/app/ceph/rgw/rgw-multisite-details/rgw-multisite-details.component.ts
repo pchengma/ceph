@@ -1,25 +1,27 @@
-import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import {
-  TreeComponent,
-  ITreeOptions,
-  TreeModel,
-  TreeNode,
-  TREE_ACTIONS
-} from '@circlon/angular-tree-component';
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  OnDestroy,
+  OnInit,
+  TemplateRef,
+  ViewChild
+} from '@angular/core';
+import { Node } from 'carbon-components-angular/treeview/tree-node.types';
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
 
-import { forkJoin, Subscription, timer as observableTimer } from 'rxjs';
+import { forkJoin, Subscription } from 'rxjs';
 import { RgwRealmService } from '~/app/shared/api/rgw-realm.service';
 import { RgwZoneService } from '~/app/shared/api/rgw-zone.service';
 import { RgwZonegroupService } from '~/app/shared/api/rgw-zonegroup.service';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { ActionLabelsI18n, TimerServiceInterval } from '~/app/shared/constants/app.constants';
 import { Icons } from '~/app/shared/enum/icons.enum';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { CdTableAction } from '~/app/shared/models/cd-table-action';
 import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
-import { Permission } from '~/app/shared/models/permissions';
+import { Permissions } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 import { ModalService } from '~/app/shared/services/modal.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
@@ -35,18 +37,24 @@ import { RgwMultisiteZoneFormComponent } from '../rgw-multisite-zone-form/rgw-mu
 import { RgwMultisiteZonegroupFormComponent } from '../rgw-multisite-zonegroup-form/rgw-multisite-zonegroup-form.component';
 import { RgwDaemonService } from '~/app/shared/api/rgw-daemon.service';
 import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
-import { BlockUI, NgBlockUI } from 'ng-block-ui';
 import { Router } from '@angular/router';
+import { RgwMultisiteWizardComponent } from '../rgw-multisite-wizard/rgw-multisite-wizard.component';
+import { RgwMultisiteSyncPolicyComponent } from '../rgw-multisite-sync-policy/rgw-multisite-sync-policy.component';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { RgwMultisiteService } from '~/app/shared/api/rgw-multisite.service';
+
+const BASE_URL = 'rgw/multisite/configuration';
 
 @Component({
   selector: 'cd-rgw-multisite-details',
   templateUrl: './rgw-multisite-details.component.html',
-  styleUrls: ['./rgw-multisite-details.component.scss']
+  styleUrls: ['./rgw-multisite-details.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
   private sub = new Subscription();
-
-  @ViewChild('tree') tree: TreeComponent;
+  @ViewChild('treeNodeTemplate') labelTpl: TemplateRef<any>;
+  @ViewChild(RgwMultisiteSyncPolicyComponent) syncPolicyComp: RgwMultisiteSyncPolicyComponent;
 
   messages = {
     noDefaultRealm: $localize`Please create a default realm first to enable this feature`,
@@ -55,28 +63,39 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
     disableExport: $localize`Please create master zone group and master zone for each of the realms`
   };
 
-  @BlockUI()
-  blockUI: NgBlockUI;
-
   icons = Icons;
-  permission: Permission;
+  permissions: Permissions;
   selection = new CdTableSelection();
   createTableActions: CdTableAction[];
   migrateTableAction: CdTableAction[];
-  importAction: CdTableAction[];
-  exportAction: CdTableAction[];
+  multisiteReplicationActions: CdTableAction[];
   loadingIndicator = true;
-  nodes: object[] = [];
-  treeOptions: ITreeOptions = {
-    useVirtualScroll: true,
-    nodeHeight: 22,
-    levelPadding: 20,
-    actionMapping: {
-      mouse: {
-        click: this.onNodeSelected.bind(this)
-      }
-    }
-  };
+
+  toNode(values: any): Node[] {
+    return values.map((value: any) => ({
+      label: this.labelTpl,
+      labelContext: {
+        data: { ...value }
+      },
+      id: value.id,
+      value: { ...value },
+      expanded: true,
+      name: value.name,
+      children: value?.children ? this.toNode(value.children) : []
+    }));
+  }
+
+  set nodes(values: any) {
+    this._nodes = this.toNode(values);
+    this.changeDetectionRef.detectChanges();
+  }
+
+  get nodes() {
+    return this._nodes;
+  }
+
+  private _nodes: Node[] = [];
+
   modalRef: NgbModalRef;
 
   realms: RgwRealm[] = [];
@@ -92,13 +111,17 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
   defaultZoneId = '';
   multisiteInfo: object[] = [];
   defaultsInfo: string[] = [];
-  showMigrateAction: boolean = false;
+  showMigrateAndReplicationActions = false;
   editTitle: string = 'Edit';
   deleteTitle: string = 'Delete';
   disableExport = true;
   rgwModuleStatus: boolean;
   restartGatewayMessage = false;
   rgwModuleData: string | any[] = [];
+  activeId: string;
+  activeNodeId?: string;
+  MODULE_NAME = 'rgw';
+  NAVIGATE_TO = '/rgw/multisite';
 
   constructor(
     private modalService: ModalService,
@@ -112,13 +135,16 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
     public rgwZoneService: RgwZoneService,
     public rgwDaemonService: RgwDaemonService,
     public mgrModuleService: MgrModuleService,
-    private notificationService: NotificationService
+    private notificationService: NotificationService,
+    private cdsModalService: ModalCdsService,
+    private rgwMultisiteService: RgwMultisiteService,
+    private changeDetectionRef: ChangeDetectorRef
   ) {
-    this.permission = this.authStorageService.getPermissions().rgw;
+    this.permissions = this.authStorageService.getPermissions();
   }
 
-  openModal(entity: any, edit = false) {
-    const entityName = edit ? entity.data.type : entity;
+  openModal(entity: any | string, edit = false) {
+    const entityName = edit ? entity?.data?.type : entity;
     const action = edit ? 'edit' : 'create';
     const initialState = {
       resource: entityName,
@@ -128,9 +154,7 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
       multisiteInfo: this.multisiteInfo
     };
     if (entityName === 'realm') {
-      this.bsModalRef = this.modalService.show(RgwMultisiteRealmFormComponent, initialState, {
-        size: 'lg'
-      });
+      this.bsModalRef = this.cdsModalService.show(RgwMultisiteRealmFormComponent, initialState);
     } else if (entityName === 'zonegroup') {
       this.bsModalRef = this.modalService.show(RgwMultisiteZonegroupFormComponent, initialState, {
         size: 'lg'
@@ -140,6 +164,10 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
         size: 'lg'
       });
     }
+  }
+
+  openMultisiteSetupWizard() {
+    this.bsModalRef = this.cdsModalService.show(RgwMultisiteWizardComponent);
   }
 
   openMigrateModal() {
@@ -201,55 +229,82 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
   }
 
   ngOnInit() {
-    const createRealmAction: CdTableAction = {
-      permission: 'create',
-      icon: Icons.add,
-      name: this.actionLabels.CREATE + ' Realm',
-      click: () => this.openModal('realm')
-    };
-    const createZonegroupAction: CdTableAction = {
-      permission: 'create',
-      icon: Icons.add,
-      name: this.actionLabels.CREATE + ' Zone Group',
-      click: () => this.openModal('zonegroup'),
-      disable: () => this.getDisable()
-    };
-    const createZoneAction: CdTableAction = {
-      permission: 'create',
-      icon: Icons.add,
-      name: this.actionLabels.CREATE + ' Zone',
-      click: () => this.openModal('zone')
-    };
-    const migrateMultsiteAction: CdTableAction = {
-      permission: 'read',
-      icon: Icons.exchange,
-      name: this.actionLabels.MIGRATE,
-      click: () => this.openMigrateModal()
-    };
-    const importMultsiteAction: CdTableAction = {
-      permission: 'read',
-      icon: Icons.download,
-      name: this.actionLabels.IMPORT,
-      click: () => this.openImportModal(),
-      disable: () => this.getDisableImport()
-    };
-    const exportMultsiteAction: CdTableAction = {
-      permission: 'read',
-      icon: Icons.upload,
-      name: this.actionLabels.EXPORT,
-      click: () => this.openExportModal(),
-      disable: () => this.getDisableExport()
-    };
-    this.createTableActions = [createRealmAction, createZonegroupAction, createZoneAction];
-    this.migrateTableAction = [migrateMultsiteAction];
-    this.importAction = [importMultsiteAction];
-    this.exportAction = [exportMultsiteAction];
+    this.createTableActions = [
+      {
+        permission: 'create',
+        icon: Icons.add,
+        name: this.actionLabels.CREATE + ' Realm',
+        click: () => this.openModal('realm'),
+        visible: () => !this.showMigrateAndReplicationActions
+      },
+      {
+        permission: 'create',
+        icon: Icons.add,
+        name: this.actionLabels.CREATE + ' Zone Group',
+        click: () => this.openModal('zonegroup'),
+        disable: () => this.getDisable(),
+        visible: () => !this.showMigrateAndReplicationActions
+      },
+      {
+        permission: 'create',
+        icon: Icons.add,
+        name: this.actionLabels.CREATE + ' Zone',
+        click: () => this.openModal('zone'),
+        visible: () => !this.showMigrateAndReplicationActions
+      },
+      {
+        permission: 'create',
+        icon: Icons.download,
+        name: this.actionLabels.IMPORT,
+        click: () => this.openImportModal(),
+        disable: () => this.getDisableImport()
+      },
+      {
+        permission: 'create',
+        icon: Icons.upload,
+        name: this.actionLabels.EXPORT,
+        click: () => this.openExportModal(),
+        disable: () => this.getDisableExport()
+      }
+    ];
+    this.migrateTableAction = [
+      {
+        permission: 'create',
+        icon: Icons.wrench,
+        name: this.actionLabels.MIGRATE,
+        click: () => this.openMigrateModal()
+      }
+    ];
+    this.multisiteReplicationActions = [
+      {
+        permission: 'create',
+        icon: Icons.wrench,
+        name: this.actionLabels.SETUP_MULTISITE_REPLICATION,
+        click: () =>
+          this.router.navigate([BASE_URL, { outlets: { modal: 'setup-multisite-replication' } }])
+      }
+    ];
 
+    this.startPollingMultisiteInfo();
+    this.mgrModuleService.updateCompleted$.subscribe(() => {
+      this.startPollingMultisiteInfo();
+      this.getRgwModuleStatus();
+    });
+    // Only get the module status if you can read from configOpt
+    if (this.permissions.configOpt.read) this.getRgwModuleStatus();
+  }
+
+  startPollingMultisiteInfo(): void {
     const observables = [
       this.rgwRealmService.getAllRealmsInfo(),
       this.rgwZonegroupService.getAllZonegroupsInfo(),
       this.rgwZoneService.getAllZonesInfo()
     ];
+
+    if (this.sub) {
+      this.sub.unsubscribe();
+    }
+
     this.sub = this.timerService
       .get(() => forkJoin(observables), this.timerServiceVariable.TIMER_SERVICE_PERIOD * 2)
       .subscribe(
@@ -260,25 +315,16 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
         },
         (_error) => {}
       );
-    this.mgrModuleService.list().subscribe((moduleData: any) => {
-      this.rgwModuleData = moduleData.filter((module: object) => module['name'] === 'rgw');
-      if (this.rgwModuleData.length > 0) {
-        this.rgwModuleStatus = this.rgwModuleData[0].enabled;
-      }
-    });
   }
-  /* setConfigValues() {
-    this.rgwDaemonService
-      .setMultisiteConfig(
-        this.defaultsInfo['defaultRealmName'],
-        this.defaultsInfo['defaultZonegroupName'],
-        this.defaultsInfo['defaultZoneName']
-      )
-      .subscribe(() => {});
-  }*/
 
   ngOnDestroy() {
     this.sub.unsubscribe();
+  }
+
+  private getRgwModuleStatus() {
+    this.rgwMultisiteService.getRgwModuleStatus().subscribe((status: boolean) => {
+      this.rgwModuleStatus = status;
+    });
   }
 
   private abstractTreeData(multisiteInfo: [object, object, object]): any[] {
@@ -325,14 +371,19 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
               allSecondChildNodes.push(secondChildNodes);
               secondChildNodes = {};
             }
+            allSecondChildNodes = allSecondChildNodes.map((x) => ({
+              ...x,
+              parentNode: firstChildNodes
+            }));
             firstChildNodes['children'] = allSecondChildNodes;
             allSecondChildNodes = [];
             allFirstChildNodes.push(firstChildNodes);
             firstChildNodes = {};
           }
         }
+        allFirstChildNodes = allFirstChildNodes.map((x) => ({ ...x, parentNode: rootNodes }));
         rootNodes['children'] = allFirstChildNodes;
-        allNodes.push(rootNodes);
+        allNodes.push({ ...rootNodes, label: rootNodes?.['name'] || rootNodes?.['id'] });
         firstChildNodes = {};
         secondChildNodes = {};
         rootNodes = {};
@@ -357,8 +408,9 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
             allFirstChildNodes.push(firstChildNodes);
             firstChildNodes = {};
           }
+          allFirstChildNodes = allFirstChildNodes.map((x) => ({ ...x, parentNode: rootNodes }));
           rootNodes['children'] = allFirstChildNodes;
-          allNodes.push(rootNodes);
+          allNodes.push({ ...rootNodes, label: rootNodes?.['name'] || rootNodes?.['id'] });
           firstChildNodes = {};
           rootNodes = {};
           allFirstChildNodes = [];
@@ -371,7 +423,7 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
         if (this.zoneIds.length > 0 && !this.zoneIds.includes(zone.id)) {
           const zoneResult = this.rgwZoneService.getZoneTree(zone, this.defaultZoneId, this.zones);
           rootNodes = zoneResult['nodes'];
-          allNodes.push(rootNodes);
+          allNodes.push({ ...rootNodes, label: rootNodes?.['name'] || rootNodes?.['id'] });
           rootNodes = {};
         }
       }
@@ -379,25 +431,38 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
     if (this.realms.length < 1 && this.zonegroups.length < 1 && this.zones.length < 1) {
       return [
         {
-          name: 'No nodes!'
+          name: 'No nodes!',
+          label: 'No nodes!'
         }
       ];
     }
     this.realmIds = [];
     this.zoneIds = [];
-    this.getDisableMigrate();
-    this.rgwDaemonService.list().subscribe((data: any) => {
-      const realmName = data.map((item: { [x: string]: any }) => item['realm_name']);
-      if (
-        this.defaultRealmId != '' &&
-        this.defaultZonegroupId != '' &&
-        this.defaultZoneId != '' &&
-        realmName.includes('')
-      ) {
-        this.restartGatewayMessage = true;
+    this.evaluateMigrateAndReplicationActions();
+    this.rgwMultisiteService.restartGatewayMessage$.subscribe((value) => {
+      if (value !== null) {
+        this.restartGatewayMessage = value;
+      } else {
+        this.checkRestartGatewayMessage();
       }
     });
     return allNodes;
+  }
+
+  checkRestartGatewayMessage() {
+    this.rgwDaemonService.list().subscribe((data: any) => {
+      const realmName = data.map((item: { [x: string]: any }) => item['realm_name']);
+      if (
+        this.defaultRealmId !== '' &&
+        this.defaultZonegroupId !== '' &&
+        this.defaultZoneId !== '' &&
+        realmName.includes('')
+      ) {
+        this.restartGatewayMessage = true;
+      } else {
+        this.restartGatewayMessage = false;
+      }
+    });
   }
 
   getDefaultsEntities(
@@ -405,30 +470,24 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
     defaultZonegroupId: string,
     defaultZoneId: string
   ): any {
-    const defaultRealm = this.realms.find((x: { id: string }) => x.id === defaultRealmId);
-    const defaultZonegroup = this.zonegroups.find(
+    const defaultRealm = this.realms?.find((x: { id: string }) => x.id === defaultRealmId);
+    const defaultZonegroup = this.zonegroups?.find(
       (x: { id: string }) => x.id === defaultZonegroupId
     );
-    const defaultZone = this.zones.find((x: { id: string }) => x.id === defaultZoneId);
-    const defaultRealmName = defaultRealm !== undefined ? defaultRealm.name : null;
-    const defaultZonegroupName = defaultZonegroup !== undefined ? defaultZonegroup.name : null;
-    const defaultZoneName = defaultZone !== undefined ? defaultZone.name : null;
+    const defaultZone = this.zones?.find((x: { id: string }) => x.id === defaultZoneId);
+
     return {
-      defaultRealmName: defaultRealmName,
-      defaultZonegroupName: defaultZonegroupName,
-      defaultZoneName: defaultZoneName
+      defaultRealmName: defaultRealm?.name,
+      defaultZonegroupName: defaultZonegroup?.name,
+      defaultZoneName: defaultZone?.name
     };
   }
 
-  onNodeSelected(tree: TreeModel, node: TreeNode) {
-    TREE_ACTIONS.ACTIVATE(tree, node, true);
-    this.metadataTitle = node.data.name;
-    this.metadata = node.data.info;
-    node.data.show = true;
-  }
-
-  onUpdateData() {
-    this.tree.treeModel.expandAll();
+  onNodeSelected(node: Node) {
+    this.metadataTitle = node?.value?.name;
+    this.metadata = node?.value?.info;
+    this.activeNodeId = node?.value?.id;
+    node.expanded = true;
   }
 
   getDisable() {
@@ -442,17 +501,21 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
         }
       });
       if (!isMasterZone) {
-        this.editTitle =
-          'Please create a master zone for each existing zonegroup to enable this feature';
+        setTimeout(() => {
+          this.editTitle =
+            'Please create a master zone for each existing zonegroup to enable this feature';
+        }, 1);
         return this.messages.noMasterZone;
       } else {
-        this.editTitle = 'Edit';
+        setTimeout(() => {
+          this.editTitle = 'Edit';
+        }, 1);
         return false;
       }
     }
   }
 
-  getDisableMigrate() {
+  evaluateMigrateAndReplicationActions() {
     if (
       this.realms.length === 0 &&
       this.zonegroups.length === 1 &&
@@ -460,28 +523,29 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
       this.zones.length === 1 &&
       this.zones[0].name === 'default'
     ) {
-      this.showMigrateAction = true;
+      this.showMigrateAndReplicationActions = true;
     } else {
-      this.showMigrateAction = false;
+      this.showMigrateAndReplicationActions = false;
     }
-    return this.showMigrateAction;
+    return this.showMigrateAndReplicationActions;
   }
 
-  isDeleteDisabled(node: TreeNode): boolean {
-    let disable: boolean = false;
+  isDeleteDisabled(node: Node): { isDisabled: boolean; deleteTitle: string } {
+    let isDisabled: boolean = false;
+    let deleteTitle: string = this.deleteTitle;
     let masterZonegroupCount: number = 0;
-    if (node.data.type === 'realm' && node.data.is_default && this.realms.length < 2) {
-      disable = true;
+    if (node?.value?.type === 'realm' && node?.data?.is_default && this.realms.length < 2) {
+      isDisabled = true;
     }
 
-    if (node.data.type === 'zonegroup') {
+    if (node?.data?.type === 'zonegroup') {
       if (this.zonegroups.length < 2) {
-        this.deleteTitle = 'You can not delete the only zonegroup available';
-        disable = true;
-      } else if (node.data.is_default) {
-        this.deleteTitle = 'You can not delete the default zonegroup';
-        disable = true;
-      } else if (node.data.is_master) {
+        deleteTitle = 'You can not delete the only zonegroup available';
+        isDisabled = true;
+      } else if (node?.data?.is_default) {
+        deleteTitle = 'You can not delete the default zonegroup';
+        isDisabled = true;
+      } else if (node?.data?.is_master) {
         for (let zonegroup of this.zonegroups) {
           if (zonegroup.is_master === true) {
             masterZonegroupCount++;
@@ -489,58 +553,58 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
           }
         }
         if (masterZonegroupCount < 2) {
-          this.deleteTitle = 'You can not delete the only master zonegroup available';
-          disable = true;
+          deleteTitle = 'You can not delete the only master zonegroup available';
+          isDisabled = true;
         }
       }
     }
 
-    if (node.data.type === 'zone') {
+    if (node?.data?.type === 'zone') {
       if (this.zones.length < 2) {
-        this.deleteTitle = 'You can not delete the only zone available';
-        disable = true;
-      } else if (node.data.is_default) {
-        this.deleteTitle = 'You can not delete the default zone';
-        disable = true;
-      } else if (node.data.is_master && node.data.zone_zonegroup.zones.length < 2) {
-        this.deleteTitle =
+        deleteTitle = 'You can not delete the only zone available';
+        isDisabled = true;
+      } else if (node?.data?.is_default) {
+        deleteTitle = 'You can not delete the default zone';
+        isDisabled = true;
+      } else if (node?.data?.is_master && node?.data?.zone_zonegroup.zones.length < 2) {
+        deleteTitle =
           'You can not delete the master zone as there are no more zones in this zonegroup';
-        disable = true;
+        isDisabled = true;
       }
     }
 
-    if (!disable) {
+    if (!isDisabled) {
       this.deleteTitle = 'Delete';
     }
 
-    return disable;
+    return { isDisabled, deleteTitle };
   }
 
-  delete(node: TreeNode) {
-    if (node.data.type === 'realm') {
-      this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
-        itemDescription: $localize`${node.data.type} ${node.data.name}`,
-        itemNames: [`${node.data.name}`],
+  delete(node: Node) {
+    if (node?.data?.type === 'realm') {
+      const modalRef = this.cdsModalService.show(DeleteConfirmationModalComponent, {
+        itemDescription: $localize`${node?.data?.type} ${node?.data?.name}`,
+        itemNames: [`${node?.data?.name}`],
         submitAction: () => {
-          this.rgwRealmService.delete(node.data.name).subscribe(
+          this.rgwRealmService.delete(node?.data?.name).subscribe(
             () => {
-              this.modalRef.close();
               this.notificationService.show(
                 NotificationType.success,
-                $localize`Realm: '${node.data.name}' deleted successfully`
+                $localize`Realm: '${node?.data?.name}' deleted successfully`
               );
+              this.cdsModalService.dismissAll();
             },
             () => {
-              this.modalRef.componentInstance.stopLoadingSpinner();
+              this.cdsModalService.stopLoadingSpinner(modalRef.deletionForm);
             }
           );
         }
       });
-    } else if (node.data.type === 'zonegroup') {
+    } else if (node?.data?.type === 'zonegroup') {
       this.modalRef = this.modalService.show(RgwMultisiteZonegroupDeletionFormComponent, {
         zonegroup: node.data
       });
-    } else if (node.data.type === 'zone') {
+    } else if (node?.data?.type === 'zone') {
       this.modalRef = this.modalService.show(RgwMultisiteZoneDeletionFormComponent, {
         zone: node.data
       });
@@ -548,59 +612,13 @@ export class RgwMultisiteDetailsComponent implements OnDestroy, OnInit {
   }
 
   enableRgwModule() {
-    let $obs;
-    const fnWaitUntilReconnected = () => {
-      observableTimer(2000).subscribe(() => {
-        // Trigger an API request to check if the connection is
-        // re-established.
-        this.mgrModuleService.list().subscribe(
-          () => {
-            // Resume showing the notification toasties.
-            this.notificationService.suspendToasties(false);
-            // Unblock the whole UI.
-            this.blockUI.stop();
-            // Reload the data table content.
-            this.notificationService.show(NotificationType.success, $localize`Enabled RGW Module`);
-            this.router.navigateByUrl('/', { skipLocationChange: true }).then(() => {
-              this.router.navigate(['/rgw/multisite']);
-            });
-            // Reload the data table content.
-          },
-          () => {
-            fnWaitUntilReconnected();
-          }
-        );
-      });
-    };
-
-    if (!this.rgwModuleStatus) {
-      $obs = this.mgrModuleService.enable('rgw');
-    }
-    $obs.subscribe(
-      () => undefined,
-      () => {
-        // Suspend showing the notification toasties.
-        this.notificationService.suspendToasties(true);
-        // Block the whole UI to prevent user interactions until
-        // the connection to the backend is reestablished
-        this.blockUI.start($localize`Reconnecting, please wait ...`);
-        fnWaitUntilReconnected();
-      }
+    this.mgrModuleService.updateModuleState(
+      this.MODULE_NAME,
+      false,
+      null,
+      this.NAVIGATE_TO,
+      'Enabled RGW Module',
+      true
     );
-  }
-
-  onNavChange(event: any) {
-    if (event.nextId == 'configuration') {
-      this.metadata = null;
-      /*
-        It is a known issue with angular2-tree package when tree is hidden (for example inside tab or modal),
-        it is not rendered when it becomes visible. Solution is to call this.tree.sizeChanged() which recalculates
-        the rendered nodes according to the actual viewport size. (https://angular2-tree.readme.io/docs/common-issues)
-      */
-      setTimeout(() => {
-        this.tree.sizeChanged();
-        this.onUpdateData();
-      }, 200);
-    }
   }
 }

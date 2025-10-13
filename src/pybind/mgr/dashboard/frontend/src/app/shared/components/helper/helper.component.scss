@@ -1,7 +1,7 @@
-@use './src/styles/vendor/variables' as vv;
+cds-tooltip {
+  margin-left: 5px;
+}
 
-i {
-  color: vv.$primary;
-  cursor: pointer;
-  padding-left: 4px;
+.inline-block {
+  display: inline-block;
 }

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_IO_QOS_IMAGE_DISPATCH_H
 #define CEPH_LIBRBD_IO_QOS_IMAGE_DISPATCH_H
@@ -117,8 +117,8 @@ private:
 
   void handle_finished(int r, uint64_t tid);
 
-  bool set_throttle_flag(std::atomic<uint32_t>* image_dispatch_flags,
-                         uint32_t flag);
+  bool set_throttle_flags(std::atomic<uint32_t>* image_dispatch_flags,
+                          uint32_t flags);
   bool needs_throttle(bool read_op, const Extents& image_extents, uint64_t tid,
                       std::atomic<uint32_t>* image_dispatch_flags,
                       DispatchResult* dispatch_result, Context** on_finish,

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Fragmentation Simulator
  * Author: Tri Dao, daominhtri0503@gmail.com
@@ -7,6 +8,7 @@
 #include "common/ceph_argparse.h"
 #include "common/ceph_mutex.h"
 #include "common/common_init.h"
+#include "common/debug.h"
 #include "common/hobject.h"
 
 #include "global/global_context.h"
@@ -18,6 +20,7 @@
 #include "os/ObjectStore.h"
 #include "test/objectstore/ObjectStoreImitator.h"
 #include <fstream>
+#include <boost/random/mersenne_twister.hpp> // for boost::mt11213b
 #include <boost/random/uniform_int.hpp>
 #include <fmt/core.h>
 #include <mutex>

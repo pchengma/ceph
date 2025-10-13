@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -55,24 +55,26 @@ class STSAuthStrategy : public rgw::auth::Strategy,
 
   aplptr_t create_apl_local(CephContext* const cct,
                             const req_state* const s,
-                            const RGWUserInfo& user_info,
+                            std::unique_ptr<rgw::sal::User> user,
                             std::optional<RGWAccountInfo> account,
                             std::vector<IAM::Policy> policies,
                             const std::string& subuser,
                             const std::optional<uint32_t>& perm_mask,
-                            const std::string& access_key_id) const override {
+                            const std::string& access_key_id,
+                            bool is_impersonating) const override {
     auto apl = rgw::auth::add_sysreq(cct, driver, s,
-      LocalApplier(cct, user_info, std::move(account), std::move(policies),
-                   subuser, perm_mask, access_key_id));
+      LocalApplier(cct, std::move(user), std::move(account), std::move(policies),
+                   subuser, perm_mask, access_key_id), is_impersonating);
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
 
   aplptr_t create_apl_role(CephContext* const cct,
                             const req_state* const s,
                             RoleApplier::Role role,
-                            RoleApplier::TokenAttrs token_attrs) const override {
+                            RoleApplier::TokenAttrs token_attrs,
+                            bool is_impersonating) const override {
     auto apl = rgw::auth::add_sysreq(cct, driver, s,
-      rgw::auth::RoleApplier(cct, std::move(role), std::move(token_attrs)));
+      rgw::auth::RoleApplier(cct, driver, std::move(role), std::move(token_attrs)), is_impersonating);
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
 
@@ -176,15 +178,16 @@ class AWSAuthStrategy : public rgw::auth::Strategy,
 
   aplptr_t create_apl_local(CephContext* const cct,
                             const req_state* const s,
-                            const RGWUserInfo& user_info,
+                            std::unique_ptr<rgw::sal::User> user,
                             std::optional<RGWAccountInfo> account,
                             std::vector<IAM::Policy> policies,
                             const std::string& subuser,
                             const std::optional<uint32_t>& perm_mask,
-                            const std::string& access_key_id) const override {
+                            const std::string& access_key_id,
+                            bool is_impersonating) const override {
     auto apl = rgw::auth::add_sysreq(cct, driver, s,
-      LocalApplier(cct, user_info, std::move(account), std::move(policies),
-                   subuser, perm_mask, access_key_id));
+      LocalApplier(cct, std::move(user), std::move(account), std::move(policies),
+                   subuser, perm_mask, access_key_id), is_impersonating);
     /* TODO(rzarzynski): replace with static_ptr. */
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
@@ -500,16 +503,17 @@ void rgw_create_s3_canonical_header(
   const std::map<std::string, std::string>& sub_resources,
   std::string& dest_str);
 bool rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp,
+                                    RGWOpType op_type,
                                     const req_info& info,
                                     utime_t *header_time,       /* out */
                                     std::string& dest,          /* out */
                                     bool qsr);
 static inline std::tuple<bool, std::string, utime_t>
-rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp, const req_info& info, const bool qsr) {
+rgw_create_s3_canonical_header(const DoutPrefixProvider *dpp, RGWOpType op_type, const req_info& info, const bool qsr) {
   std::string dest;
   utime_t header_time;
 
-  const bool ok = rgw_create_s3_canonical_header(dpp, info, &header_time, dest, qsr);
+  const bool ok = rgw_create_s3_canonical_header(dpp, op_type, info, &header_time, dest, qsr);
   return std::make_tuple(ok, dest, header_time);
 }
 
@@ -704,8 +708,6 @@ std::string get_v4_canonical_qs(const req_info& info, bool using_qs);
 
 std::string gen_v4_canonical_qs(const req_info& info, bool is_non_s3_op);
 
-std::string get_v4_canonical_method(const req_state* s);
-
 boost::optional<std::string>
 get_v4_canonical_headers(const req_info& info,
                          const std::string_view& signedheaders,
@@ -745,6 +747,10 @@ extern AWSEngine::VersionAbstractor::server_signature_t
 get_v2_signature(CephContext*,
                  const std::string& secret_key,
                  const AWSEngine::VersionAbstractor::string_to_sign_t& string_to_sign);
+
+std::string get_canonical_method(const DoutPrefixProvider *dpp, RGWOpType op_type, const req_info& info);
+
+void get_aws_version_and_auth_type(const req_state* s, string& aws_version, string& auth_type);
 } /* namespace s3 */
 } /* namespace auth */
 } /* namespace rgw */

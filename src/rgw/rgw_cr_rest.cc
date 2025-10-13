@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_cr_rest.h"
 
@@ -84,7 +84,8 @@ RGWStreamReadHTTPResourceCRF::~RGWStreamReadHTTPResourceCRF()
 {
   if (req) {
     req->cancel();
-    req->wait(null_yield);
+    auto dpp = NoDoutPrefix{cct, ceph_subsys_rgw};
+    req->wait(&dpp, null_yield);
     delete req;
   }
 }
@@ -188,7 +189,8 @@ RGWStreamWriteHTTPResourceCRF::~RGWStreamWriteHTTPResourceCRF()
 {
   if (req) {
     req->cancel();
-    req->wait(null_yield);
+    auto dpp = NoDoutPrefix{cct, ceph_subsys_rgw};
+    req->wait(&dpp, null_yield);
     delete req;
   }
 }

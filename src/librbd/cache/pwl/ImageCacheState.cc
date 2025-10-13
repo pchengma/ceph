@@ -1,15 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/cache/Types.h"
 #include "librbd/cache/Utils.h"
 #include "librbd/cache/pwl/ImageCacheState.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Operations.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/config_proxy.h"
+#include "common/debug.h"
 #include "common/environment.h"
 #include "common/hostname.h"
 #include "librbd/plugin/Api.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #undef dout_subsys
 #define dout_subsys ceph_subsys_rbd_pwl

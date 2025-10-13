@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "crimson/common/coroutine.h"
 #include "crimson/osd/osd_operations/snaptrim_event.h"
@@ -197,7 +197,7 @@ SnapTrimObjSubEvent::remove_clone(
     pg->get_collection_ref()->get_cid(),
     ghobject_t{coid, ghobject_t::NO_GEN, shard_id_t::NO_SHARD});
   obc->obs.oi = object_info_t(coid);
-  return OpsExecuter::snap_map_remove(coid, pg->snap_mapper, pg->osdriver, txn);
+  return interruptor::now();
 }
 
 void SnapTrimObjSubEvent::remove_head_whiteout(
@@ -255,7 +255,7 @@ SnapTrimObjSubEvent::adjust_snaps(
   obc->obs.oi.prior_version = obc->obs.oi.version;
   obc->obs.oi.version = osd_op_p.at_version;
   ceph::bufferlist bl;
-  encode(obc->obs.oi,
+  obc->obs.oi.encode_no_oid(
     bl,
     pg->get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
   txn.setattr(
@@ -263,7 +263,7 @@ SnapTrimObjSubEvent::adjust_snaps(
     ghobject_t{coid, ghobject_t::NO_GEN, shard_id_t::NO_SHARD},
     OI_ATTR,
     bl);
-  add_log_entry(
+  auto &loge = add_log_entry(
     pg_log_entry_t::MODIFY,
     coid,
     obc->obs.oi.prior_version,
@@ -271,8 +271,10 @@ SnapTrimObjSubEvent::adjust_snaps(
     osd_reqid_t(),
     obc->obs.oi.mtime,
     0);
-  return OpsExecuter::snap_map_modify(
-    coid, new_snaps, pg->snap_mapper, pg->osdriver, txn);
+  bufferlist snapsbl;
+  encode(new_snaps, snapsbl);
+  loge.snaps.swap(snapsbl);
+  return interruptor::now();
 }
 
 void SnapTrimObjSubEvent::update_head(
@@ -361,6 +363,7 @@ SnapTrimObjSubEvent::remove_or_update(
       // save head snapset
       logger().debug("{}: {} new snapset {} on {}",
 		     *this, coid, head_obc->ssc->snapset, head_obc->obs.oi);
+      osd_op_p.at_version.version++;
       if (head_obc->ssc->snapset.clones.empty() && head_obc->obs.oi.is_whiteout()) {
 	remove_head_whiteout(obc, head_obc, txn);
       } else {
@@ -385,55 +388,67 @@ SnapTrimObjSubEvent::remove_or_update(
 SnapTrimObjSubEvent::snap_trim_obj_subevent_ret_t
 SnapTrimObjSubEvent::start()
 {
+  obc_orderer = pg->obc_loader.get_obc_orderer(
+    coid);
+
   ceph_assert(pg->is_active_clean());
 
-  auto exit_handle = seastar::defer([this] {
-    logger().debug("{}: exit", *this);
-    handle.exit();
+  auto exit_handle = seastar::defer([this, opref = IRef(this)] {
+    logger().debug("{}: exit", *opref);
+    std::ignore = handle.complete().then([opref = std::move(opref)] {});
   });
 
   co_await enter_stage<interruptor>(
-    client_pp().get_obc);
+    obc_orderer->obc_pp().process);
 
   logger().debug("{}: getting obc for {}", *this, coid);
-  // end of commonality
-  // lock both clone's and head's obcs
-  co_await pg->obc_loader.with_obc<RWState::RWWRITE>(
-    coid,
-    [this](auto head_obc, auto clone_obc) {
-      logger().debug("{}: got clone_obc={}", *this, clone_obc->get_oid());
-      return enter_stage<interruptor>(
-        client_pp().process
-      ).then_interruptible(
-        [this,clone_obc=std::move(clone_obc), head_obc=std::move(head_obc)]() mutable {
-	  logger().debug("{}: processing clone_obc={}", *this, clone_obc->get_oid());
-	  return remove_or_update(
-	    clone_obc, head_obc
-	  ).safe_then_interruptible([clone_obc, this](auto&& txn) mutable {
-	    auto [submitted, all_completed] = pg->submit_transaction(
-	      std::move(clone_obc),
-	      std::move(txn),
-	      std::move(osd_op_p),
-	      std::move(log_entries));
-	    return submitted.then_interruptible(
-	      [this, all_completed=std::move(all_completed)]() mutable {
-		return enter_stage<interruptor>(
-		  client_pp().wait_repop
-		).then_interruptible([all_completed=std::move(all_completed)]() mutable{
-		  return std::move(all_completed);
-		});
-	      });
-	  });
-	});
-    },
-    false
+
+
+  auto obc_manager = pg->obc_loader.get_obc_manager(
+    *obc_orderer,
+    coid, false /* resolve_oid */);
+
+  co_await pg->obc_loader.load_and_lock(
+    obc_manager, RWState::RWWRITE
   ).handle_error_interruptible(
     remove_or_update_iertr::pass_further{},
-    crimson::ct_error::assert_all{"unexpected error in SnapTrimObjSubEvent"}
+    crimson::ct_error::assert_all{fmt::format(
+      "{} error SnapTrimObjSubEvent::snap_trim_obj_subevent_ret_t with {}", *this, coid).c_str()}
   );
 
+  logger().debug("{}: got obc={}", *this, obc_manager.get_obc()->get_oid());
+
+  auto all_completed = interruptor::now();
+  {
+    // as with PG::submit_executer, we need to build the pg log entries
+    // and submit the transaction atomically
+    co_await interruptor::make_interruptible(pg->submit_lock.lock());
+    auto unlocker = seastar::defer([this] {
+      pg->submit_lock.unlock();
+    });
+
+    logger().debug("{}: calling remove_or_update obc={}",
+		   *this, obc_manager.get_obc()->get_oid());
+
+    auto txn = co_await remove_or_update(
+      obc_manager.get_obc(), obc_manager.get_head_obc());
+
+    auto submitted = interruptor::now();
+    std::tie(submitted, all_completed) = co_await pg->submit_transaction(
+      ObjectContextRef(obc_manager.get_obc()),
+      nullptr,
+      std::move(txn),
+      std::move(osd_op_p),
+      std::move(log_entries)
+    );
+    co_await std::move(submitted);
+  }
+
+  co_await enter_stage<interruptor>(obc_orderer->obc_pp().wait_repop);
+
+  co_await std::move(all_completed);
+
   logger().debug("{}: completed", *this);
-  co_await interruptor::make_interruptible(handle.complete());
 }
 
 void SnapTrimObjSubEvent::print(std::ostream &lhs) const

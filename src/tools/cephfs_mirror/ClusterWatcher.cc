@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <mutex>
 #include <vector>
@@ -31,16 +31,7 @@ ClusterWatcher::ClusterWatcher(CephContext *cct, MonClient *monc, ServiceDaemon 
 ClusterWatcher::~ClusterWatcher() {
 }
 
-bool ClusterWatcher::ms_can_fast_dispatch2(const cref_t<Message> &m) const {
-  return m->get_type() == CEPH_MSG_FS_MAP;
-}
-
-void ClusterWatcher::ms_fast_dispatch2(const ref_t<Message> &m) {
-  bool handled = ms_dispatch2(m);
-  ceph_assert(handled);
-}
-
-bool ClusterWatcher::ms_dispatch2(const ref_t<Message> &m) {
+Dispatcher::dispatch_result_t ClusterWatcher::ms_dispatch2(const ref_t<Message> &m) {
   if (m->get_type() == CEPH_MSG_FS_MAP) {
     if (m->get_connection()->get_peer_type() == CEPH_ENTITY_TYPE_MON) {
       handle_fsmap(ref_cast<MFSMap>(m));

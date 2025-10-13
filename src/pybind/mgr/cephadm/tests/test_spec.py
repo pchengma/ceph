@@ -18,7 +18,9 @@ from orchestrator import DaemonDescription, OrchestratorError
   "placement": {
     "count": 1
   },
-  "service_type": "alertmanager"
+  "service_type": "alertmanager",
+  "ssl": true,
+  "certificate_source": "cephadm-signed"
 },
 {
   "placement": {
@@ -31,7 +33,9 @@ from orchestrator import DaemonDescription, OrchestratorError
     "count": 1
   },
   "service_type": "grafana",
-  "protocol": "https"
+  "protocol": "https",
+  "ssl": true,
+  "certificate_source": "cephadm-signed"
 },
 {
   "placement": {
@@ -49,13 +53,17 @@ from orchestrator import DaemonDescription, OrchestratorError
   "placement": {
     "host_pattern": "*"
   },
-  "service_type": "node-exporter"
+  "service_type": "node-exporter",
+  "ssl": true,
+  "certificate_source": "cephadm-signed"
 },
 {
   "placement": {
     "count": 1
   },
-  "service_type": "prometheus"
+  "service_type": "prometheus",
+  "ssl": true,
+  "certificate_source": "cephadm-signed"
 },
 {
   "placement": {
@@ -68,6 +76,7 @@ from orchestrator import DaemonDescription, OrchestratorError
     ]
   },
   "service_type": "rgw",
+  "certificate_source": "cephadm-signed",
   "service_id": "default-rgw-realm.eu-central-1.1",
   "rgw_realm": "default-rgw-realm",
   "rgw_zone": "eu-central-1"
@@ -118,6 +127,7 @@ def test_spec_octopus(spec_json):
         j_c.pop('objectstore', None)
         j_c.pop('filter_logic', None)
         j_c.pop('anonymous_access', None)
+        j_c.pop('rgw_exit_timeout_secs', None)
         return j_c
 
     assert spec_json == convert_to_old_style_json(spec.to_json())
@@ -130,7 +140,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "d94d7969094d",
         "container_image_id": "0881eb8f169f5556a292b4e2c01d683172b12830a62a9225a98a8e206bb734f0",
-        "container_image_name": "docker.io/prom/alertmanager:latest",
+        "container_image_name": "quay.io/prometheus/alertmanager:latest",
         "daemon_id": "ceph-001",
         "daemon_type": "alertmanager",
         "version": "0.20.0",
@@ -145,7 +155,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "c4b036202241",
         "container_image_id": "204a01f9b0b6710dd0c0af7f37ce7139c47ff0f0105d778d7104c69282dfbbf1",
-        "container_image_name": "docker.io/ceph/ceph:v15",
+        "container_image_name": "quay.io/ceph/ceph:v15",
         "daemon_id": "ceph-001",
         "daemon_type": "crash",
         "version": "15.2.0",
@@ -160,7 +170,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "5b7b94b48f31",
         "container_image_id": "87a51ecf0b1c9a7b187b21c1b071425dafea0d765a96d5bc371c791169b3d7f4",
-        "container_image_name": "docker.io/ceph/ceph-grafana:latest",
+        "container_image_name": "quay.io/ceph/ceph-grafana:latest",
         "daemon_id": "ceph-001",
         "daemon_type": "grafana",
         "version": "6.6.2",
@@ -175,7 +185,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "9ca007280456",
         "container_image_id": "204a01f9b0b6710dd0c0af7f37ce7139c47ff0f0105d778d7104c69282dfbbf1",
-        "container_image_name": "docker.io/ceph/ceph:v15",
+        "container_image_name": "quay.io/ceph/ceph:v15",
         "daemon_id": "ceph-001.gkjwqp",
         "daemon_type": "mgr",
         "version": "15.2.0",
@@ -190,7 +200,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "3d1ba9a2b697",
         "container_image_id": "204a01f9b0b6710dd0c0af7f37ce7139c47ff0f0105d778d7104c69282dfbbf1",
-        "container_image_name": "docker.io/ceph/ceph:v15",
+        "container_image_name": "quay.io/ceph/ceph:v15",
         "daemon_id": "ceph-001",
         "daemon_type": "mon",
         "version": "15.2.0",
@@ -205,7 +215,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "36d026c68ba1",
         "container_image_id": "e5a616e4b9cf68dfcad7782b78e118be4310022e874d52da85c55923fb615f87",
-        "container_image_name": "docker.io/prom/node-exporter:latest",
+        "container_image_name": "quay.io/prometheus/node-exporter:latest",
         "daemon_id": "ceph-001",
         "daemon_type": "node-exporter",
         "version": "0.18.1",
@@ -220,7 +230,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "faf76193cbfe",
         "container_image_id": "204a01f9b0b6710dd0c0af7f37ce7139c47ff0f0105d778d7104c69282dfbbf1",
-        "container_image_name": "docker.io/ceph/ceph:v15",
+        "container_image_name": "quay.io/ceph/ceph:v15",
         "daemon_id": "0",
         "daemon_type": "osd",
         "version": "15.2.0",
@@ -235,7 +245,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "f82505bae0f1",
         "container_image_id": "204a01f9b0b6710dd0c0af7f37ce7139c47ff0f0105d778d7104c69282dfbbf1",
-        "container_image_name": "docker.io/ceph/ceph:v15",
+        "container_image_name": "quay.io/ceph/ceph:v15",
         "daemon_id": "1",
         "daemon_type": "osd",
         "version": "15.2.0",
@@ -250,7 +260,7 @@ def test_spec_octopus(spec_json):
         "hostname": "ceph-001",
         "container_id": "2708d84cd484",
         "container_image_id": "358a0d2395fe711bb8258e8fb4b2d7865c0a9a6463969bcd1452ee8869ea6653",
-        "container_image_name": "docker.io/prom/prometheus:latest",
+        "container_image_name": "quay.io/prom/prometheus:latest",
         "daemon_id": "ceph-001",
         "daemon_type": "prometheus",
         "version": "2.17.1",
@@ -286,6 +296,7 @@ def test_dd_octopus(dd_json):
         del j['daemon_name']
         return j
 
+    dd_json.update({'pending_daemon_config': False})
     assert dd_json == convert_to_old_style_json(
         DaemonDescription.from_json(dd_json).to_json())
 
@@ -569,7 +580,7 @@ def test_dd_octopus(dd_json):
         CustomContainerSpec(
             service_type='container',
             service_id='hello-world',
-            image='docker.io/library/hello-world:latest',
+            image='quay.io/hello-world/hello-world:latest',
         ),
         DaemonDescription(
             daemon_type='container',

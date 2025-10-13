@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -121,16 +122,12 @@ int LZ4Compressor::decompress(ceph::buffer::list::const_iterator &p,
   LZ4_streamDecode_t lz4_stream_decode;
   LZ4_setStreamDecode(&lz4_stream_decode, nullptr, 0);
 
-  ceph::buffer::ptr cur_ptr = p.get_current_ptr();
-  ceph::buffer::ptr *ptr = &cur_ptr;
-  std::optional<ceph::buffer::ptr> data_holder;
-  if (compressed_len != cur_ptr.length()) {
-    data_holder.emplace(compressed_len);
-    p.copy_deep(compressed_len, *data_holder);
-    ptr = &*data_holder;
-  }
-
-  char *c_in = ptr->c_str();
+  ceph::buffer::list indata;
+  // this does a shallow copy
+  p.copy(compressed_len, indata);
+  // if the input isn't fragmented, c_str() costs almost nothing.
+  // otherwise rectifying copy will be taken
+  const char* c_in = indata.c_str();
   char *c_out = dstptr.c_str();
   for (unsigned i = 0; i < count; ++i) {
     int r = LZ4_decompress_safe_continue(

@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "sub_items_stage.h"
 
@@ -22,7 +22,7 @@ const laddr_packed_t* internal_sub_items_t::insert_at(
 
   auto p_insert = const_cast<char*>(p_shift_end) - size;
   auto item = internal_sub_item_t{
-    snap_gen_t::from_key(key), laddr_packed_t{value}};
+    snap_gen_t::from_key(key), laddr_packed_t{laddr_le_t{value}}};
   mut.copy_in_absolute(p_insert, item);
   return &reinterpret_cast<internal_sub_item_t*>(p_insert)->value;
 }
@@ -79,7 +79,7 @@ void internal_sub_items_t::Appender<KT>::append(
 {
   p_append -= sizeof(internal_sub_item_t);
   auto item = internal_sub_item_t{
-    snap_gen_t::from_key(key), laddr_packed_t{value}};
+    snap_gen_t::from_key(key), laddr_packed_t{laddr_le_t{value}}};
   p_mut->copy_in_absolute(p_append, item);
   p_value = &reinterpret_cast<internal_sub_item_t*>(p_append)->value;
 }

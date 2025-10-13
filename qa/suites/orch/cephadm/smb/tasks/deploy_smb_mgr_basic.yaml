@@ -14,9 +14,10 @@ overrides:
     log-only-match:
       - CEPHADM_
 tasks:
-- cephadm.configure_samba_client_container:
+- smb.configure_samba_client_container:
     role: host.b
 - cephadm:
+    single_host_defaults: true
 
 - cephadm.shell:
     host.a:
@@ -38,13 +39,14 @@ tasks:
           ceph smb cluster create modusr1 user
           --define-user-pass=user1%t3stP4ss1
           --define-user-pass=user2%t3stP4ss2
+          --placement=count:1
       - cmd: ceph smb share create modusr1 share1 cephfs / --subvolume=smb/sv1
       - cmd: ceph smb share create modusr1 share2 cephfs / --subvolume=smb/sv2
 # Wait for the smb service to start
 - cephadm.wait_for_service:
     service: smb.modusr1
 # Check if shares exist
-- cephadm.exec:
+- template.exec:
     host.b:
       - sleep 30
       - "{{ctx.samba_client_container_cmd|join(' ')}} smbclient -U user1%t3stP4ss1 //{{'host.a'|role_to_remote|attr('ip_address')}}/share1 -c ls"

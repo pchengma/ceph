@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "MonClient.h"
 
@@ -13,7 +13,9 @@
 #include "auth/AuthClientHandler.h"
 #include "auth/RotatingKeyRing.h"
 
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/hostname.h"
+#include "include/utime_fmt.h"
 
 #include "crimson/auth/KeyRing.h"
 #include "crimson/common/config_proxy.h"
@@ -243,7 +245,7 @@ Connection::do_auth_single(Connection::request_t what)
       return std::make_optional(auth_result_t::canceled);
     }
     logger().info("do_auth_single: {} returns {}: {}",
-                  *conn, *m, m->result);
+                  *conn, *m, (int)m->result);
     auto p = m->result_bl.cbegin();
     auto ret = auth->handle_response(m->result, p,
 				     nullptr, nullptr);
@@ -463,7 +465,7 @@ seastar::future<> Client::load_keyring()
 
 void Client::tick()
 {
-  gate.dispatch_in_background(__func__, *this, [this] {
+  gates.dispatch_in_background(__func__, *this, [this] {
     if (active_con) {
       return seastar::when_all_succeed(wait_for_send_log(),
                                        active_con->get_conn()->send_keepalive(),
@@ -504,7 +506,7 @@ std::optional<seastar::future<>>
 Client::ms_dispatch(crimson::net::ConnectionRef conn, MessageRef m)
 {
   bool dispatched = true;
-  gate.dispatch_in_background(__func__, *this, [this, conn, &m, &dispatched] {
+  gates.dispatch_in_background(__func__, *this, [this, conn, &m, &dispatched] {
     // we only care about these message types
     switch (m->get_type()) {
     case CEPH_MSG_MON_MAP:
@@ -537,7 +539,7 @@ Client::ms_dispatch(crimson::net::ConnectionRef conn, MessageRef m)
 
 void Client::ms_handle_reset(crimson::net::ConnectionRef conn, bool /* is_replace */)
 {
-  gate.dispatch_in_background(__func__, *this, [this, conn] {
+  gates.dispatch_in_background(__func__, *this, [this, conn] {
     auto found = std::find_if(pending_conns.begin(), pending_conns.end(),
 			      [peer_addr = conn->get_peer_addr()](auto& mc) {
 				return mc->is_my_peer(peer_addr);
@@ -562,13 +564,21 @@ void Client::ms_handle_reset(crimson::net::ConnectionRef conn, bool /* is_replac
   });
 }
 
-std::pair<std::vector<uint32_t>, std::vector<uint32_t>>
+std::vector<uint32_t>
 Client::get_supported_auth_methods(int peer_type)
 {
     std::vector<uint32_t> methods;
+    auth_registry.get_supported_methods(peer_type, &methods, nullptr);
+    return methods;
+}
+
+std::vector<uint32_t>
+Client::get_supported_con_modes(int peer_type,
+				uint32_t auth_method)
+{
     std::vector<uint32_t> modes;
-    auth_registry.get_supported_methods(peer_type, &methods, &modes);
-    return {methods, modes};
+    auth_registry.get_supported_modes(peer_type, auth_method, &modes);
+    return modes;
 }
 
 uint32_t Client::pick_con_mode(int peer_type,
@@ -806,7 +816,7 @@ seastar::future<> Client::handle_auth_reply(crimson::net::Connection &conn,
                                             Ref<MAuthReply> m)
 {
   logger().info("handle_auth_reply {} returns {}: {}",
-                conn, *m, m->result);
+                conn, *m, (int)m->result);
   auto found = std::find_if(pending_conns.begin(), pending_conns.end(),
                             [peer_addr = conn.get_peer_addr()](auto& mc) {
                               return mc->is_my_peer(peer_addr);
@@ -940,7 +950,7 @@ seastar::future<> Client::authenticate()
 seastar::future<> Client::stop()
 {
   logger().info("{}", __func__);
-  auto fut = gate.close();
+  auto fut = gates.close_all();
   timer.cancel();
   ready_to_send = false;
   for (auto& pending_con : pending_conns) {

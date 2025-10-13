@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -98,6 +99,7 @@ class timer {
   std::thread thread;
 
   void timer_thread() {
+    ceph_pthread_setname("ceph_timer");
     std::unique_lock l(lock);
     while (!suspended) {
       auto now = TC::now();
@@ -155,7 +157,6 @@ class timer {
 public:
   timer() : suspended(false) {
     thread = std::thread(&timer::timer_thread, this);
-    set_thread_name(thread, "ceph_timer");
   }
 
   // Create a suspended timer, jobs will be executed in order when

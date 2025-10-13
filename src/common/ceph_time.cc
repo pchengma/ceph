@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,9 +19,13 @@
 #include <fmt/chrono.h>
 #include <fmt/ostream.h>
 
+#include "include/rados.h" // for struct ceph_timespec
 #include "log/LogClock.h"
 #include "config.h"
 #include "strtol.h"
+
+#include <iomanip> // for std::setw()
+#include <sstream>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>

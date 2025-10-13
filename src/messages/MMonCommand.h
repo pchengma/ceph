@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,9 +17,11 @@
 #define CEPH_MMONCOMMAND_H
 
 #include "messages/PaxosServiceMessage.h"
+#include "common/cmdparse.h" // for cmdmap_from_json()
 
 #include <vector>
 #include <string>
+#include <sstream>
 
 using ceph::common::cmdmap_from_json;
 using ceph::common::cmd_getval;

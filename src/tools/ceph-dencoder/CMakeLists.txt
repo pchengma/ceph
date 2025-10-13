@@ -10,8 +10,6 @@ endif()
 
 set(dencoder_srcs
   ceph_dencoder.cc
-  ../../include/uuid.cc
-  ../../include/utime.cc
   $<TARGET_OBJECTS:common_texttable_obj>)
 add_executable(ceph-dencoder ${dencoder_srcs})
 set_target_properties(ceph-dencoder PROPERTIES
@@ -40,6 +38,7 @@ endfunction()
 add_denc_mod(denc-mod-common
   common_types.cc)
 target_link_libraries(denc-mod-common
+  ceph-common
   journal
   cls_cas_internal
   cls_lock_client
@@ -87,6 +86,16 @@ if(WITH_RBD)
       krbd)
   endif()
 endif()
+
+if(WITH_NVMEOF_GATEWAY_MONITOR_CLIENT)
+  add_denc_mod(denc-mod-nvmeof
+    nvmeof_types.cc)
+  target_link_libraries(denc-mod-nvmeof
+    mon
+    ceph-common
+    )
+endif()
+
 
 if(WITH_CEPHFS)
   add_denc_mod(denc-mod-cephfs

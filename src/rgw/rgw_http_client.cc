@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "include/compat.h"
 #include "common/errno.h"
@@ -9,6 +9,7 @@
 #include <curl/easy.h>
 #include <curl/multi.h>
 
+#include "rgw_asio_thread.h"
 #include "rgw_common.h"
 #include "rgw_http_client.h"
 #include "rgw_http_errors.h"
@@ -71,7 +72,7 @@ struct rgw_http_req_data : public RefCountedObject {
         }, token, ex);
   }
 
-  int wait(optional_yield y) {
+  int wait(const DoutPrefixProvider* dpp, optional_yield y) {
     std::unique_lock l{lock};
     if (done) {
       return ret;
@@ -82,10 +83,8 @@ struct rgw_http_req_data : public RefCountedObject {
       async_wait(yield.get_executor(), l, yield[ec]);
       return -ec.value();
     }
-    // work on asio threads should be asynchronous, so warn when they block
-    if (is_asio_thread) {
-      dout(20) << "WARNING: blocking http request" << dendl;
-    }
+    maybe_warn_about_blocking(dpp);
+
     cond.wait(l, [this]{return done==true;});
     return ret;
   }
@@ -317,6 +316,17 @@ std::ostream& RGWHTTPClient::gen_prefix(std::ostream& out) const
 
 void RGWHTTPClient::init()
 {
+  char* ca_bundle = std::getenv("CURL_CA_BUNDLE");
+  if (ca_bundle) {
+    size_t ca_bundle_len = strlen(ca_bundle);
+    size_t max_len = PATH_MAX + NAME_MAX;
+    if (ca_bundle_len > max_len) {
+      ldout(cct, 0) << "ERROR: " << __func__ << "(): CURL_CA_BUNDLE length exceeds the allowed maximum (" << max_len << " chars)" << dendl;
+    } else {
+      set_ca_path(ca_bundle);
+    }
+  }
+
   auto pos = url.find("://");
   if (pos == string::npos) {
     host = url;
@@ -534,9 +544,9 @@ static bool is_upload_request(const string& method)
 /*
  * process a single simple one off request
  */
-int RGWHTTPClient::process(optional_yield y)
+int RGWHTTPClient::process(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  return RGWHTTP::process(this, y);
+  return RGWHTTP::process(dpp, this, y);
 }
 
 string RGWHTTPClient::to_str()
@@ -636,6 +646,7 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
   }
   curl_easy_setopt(easy_handle, CURLOPT_PRIVATE, (void *)req_data);
   curl_easy_setopt(easy_handle, CURLOPT_TIMEOUT, req_timeout);
+  curl_easy_setopt(easy_handle, CURLOPT_CONNECTTIMEOUT, req_connect_timeout);
 
   return 0;
 }
@@ -648,9 +659,9 @@ bool RGWHTTPClient::is_done()
 /*
  * wait for async request to complete
  */
-int RGWHTTPClient::wait(optional_yield y)
+int RGWHTTPClient::wait(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  return req_data->wait(y);
+  return req_data->wait(dpp, y);
 }
 
 void RGWHTTPClient::cancel()
@@ -1148,7 +1159,6 @@ void *RGWHTTPManager::reqs_thread_entry()
           http_status = err.http_ret;
         }
         int id = req_data->id;
-	finish_request(req_data, status, http_status);
         switch (result) {
           case CURLE_OK:
             break;
@@ -1161,6 +1171,7 @@ void *RGWHTTPManager::reqs_thread_entry()
             dout(20) << "ERROR: curl error: " << curl_easy_strerror((CURLcode)result) << " req_data->error_buf=" << req_data->error_buf << dendl;
 	    break;
         }
+	finish_request(req_data, status, http_status);
       }
     }
   }
@@ -1214,7 +1225,7 @@ int RGWHTTP::send(RGWHTTPClient *req) {
   return 0;
 }
 
-int RGWHTTP::process(RGWHTTPClient *req, optional_yield y) {
+int RGWHTTP::process(const DoutPrefixProvider* dpp, RGWHTTPClient *req, optional_yield y) {
   if (!req) {
     return 0;
   }
@@ -1223,6 +1234,6 @@ int RGWHTTP::process(RGWHTTPClient *req, optional_yield y) {
     return r;
   }
 
-  return req->wait(y);
+  return req->wait(dpp, y);
 }
 

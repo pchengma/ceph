@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_PICK_ADDRESS_H
 #define CEPH_PICK_ADDRESS_H
 
@@ -22,7 +23,7 @@ class entity_addrvec_t;
 #define CEPH_PICK_ADDRESS_DEFAULT_MON_PORTS  0x80
 #define CEPH_PICK_ADDRESS_PUBLIC_BIND 0x100
 
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
 /*
   Pick addresses based on subnets if needed.
 
@@ -44,7 +45,7 @@ class entity_addrvec_t;
  */
 void pick_addresses(CephContext *cct, int needs);
 
-#endif	// !WITH_SEASTAR
+#endif	// !WITH_CRIMSON
 
 int pick_addresses(CephContext *cct, unsigned flags, entity_addrvec_t *addrs,
 		   int preferred_numa_node = -1);
@@ -98,6 +99,6 @@ int get_iface_numa_node(
 bool is_addr_in_subnet(
   CephContext *cct,
   const std::string &networks,
-  const std::string &addr);
+  const entity_addr_t &addr);
 
 #endif

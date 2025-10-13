@@ -113,6 +113,7 @@ def get_valgrind_args(testdir, name, preamble, v, exit_on_first_error=True, cd=T
             '--soname-synonyms=somalloc=*tcmalloc*',
             '--num-callers=50',
             '--suppressions={tdir}/valgrind.supp'.format(tdir=testdir),
+            '--gen-suppressions=all',
             '--xml=yes',
             '--xml-file={vdir}/{n}.log'.format(vdir=val_path, n=name),
             '--time-stamp=yes',
@@ -125,6 +126,7 @@ def get_valgrind_args(testdir, name, preamble, v, exit_on_first_error=True, cd=T
             '--child-silent-after-fork=yes',
             '--soname-synonyms=somalloc=*tcmalloc*',
             '--suppressions={tdir}/valgrind.supp'.format(tdir=testdir),
+            '--gen-suppressions=all',
             '--log-file={vdir}/{n}.log'.format(vdir=val_path, n=name),
             '--time-stamp=yes',
             '--vgdb=yes',
@@ -569,23 +571,45 @@ class OSDThrasher(Thrasher):
 
     def out_host(self, host=None):
         """
-        Make all osds on a host out
+        Make all OSDs on a host out if the host has more than min_in OSDs.
         :param host: Host to be marked.
         """
-        # check that all osd remotes have a valid console
+        # Check that all OSD remotes have a valid console
         osds = self.ceph_manager.ctx.cluster.only(teuthology.is_type('osd', self.ceph_manager.cluster))
-        if host is None:
-            host = random.choice(list(osds.remotes.keys()))
-        self.log("Removing all osds in host %s" % (host,))
+        all_hosts = list(osds.remotes.keys())
+        min_in = self.minin
+        
+        if host is not None:
+            all_hosts = [host] if host in all_hosts else []
 
-        for role in osds.remotes[host]:
-            if not role.startswith("osd."):
-                continue
-            osdid = int(role.split('.')[1])
-            if self.in_osds.count(osdid) == 0:
-                continue
-            self.out_osd(osdid)
+        random.shuffle(all_hosts)  # Shuffle the list to pick hosts randomly
+        
+        for host in all_hosts:
+            self.log("Checking the number of in OSDs in host %s" % (host,))
 
+            # Count the number of in OSDs in the host
+            in_host_osd_count = 0
+            for role in osds.remotes[host]:
+                if role.startswith("osd."):
+                    osdid = int(role.split('.')[1])
+                    if osdid in self.in_osds:
+                        in_host_osd_count += 1
+
+            # Check taking out that host will cause the number 
+            # of in OSDs to be less than min_in
+            if len(self.in_osds) - in_host_osd_count >= min_in:
+                self.log("Removing all OSDs in host %s" % (host,))
+                # Proceed to take out OSDs
+                for role in osds.remotes[host]:
+                    if role.startswith("osd."):
+                        osdid = int(role.split('.')[1])
+                        if osdid in self.in_osds:
+                            self.out_osd(osdid)
+                return
+            else:
+                self.log("Host %s can't be trashed as it will left %d OSDs in" % (host, len(self.in_osds) - in_host_osd_count))
+
+        self.log("No suitable host found to thrash")
 
     def out_osd(self, osd=None):
         """
@@ -846,11 +870,16 @@ class OSDThrasher(Thrasher):
             self.ceph_manager.raw_cluster_cmd('osd', 'primary-affinity',
                                               str(osd), str(1))
 
-    def do_join(self):
+    def stop(self):
+        """
+        Stop the thrasher
+        """
+        self.stopping = True
+
+    def join(self):
         """
         Break out of this Ceph loop
         """
-        self.stopping = True
         self.thread.get()
         if self.sighup_delay:
             self.log("joining the do_sighup greenlet")
@@ -864,6 +893,13 @@ class OSDThrasher(Thrasher):
         if self.noscrub_toggle_delay:
             self.log("joining the do_noscrub_toggle greenlet")
             self.noscrub_toggle_thread.join()
+
+    def stop_and_join(self):
+        """
+        Stop and join the thrasher
+        """
+        self.stop()
+        return self.join()
 
     def grow_pool(self):
         """
@@ -914,7 +950,13 @@ class OSDThrasher(Thrasher):
         have the option to specify which pool you
         want the PG from.
         """
-        pgs = self.ceph_manager.get_pg_stats()
+        with safe_while(sleep=5, tries=3, action="get_pg_stats") as proceed:
+            while proceed():
+                pgs = self.ceph_manager.get_pg_stats()
+                if pgs:
+                    break
+                # If pool has just been created it might not have PGs yet
+                self.log('No pgs; trying again')
         if not pgs:
             self.log('No pgs; doing nothing')
             return
@@ -1254,7 +1296,6 @@ class OSDThrasher(Thrasher):
                  (minin, minout, minlive, mindead, chance_down))
         actions = []
         if thrash_hosts:
-            self.log("check thrash_hosts")
             if len(self.in_osds) > minin:
                 self.log("check thrash_hosts: in_osds > minin")
                 actions.append((self.out_host, 1.0,))
@@ -2134,6 +2175,10 @@ class CephManager:
         when creating an erasure coded pool.
         """
         with self.lock:
+            # msr rules require at least squid
+            if 'crush-osds-per-failure-domain' in profile:
+                self.raw_cluster_cmd(
+                    'osd', 'set-require-min-compat-client', 'squid')
             args = cmd_erasure_code_profile(profile_name, profile)
             self.raw_cluster_cmd(*args)
 
@@ -2259,7 +2304,7 @@ class CephManager:
         """
         with self.lock:
             if self.pools:
-                return random.sample(self.pools.keys(), 1)[0]
+                return random.sample(list(self.pools.keys()), 1)[0]
 
     def get_pool_pg_num(self, pool_name):
         """
@@ -2757,6 +2802,59 @@ class CephManager:
                  num += 1
         return num
 
+    def _print_not_active_clean_pg(self, pgs):
+        """
+        Print the PGs that are not active+clean.
+        """
+        for pg in pgs:
+            if not (pg['state'].count('active') and
+                    pg['state'].count('clean') and
+                    not pg['state'].count('stale')):
+                log.debug(
+                    "PG %s is not active+clean, but %s",
+                    pg['pgid'], pg['state']
+                )
+
+    def pg_all_active_clean(self):
+        """
+        Check if all pgs are active+clean
+        return: True if all pgs are active+clean else False
+        """
+        pgs = self.get_pg_stats()
+        result = self._get_num_active_clean(pgs) == len(pgs)
+        if result:
+            log.debug("All PGs are active+clean")
+        else:
+            log.debug("Not all PGs are active+clean")
+            self._print_not_active_clean_pg(pgs)
+        return result
+
+    def _print_not_active_pg(self, pgs):
+        """
+        Print the PGs that are not active.
+        """
+        for pg in pgs:
+            if not (pg['state'].count('active')
+                    and not pg['state'].count('stale')):
+                log.debug(
+                    "PG %s is not active, but %s",
+                    pg['pgid'], pg['state']
+                )
+
+    def pg_all_active(self):
+        """
+        Check if all pgs are active
+        return: True if all pgs are active else False
+        """
+        pgs = self.get_pg_stats()
+        result = self._get_num_active(pgs) == len(pgs)
+        if result:
+            log.debug("All PGs are active")
+        else:
+            log.debug("Not all PGs are active")
+            self._print_not_active_pg(pgs)
+        return result
+
     def is_clean(self):
         """
         True if all pgs are clean
@@ -3198,6 +3296,26 @@ class CephManager:
             self.make_admin_daemon_dir(remote)
         self.ctx.daemons.get_daemon('mgr', mgr, self.cluster).restart()
 
+    def get_crush_rule_id(self, crush_rule_name):
+        """
+        Get crush rule id by name
+        :returns: int -- crush rule id
+        """
+        out = self.raw_cluster_cmd('osd', 'crush', 'rule', 'dump', '--format=json')
+        j = json.loads('\n'.join(out.split('\n')[1:]))
+        for rule in j:
+            if rule['rule_name'] == crush_rule_name:
+                return rule['rule_id']
+        assert False, 'rule %s not found' % crush_rule_name
+
+    def get_mon_dump_json(self):
+        """
+        mon dump --format=json converted to a python object
+        :returns: the python object
+        """
+        out = self.raw_cluster_cmd('mon', 'dump', '--format=json')
+        return json.loads('\n'.join(out.split('\n')[1:]))
+
     def get_mon_status(self, mon):
         """
         Extract all the monitor status information from the cluster
@@ -3212,6 +3330,14 @@ class CephManager:
         out = self.raw_cluster_cmd('quorum_status')
         j = json.loads(out)
         return j['quorum']
+
+    def get_mon_quorum_names(self):
+        """
+        Extract monitor quorum names from the cluster
+        """
+        out = self.raw_cluster_cmd('quorum_status')
+        j = json.loads(out)
+        return j['quorum_names']
 
     def wait_for_mon_quorum_size(self, size, timeout=300):
         """
@@ -3292,6 +3418,23 @@ class CephManager:
             return {}
         self.log(task_status)
         return task_status
+
+    # Stretch mode related functions
+    def is_degraded_stretch_mode(self):
+        """
+        Return whether the cluster is in degraded stretch mode
+        """
+        try:
+            osdmap = self.get_osd_dump_json()
+            stretch_mode = osdmap.get('stretch_mode', {})
+            degraded_stretch_mode = stretch_mode.get('degraded_stretch_mode', 0)
+            self.log("is_degraded_stretch_mode: {0}".format(degraded_stretch_mode))
+            return degraded_stretch_mode == 1
+        except (TypeError, AttributeError) as e:
+            # Log the error or handle it as needed
+            self.log("Error accessing degraded_stretch_mode: {0}".format(e))
+            return False
+
 
 def utility_task(name):
     """

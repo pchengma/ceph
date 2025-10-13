@@ -60,6 +60,7 @@
         </cd-dashboard-area-chart>
         <cd-dashboard-area-chart chartTitle="Latency"
                                  dataUnits="ms"
+                                 decimals="2"
                                  [labelsArray]="['GET', 'PUT']"
                                  [dataArray]="[queriesResults.AVG_GET_LATENCY, queriesResults.AVG_PUT_LATENCY]">
         </cd-dashboard-area-chart>
@@ -102,7 +103,7 @@
           <cd-alert-panel type="info"
                           i18n>
             Multi-site needs to be configured in order to see the multi-site sync status.
-            Please consult the <cd-doc section="multisite"></cd-doc> on how to configure and enable the multi-site functionality.
+            Please consult the&nbsp;<cd-doc section="multisite"></cd-doc>&nbsp;on how to configure and enable the multi-site functionality.
           </cd-alert-panel>
         </span>
       </ng-template>

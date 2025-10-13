@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,9 +18,12 @@
 #define CEPH_MOSDOP_H
 
 #include <atomic>
+#include <cstdint>
+#include <vector>
 
 #include "MOSDFastDispatchOp.h"
 #include "include/ceph_features.h"
+#include "include/ceph_fs.h" // for CEPH_MSG_OSD_OP
 #include "common/hobject.h"
 
 /*
@@ -166,7 +170,7 @@ public:
   uint64_t get_features() const {
     if (features)
       return features;
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
     ceph_abort("In crimson, conn is independently maintained outside Message");
 #else
     return get_connection()->get_features();

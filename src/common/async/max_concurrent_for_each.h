@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -21,7 +21,7 @@
 #include <utility>
 #include <boost/asio/spawn.hpp>
 #include "cancel_on_error.h"
-#include "yield_context.h"
+#include "co_throttle.h"
 #include "spawn_throttle.h"
 
 namespace ceph::async {
@@ -36,10 +36,10 @@ namespace ceph::async {
 /// \code
 /// void child(task& t, boost::asio::yield_context yield);
 ///
-/// void parent(std::span<task> tasks, optional_yield y)
+/// void parent(std::span<task> tasks, boost::asio::yield_context yield)
 /// {
 ///   // process all tasks, up to 10 at a time
-///   max_concurrent_for_each(tasks, 10, y, child);
+///   max_concurrent_for_each(tasks, 10, yield, child);
 /// }
 /// \endcode
 template <typename Iterator, typename Sentinel, typename Func,
@@ -50,20 +50,18 @@ template <typename Iterator, typename Sentinel, typename Func,
 void max_concurrent_for_each(Iterator begin,
                              Sentinel end,
                              size_t max_concurrent,
-                             optional_yield y,
+                             boost::asio::yield_context yield,
                              Func&& func,
                              cancel_on_error on_error = cancel_on_error::none)
 {
-  const size_t count = std::ranges::distance(begin, end);
-  if (!count) {
+  if (begin == end) {
     return;
   }
-  auto throttle = spawn_throttle{y, max_concurrent, on_error};
+  auto throttle = spawn_throttle{yield, max_concurrent, on_error};
   for (Iterator i = begin; i != end; ++i) {
-    boost::asio::spawn(throttle.get_executor(),
-                       [&func, &val = *i] (boost::asio::yield_context yield) {
-                         func(val, yield);
-                       }, throttle);
+    throttle.spawn([&func, &val = *i] (boost::asio::yield_context yield) {
+        func(val, yield);
+      });
   }
   throttle.wait();
 }
@@ -75,15 +73,63 @@ template <typename Range, typename Func,
               std::invocable<Func, Reference, boost::asio::yield_context>)
 auto max_concurrent_for_each(Range&& range,
                              size_t max_concurrent,
-                             optional_yield y,
+                             boost::asio::yield_context yield,
                              Func&& func,
                              cancel_on_error on_error = cancel_on_error::none)
 {
   return max_concurrent_for_each(std::begin(range), std::end(range),
-                                 max_concurrent, y, std::forward<Func>(func),
-                                 on_error);
+                                 max_concurrent, yield,
+                                 std::forward<Func>(func), on_error);
 }
 
-// TODO: overloads for co_spawn()
+// \overload
+template <typename Iterator, typename Sentinel, typename VoidAwaitableFactory,
+          typename Value = std::iter_reference_t<Iterator>,
+          typename VoidAwaitable = std::invoke_result_t<
+              VoidAwaitableFactory, Value>,
+          typename AwaitableT = typename VoidAwaitable::value_type,
+          typename AwaitableExecutor = typename VoidAwaitable::executor_type>
+    requires (std::input_iterator<Iterator> &&
+              std::sentinel_for<Sentinel, Iterator> &&
+              std::same_as<AwaitableT, void> &&
+              boost::asio::execution::executor<AwaitableExecutor>)
+auto max_concurrent_for_each(Iterator begin,
+                             Sentinel end,
+                             size_t max_concurrent,
+                             VoidAwaitableFactory&& factory,
+                             cancel_on_error on_error = cancel_on_error::none)
+    -> boost::asio::awaitable<void, AwaitableExecutor>
+{
+  if (begin == end) {
+    co_return;
+  }
+  auto ex = co_await boost::asio::this_coro::executor;
+  auto throttle = co_throttle{ex, max_concurrent, on_error};
+  for (Iterator i = begin; i != end; ++i) {
+    co_await throttle.spawn(factory(*i));
+  }
+  co_await throttle.wait();
+}
+
+/// \overload
+template <typename Range, typename VoidAwaitableFactory,
+          typename Value = std::ranges::range_reference_t<Range>,
+          typename VoidAwaitable = std::invoke_result_t<
+              VoidAwaitableFactory, Value>,
+          typename AwaitableT = typename VoidAwaitable::value_type,
+          typename AwaitableExecutor = typename VoidAwaitable::executor_type>
+    requires (std::ranges::range<Range> &&
+              std::same_as<AwaitableT, void> &&
+              boost::asio::execution::executor<AwaitableExecutor>)
+auto max_concurrent_for_each(Range&& range,
+                             size_t max_concurrent,
+                             VoidAwaitableFactory&& factory,
+                             cancel_on_error on_error = cancel_on_error::none)
+    -> boost::asio::awaitable<void, AwaitableExecutor>
+{
+  return max_concurrent_for_each(
+      std::begin(range), std::end(range), max_concurrent,
+      std::forward<VoidAwaitableFactory>(factory), on_error);
+}
 
 } // namespace ceph::async

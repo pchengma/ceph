@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_COMPRESSION_ONWIRE_H
 #define CEPH_COMPRESSION_ONWIRE_H
@@ -41,6 +41,8 @@ namespace ceph::compression::onwire {
      * @returns true on success, false on failure
      */
     std::optional<ceph::bufferlist> decompress(const ceph::bufferlist &input);
+
+    std::string_view compressor_name() const;
   };
 
   class TxHandler final : private Handler {
@@ -81,6 +83,8 @@ namespace ceph::compression::onwire {
     uint64_t get_final_size() const {
       return m_onwire_size;
     }
+
+    std::string_view compressor_name() const;
 
   private:
     uint64_t m_min_size; 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,12 +18,21 @@
 
 #include <fmt/format.h>
 
+#include "include/types.h" // for version_t
 #include "include/utime.h"
+#include "include/utime_fmt.h"
 #include "msg/msg_fmt.h"
 #include "msg/msg_types.h"
 #include "common/entity_name.h"
 #include "ostream_temp.h"
 #include "LRUSet.h"
+
+#include <cstdint>
+#include <iostream>
+#include <list>
+#include <map>
+#include <string>
+#include <unordered_set>
 
 namespace ceph {
   class Formatter;
@@ -74,7 +84,7 @@ public:
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<LogEntryKey*>& o);
+  static std::list<LogEntryKey> generate_test_instances();
 
   friend bool operator==(const LogEntryKey& l, const LogEntryKey& r) {
     return l.rank == r.rank && l.stamp == r.stamp && l.seq == r.seq;
@@ -123,7 +133,7 @@ struct LogEntry {
   void encode(ceph::buffer::list& bl, uint64_t features) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<LogEntry*>& o);
+  static std::list<LogEntry> generate_test_instances();
   static clog_type str_to_level(std::string const &str);
   static std::string_view level_to_str(clog_type t) {
     switch (t) {
@@ -152,7 +162,7 @@ struct LogSummary {
   // channel -> [(seq#, entry), ...]
   std::map<std::string,std::list<std::pair<uint64_t,LogEntry>>> tail_by_channel;
   uint64_t seq = 0;
-  ceph::unordered_set<LogEntryKey> keys;
+  std::unordered_set<LogEntryKey> keys;
 
   // ---- quincy+ ----
   LRUSet<LogEntryKey> recent_keys;
@@ -182,7 +192,7 @@ struct LogSummary {
   void encode(ceph::buffer::list& bl, uint64_t features) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<LogSummary*>& o);
+  static std::list<LogSummary> generate_test_instances();
 };
 WRITE_CLASS_ENCODER_FEATURES(LogSummary)
 
@@ -217,14 +227,14 @@ template <> struct fmt::formatter<clog_type> : fmt::ostream_formatter {};
 
 template <> struct fmt::formatter<EntityName> : fmt::formatter<std::string_view> {
   template <typename FormatContext>
-  auto format(const EntityName& e, FormatContext& ctx) {
+  auto format(const EntityName& e, FormatContext& ctx) const {
     return formatter<std::string_view>::format(e.to_str(), ctx);
   }
 };
 
 template <> struct fmt::formatter<LogEntry> : fmt::formatter<std::string_view> {
   template <typename FormatContext>
-  auto format(const LogEntry& e, FormatContext& ctx) {
+  auto format(const LogEntry& e, FormatContext& ctx) const {
     return fmt::format_to(ctx.out(), "{} {} ({}) {} : {} [{}] {}",
                           e.stamp, e.name, e.rank, e.seq, e.channel,
                           LogEntry::level_to_str(e.prio), e.msg);

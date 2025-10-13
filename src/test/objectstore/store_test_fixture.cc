@@ -41,7 +41,7 @@ void StoreTestFixture::SetUp()
     cerr << __func__ << ": unable to create " << data_dir << ": " << cpp_strerror(r) << std::endl;
   }
   ASSERT_EQ(0, r);
-
+  store.reset(nullptr);
   store = ObjectStore::create(g_ceph_context,
                               type,
                               data_dir,
@@ -128,4 +128,8 @@ void StoreTestFixture::CloseAndReopen() {
 #endif
   ASSERT_EQ(0, store->mount());
   g_conf().set_safe_to_start_threads();
+}
+
+void StoreTestFixture::RemoveTestObjectStore() {
+  rm_r(data_dir);
 }

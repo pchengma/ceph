@@ -4,6 +4,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Collection,
+    ContextManager,
     Dict,
     Iterator,
     List,
@@ -14,6 +15,7 @@ from typing import (
 import sys
 
 from ceph.deployment.service_spec import SMBSpec
+from ceph.fs.earmarking import EarmarkTopScope
 
 # this uses a version check as opposed to a try/except because this
 # form makes mypy happy and try/except doesn't.
@@ -48,19 +50,22 @@ class Simplifiable(Protocol):
 
 
 EntryKey = Tuple[str, str]
+FindParams = Dict[str, Any]
 
 
-class ConfigEntry(Protocol):
-    """A protocol for describing a configuration object that can be kept within
-    a configuration store. Has the ability to identify itself either by a
-    relative key or by a global URI value.
+class ResourceKey(Protocol):
+    """An object representing a key for a singular object in a store.
+    This key may be comprised of one or more input values.
     """
 
-    def get(self) -> Simplified:
+    def __str__(self) -> str:
         ...  # pragma: no cover
 
-    def set(self, obj: Simplified) -> None:
-        ...  # pragma: no cover
+
+class BaseEntry(Protocol):
+    """Base protocol class for Entry objects. Entry objects are stored
+    peristently and can by identified by an internal key or URI.
+    """
 
     def remove(self) -> bool:
         ...  # pragma: no cover
@@ -74,6 +79,29 @@ class ConfigEntry(Protocol):
 
     @property
     def full_key(self) -> EntryKey:
+        ...  # pragma: no cover
+
+
+class ConfigEntry(BaseEntry, Protocol):
+    """A protocol for describing a configuration object that can be kept within
+    a configuration store. Has the ability to identify itself either by a
+    relative key or by a global URI value.
+    """
+
+    def get(self) -> Simplified:
+        ...  # pragma: no cover
+
+    def set(self, obj: Simplified) -> None:
+        ...  # pragma: no cover
+
+
+class RawConfigEntry(BaseEntry, Protocol):
+    """Like a ConfigEntry but for opaque data blobs."""
+
+    def get_data(self) -> str:
+        ...  # pragma: no cover
+
+    def set_data(self, obj: Simplified) -> None:
         ...  # pragma: no cover
 
 
@@ -99,6 +127,35 @@ class ConfigStore(ConfigStoreListing, Protocol):
         ...  # pragma: no cover
 
     def remove(self, ns: EntryKey) -> bool:
+        ...  # pragma: no cover
+
+
+class FindingConfigStore(ConfigStore, Protocol):
+    """A protocol for a config store that can more efficiently find
+    items within the the store.
+    """
+
+    def find_entries(
+        self, ns: str, params: FindParams
+    ) -> Collection[ConfigEntry]:
+        """Find entries in the store matching the given params.
+        Params is a dict that will be compared to the same keys/attributes of
+        the objects being searched. Only exact matches will be returned.
+        """
+        ...  # pragma: no cover
+
+
+class TransactingConfigStore(ConfigStore, Protocol):
+    """A protocol for a config store that supports transactions.
+    Using the transactions can make using the store more robust or
+    efficient.
+    """
+
+    def transaction(self) -> ContextManager[None]:
+        """Return a context manager that wraps a transaction. What exactly
+        this means depends on the store. Typically this would wrap a database
+        transaction.
+        """
         ...  # pragma: no cover
 
 
@@ -153,4 +210,19 @@ class AccessAuthorizer(Protocol):
     def authorize_entity(
         self, volume: str, entity: str, caps: str = ''
     ) -> None:
+        ...  # pragma: no cover
+
+
+class EarmarkResolver(Protocol):
+    """A protocol for a type that can resolve earmarks for subvolumes."""
+
+    def get_earmark(self, path: str, volume: str) -> Optional[str]:
+        ...  # pragma: no cover
+
+    def set_earmark(self, path: str, volume: str, earmark: str) -> None:
+        ...  # pragma: no cover
+
+    def check_earmark(
+        self, earmark: str, top_level_scope: EarmarkTopScope
+    ) -> bool:
         ...  # pragma: no cover

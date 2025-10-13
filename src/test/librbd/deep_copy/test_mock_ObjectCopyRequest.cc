@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "include/interval_set.h"
@@ -119,12 +119,12 @@ void scribble(librbd::ImageCtx *image_ctx, int num_ops, size_t max_size,
 
 
 MATCHER(IsListSnaps, "") {
-  auto req = boost::get<io::ImageDispatchSpec::ListSnaps>(&arg->request);
+  auto req = std::get_if<io::ImageDispatchSpec::ListSnaps>(&arg->request);
   return (req != nullptr);
 }
 
 MATCHER_P2(IsRead, snap_id, image_interval, "") {
-  auto req = boost::get<io::ImageDispatchSpec::Read>(&arg->request);
+  auto req = std::get_if<io::ImageDispatchSpec::Read>(&arg->request);
   if (req == nullptr ||
       arg->io_context->get_read_snap() != snap_id) {
     return false;

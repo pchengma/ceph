@@ -7,6 +7,7 @@
 #include <dbstore.h>
 #include <sqliteDB.h>
 #include "rgw_common.h"
+#include "common/Clock.h" // for ceph_clock_now()
 
 using namespace std;
 using DB = rgw::store::DB;
@@ -21,7 +22,7 @@ namespace gtest {
       Environment(): tenant("default_ns"), db(nullptr),
       db_type("SQLite"), ret(-1) {}
 
-      Environment(string tenantname, string db_typename): 
+      Environment(string tenantname, string db_typename):
         tenant(tenantname), db(nullptr),
         db_type(db_typename), ret(-1) {}
 
@@ -153,8 +154,8 @@ TEST_F(DBStoreTest, InsertUser) {
   RGWAccessKey k2("id2", "key2");
   params.op.user.uinfo.access_keys["id1"] = k1;
   params.op.user.uinfo.access_keys["id2"] = k2;
-  params.op.user.user_version.ver = 1;    
-  params.op.user.user_version.tag = "UserTAG";    
+  params.op.user.user_version.ver = 1;
+  params.op.user.user_version.tag = "UserTAG";
 
   ret = db->ProcessOp(dpp, "InsertUser", &params);
   ASSERT_EQ(ret, 0);
@@ -841,7 +842,7 @@ TEST_F(DBStoreTest, IterateObject) {
 TEST_F(DBStoreTest, ListBucketObjects) {
   struct DBOpParams params = GlobalParams;
   int ret = -1;
-  
+
   int max = 2;
   bool is_truncated = false;
   rgw_obj_key marker1;
@@ -1032,7 +1033,7 @@ TEST_F(DBStoreTest, DeleteVersionedObject) {
                                  true, &s);
   ASSERT_EQ(ret, -ENOENT);
 
-  /* Delete delete marker..should be able to read object now */ 
+  /* Delete delete marker..should be able to read object now */
   params.op.obj.state.obj.key.instance = dm_instance;
   DB::Object op_target3(db, params.op.bucket.info, params.op.obj.state.obj);
   DB::Object::Delete delete_op2(&op_target3);
@@ -1255,31 +1256,30 @@ TEST_F(DBStoreTest, LCHead) {
   std::string index1 = "bucket1";
   std::string index2 = "bucket2";
   time_t lc_time = ceph_clock_now();
-  std::unique_ptr<rgw::sal::Lifecycle::LCHead> head;
-  std::string ents[] = {"entry1", "entry2", "entry3"};
-  rgw::sal::StoreLifecycle::StoreLCHead head1(lc_time, 0, ents[0]);
-  rgw::sal::StoreLifecycle::StoreLCHead head2(lc_time, 0, ents[1]);
-  rgw::sal::StoreLifecycle::StoreLCHead head3(lc_time, 0, ents[2]);
+  rgw::sal::LCHead head;
+  rgw::sal::LCHead head1{lc_time, "entry1"};
+  rgw::sal::LCHead head2{lc_time, "entry2"};
+  rgw::sal::LCHead head3{lc_time, "entry3"};
 
   ret = db->put_head(index1, head1);
   ASSERT_EQ(ret, 0);
   ret = db->put_head(index2, head2);
   ASSERT_EQ(ret, 0);
 
-  ret = db->get_head(index1, &head);
+  ret = db->get_head(index1, head);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(head->get_marker(), "entry1");
+  ASSERT_EQ(head.marker, "entry1");
 
-  ret = db->get_head(index2, &head);
+  ret = db->get_head(index2, head);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(head->get_marker(), "entry2");
+  ASSERT_EQ(head.marker, "entry2");
 
   // update index1
   ret = db->put_head(index1, head3);
   ASSERT_EQ(ret, 0);
-  ret = db->get_head(index1, &head);
+  ret = db->get_head(index1, head);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(head->get_marker(), "entry3");
+  ASSERT_EQ(head.marker, "entry3");
 
 }
 TEST_F(DBStoreTest, LCEntry) {
@@ -1290,13 +1290,13 @@ TEST_F(DBStoreTest, LCEntry) {
   std::string index2 = "lcindex2";
   typedef enum {lc_uninitial = 1, lc_complete} status;
   std::string ents[] = {"bucket1", "bucket2", "bucket3", "bucket4"};
-  std::unique_ptr<rgw::sal::Lifecycle::LCEntry> entry;
-  rgw::sal::StoreLifecycle::StoreLCEntry entry1(ents[0], lc_time, lc_uninitial);
-  rgw::sal::StoreLifecycle::StoreLCEntry entry2(ents[1], lc_time, lc_uninitial);
-  rgw::sal::StoreLifecycle::StoreLCEntry entry3(ents[2], lc_time, lc_uninitial);
-  rgw::sal::StoreLifecycle::StoreLCEntry entry4(ents[3], lc_time, lc_uninitial);
+  rgw::sal::LCEntry entry;
+  rgw::sal::LCEntry entry1{ents[0], lc_time, lc_uninitial};
+  rgw::sal::LCEntry entry2{ents[1], lc_time, lc_uninitial};
+  rgw::sal::LCEntry entry3{ents[2], lc_time, lc_uninitial};
+  rgw::sal::LCEntry entry4{ents[3], lc_time, lc_uninitial};
 
-  vector<std::unique_ptr<rgw::sal::Lifecycle::LCEntry>> lc_entries;
+  vector<rgw::sal::LCEntry> lc_entries;
 
   ret = db->set_entry(index1, entry1);
   ASSERT_EQ(ret, 0);
@@ -1308,44 +1308,44 @@ TEST_F(DBStoreTest, LCEntry) {
   ASSERT_EQ(ret, 0);
 
   // get entry index1, entry1
-  ret = db->get_entry(index1, ents[0], &entry); 
+  ret = db->get_entry(index1, ents[0], entry);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(entry->get_status(), lc_uninitial);
-  ASSERT_EQ(entry->get_start_time(), lc_time);
+  ASSERT_EQ(entry.status, lc_uninitial);
+  ASSERT_EQ(entry.start_time, lc_time);
 
   // get next entry index1, entry2
-  ret = db->get_next_entry(index1, ents[1], &entry); 
+  ret = db->get_next_entry(index1, ents[1], entry);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(entry->get_bucket(), ents[2]);
-  ASSERT_EQ(entry->get_status(), lc_uninitial);
-  ASSERT_EQ(entry->get_start_time(), lc_time);
+  ASSERT_EQ(entry.bucket, ents[2]);
+  ASSERT_EQ(entry.status, lc_uninitial);
+  ASSERT_EQ(entry.start_time, lc_time);
 
   // update entry4 to entry5
   entry4.status = lc_complete;
   ret = db->set_entry(index2, entry4);
   ASSERT_EQ(ret, 0);
-  ret = db->get_entry(index2, ents[3], &entry); 
+  ret = db->get_entry(index2, ents[3], entry);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(entry->get_status(), lc_complete);
+  ASSERT_EQ(entry.status, lc_complete);
 
   // list entries
   ret = db->list_entries(index1, "", 5, lc_entries);
   ASSERT_EQ(ret, 0);
   for (const auto& ent: lc_entries) {
     cout << "###################### \n";
-    cout << "lc entry.bucket : " << ent->get_bucket() << "\n";
-    cout << "lc entry.status : " << ent->get_status() << "\n";
+    cout << "lc entry.bucket : " << ent.bucket << "\n";
+    cout << "lc entry.status : " << ent.status << "\n";
   }
 
   // remove index1, entry3
-  ret = db->rm_entry(index1, entry3); 
+  ret = db->rm_entry(index1, entry3);
   ASSERT_EQ(ret, 0);
 
-  // get next entry index1, entry2.. should be null
-  entry.release();
-  ret = db->get_next_entry(index1, ents[1], &entry); 
+  // get next entry index1, entry2.. should be empty
+  entry = rgw::sal::LCEntry{};
+  ret = db->get_next_entry(index1, ents[1], entry);
   ASSERT_EQ(ret, 0);
-  ASSERT_EQ(entry.get(), nullptr);
+  ASSERT_TRUE(entry.bucket.empty());
 }
 
 TEST_F(DBStoreTest, RemoveBucket) {
@@ -1374,8 +1374,8 @@ TEST_F(DBStoreTest, InsertTestIDUser) {
   params.op.user.uinfo.user_email = "tester@ceph.com";
   RGWAccessKey k1("0555b35654ad1656d804", "h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==");
   params.op.user.uinfo.access_keys["0555b35654ad1656d804"] = k1;
-  params.op.user.user_version.ver = 1;    
-  params.op.user.user_version.tag = "UserTAG";    
+  params.op.user.user_version.ver = 1;
+  params.op.user.user_version.tag = "UserTAG";
 
   ret = db->ProcessOp(dpp, "InsertUser", &params);
   ASSERT_EQ(ret, 0);
@@ -1386,12 +1386,14 @@ int main(int argc, char **argv)
   int ret = -1;
   string c_logfile = "rgw_dbstore_tests.log";
   int c_loglevel = 20;
+  string c_tenant = "default_ns_" + std::to_string(time(NULL));
 
-  // format: ./dbstore-tests logfile loglevel
-  if (argc == 3) {
+  // format: ./dbstore-tests logfile loglevel tenantname
+  if (argc == 4) {
     c_logfile = argv[1];
     c_loglevel = (atoi)(argv[2]);
-    cout << "logfile:" << c_logfile << ", loglevel set to " << c_loglevel << "\n";
+    c_tenant = argv[3];
+    cout << "logfile:" << c_logfile << ", loglevel set to " << c_loglevel << ", db is " << c_tenant << "\n";
   }
 
   ::testing::InitGoogleTest(&argc, argv);
@@ -1399,6 +1401,7 @@ int main(int argc, char **argv)
   gtest::env = new gtest::Environment();
   gtest::env->logfile = c_logfile;
   gtest::env->loglevel = c_loglevel;
+  gtest::env->tenant = c_tenant;
   ::testing::AddGlobalTestEnvironment(gtest::env);
 
   ret = RUN_ALL_TESTS();

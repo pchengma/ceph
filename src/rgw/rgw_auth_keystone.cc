@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string>
 #include <vector>
@@ -62,18 +62,13 @@ admin_token_retry:
     throw -EINVAL;
   }
 
-  const auto keystone_version = config.get_api_version();
-  if (keystone_version == rgw::keystone::ApiVersion::VER_2) {
-    url.append("v2.0/tokens/" + token);
-  } else if (keystone_version == rgw::keystone::ApiVersion::VER_3) {
-    url.append("v3/auth/tokens");
+  url.append("v3/auth/tokens");
 
-    if (allow_expired) {
-      url.append("?allow_expired=1");
-    }
-
-    validate.append_header("X-Subject-Token", token);
+  if (allow_expired) {
+    url.append("?allow_expired=1");
   }
+
+  validate.append_header("X-Subject-Token", token);
 
   std::string admin_token;
   bool admin_token_cached = false;
@@ -83,12 +78,17 @@ admin_token_retry:
     throw -EINVAL;
   }
 
-  validate.append_header("X-Auth-Token", admin_token);
+  if (allow_expired) {
+    validate.append_header("X-Auth-Token", admin_token);
+  } else {
+    validate.append_header("X-Auth-Token", token);
+  }
+
   validate.set_send_length(0);
 
   validate.set_url(url);
 
-  ret = validate.process(y);
+  ret = validate.process(dpp, y);
 
   /* NULL terminate for debug output. */
   token_body_bl.append(static_cast<char>(0));
@@ -130,7 +130,7 @@ admin_token_retry:
                  << ", body=" << token_body_bl.c_str() << dendl;
 
   TokenEngine::token_envelope_t token_body;
-  ret = token_body.parse(dpp, token, token_body_bl, config.get_api_version());
+  ret = token_body.parse(dpp, token, token_body_bl);
   if (ret < 0) {
     throw ret;
   }
@@ -164,6 +164,7 @@ TokenEngine::get_creds_info(const TokenEngine::token_envelope_t& token
     level,
     rgw::auth::RemoteApplier::AuthInfo::NO_ACCESS_KEY,
     rgw::auth::RemoteApplier::AuthInfo::NO_SUBUSER,
+    token.get_user_name(),
     TYPE_KEYSTONE
 };
 }
@@ -415,12 +416,7 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
     throw -EINVAL;
   }
 
-  const auto api_version = config.get_api_version();
-  if (api_version == rgw::keystone::ApiVersion::VER_3) {
-    keystone_url.append("v3/s3tokens");
-  } else {
-    keystone_url.append("v2.0/s3tokens");
-  }
+  keystone_url.append("v3/s3tokens");
 
   /* get authentication token for Keystone. */
   std::string admin_token;
@@ -464,7 +460,7 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
   validate.set_send_length(os.str().length());
 
   /* send request */
-  ret = validate.process(y);
+  ret = validate.process(dpp, y);
 
   /* if the supplied signature is wrong, we will get 401 from Keystone */
   if (validate.get_http_status() ==
@@ -483,7 +479,7 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
 
   /* now parse response */
   rgw::keystone::TokenEnvelope token_envelope;
-  ret = token_envelope.parse(dpp, std::string(), token_body_bl, api_version);
+  ret = token_envelope.parse(dpp, std::string(), token_body_bl);
   if (ret < 0) {
     ldpp_dout(dpp, 2) << "s3 keystone: token parsing failed, ret=0" << ret
                   << dendl;
@@ -508,12 +504,7 @@ auto EC2Engine::get_secret_from_keystone(const DoutPrefixProvider* dpp,
     return make_pair(boost::none, -EINVAL);
   }
 
-  const auto api_version = config.get_api_version();
-  if (api_version == rgw::keystone::ApiVersion::VER_3) {
-    keystone_url.append("v3/");
-  } else {
-    keystone_url.append("v2.0/");
-  }
+  keystone_url.append("v3/");
   keystone_url.append("users/");
   keystone_url.append(user_id);
   keystone_url.append("/credentials/OS-EC2/");
@@ -544,7 +535,7 @@ auto EC2Engine::get_secret_from_keystone(const DoutPrefixProvider* dpp,
   secret.set_verify_ssl(cct->_conf->rgw_keystone_verify_ssl);
 
   /* send request */
-  ret = secret.process(y);
+  ret = secret.process(dpp, y);
 
   /* if the supplied access key isn't found, we will get 404 from Keystone */
   if (secret.get_http_status() ==
@@ -680,6 +671,7 @@ EC2Engine::get_creds_info(const EC2Engine::token_envelope_t& token,
     level,
     access_key_id,
     rgw::auth::RemoteApplier::AuthInfo::NO_SUBUSER,
+    token.get_user_name(),
     TYPE_KEYSTONE
   };
 }

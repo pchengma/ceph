@@ -1,6 +1,7 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
+#include <iomanip>
 #include <map>
 #include <boost/program_options.hpp>
 #include <boost/iterator/counting_iterator.hpp>
@@ -43,15 +44,16 @@ seastar::logger& logger() {
   return crimson::get_logger(ceph_subsys_ms);
 }
 
+template <typename T>
+static std::list<seastar::lw_shared_ptr<seastar::sharded<T>>> sharded_objects;
+
 template <typename T, typename... Args>
 seastar::future<T*> create_sharded(Args... args) {
   // seems we should only construct/stop shards on #0
   return seastar::smp::submit_to(0, [=] {
     auto sharded_obj = seastar::make_lw_shared<seastar::sharded<T>>();
+    sharded_objects<T>.push_back(sharded_obj);
     return sharded_obj->start(args...).then([sharded_obj]() {
-      seastar::engine().at_exit([sharded_obj]() {
-          return sharded_obj->stop().then([sharded_obj] {});
-        });
       return sharded_obj.get();
     });
   }).then([] (seastar::sharded<T> *ptr_shard) {
@@ -198,7 +200,7 @@ static seastar::future<> run(
       void ms_handle_connect(
           crimson::net::ConnectionRef,
           seastar::shard_id) override {
-        ceph_abort("impossible, server won't connect");
+        ceph_abort_msg("impossible, server won't connect");
       }
 
       void ms_handle_accept(
@@ -368,7 +370,7 @@ static seastar::future<> run(
                   return seastar::smp::invoke_on_all([&report, this] {
                     auto &server = container().local();
                     server.get_report(report.reports[seastar::this_shard_id()]);
-                  }).then([&report, this] {
+                  }).then([&report] {
                     auto now = mono_clock::now();
                     auto prv = report.start_time;
                     report.start_time = now;
@@ -416,7 +418,7 @@ static seastar::future<> run(
               });
             }
           );
-        }).then([this] {
+        }).then([] {
           logger().info("report is stopped!");
         }).forward_to(std::move(pr_report));
       }
@@ -1107,8 +1109,8 @@ static seastar::future<> run(
           "ms_crc_data", crc_enabled ? "true" : "false");
     })
   ).then([=](auto&& ret) {
-    auto server = std::move(std::get<0>(ret).get0());
-    auto client = std::move(std::get<1>(ret).get0());
+    auto server = std::move(std::get<0>(ret).get());
+    auto client = std::move(std::get<1>(ret).get());
     // reserve core 0 for potentially better performance
     if (mode == perf_mode_t::both) {
       logger().info("\nperf settings:\n  smp={}\n  {}\n  {}\n",
@@ -1166,8 +1168,23 @@ static seastar::future<> run(
       });
     }
   }).finally([] {
-    return crimson::common::sharded_conf().stop();
+      return seastar::smp::submit_to(0, [] {
+        return seastar::do_for_each(sharded_objects<test_state::Server>,
+	    [](auto& sharded_obj) {
+	  return sharded_obj->stop();
+        }).then([] {
+        return seastar::do_for_each(sharded_objects<test_state::Client>,
+	    [](auto& sharded_obj) {
+	    return sharded_obj->stop();
+          });
+        });
+     }).then([] {
+     sharded_objects<test_state::Server>.clear();
+     sharded_objects<test_state::Client>.clear();
+     return crimson::common::sharded_conf().stop();
+    });
   });
+
 }
 
 }

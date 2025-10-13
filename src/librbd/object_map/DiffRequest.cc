@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/object_map/DiffRequest.h"
 #include "common/debug.h"
@@ -8,6 +8,8 @@
 #include "librbd/ObjectMap.h"
 #include "librbd/Utils.h"
 #include "osdc/Striper.h"
+
+#include <shared_mutex> // for std::shared_lock
 #include <string>
 
 #define dout_subsys ceph_subsys_rbd

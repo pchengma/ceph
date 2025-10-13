@@ -1,12 +1,15 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "common.h"
+#include "common/Clock.h" // for ceph_clock_now()
+#include "log/Log.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #undef dout_prefix
 #define dout_prefix *_dout << "ceph_dedup_daemon: " \
                            << __func__ << ": "
-
-ceph::shared_mutex glock = ceph::make_shared_mutex("glock");
-class SampleDedupWorkerThread;
-bool all_stop = false; // Accessed in the main thread and in other worker threads under glock
 
 po::options_description make_usage() {
   po::options_description desc("Usage");
@@ -35,16 +38,16 @@ po::options_description make_usage() {
   return desc;
 }
 
-using AioCompRef = unique_ptr<AioCompletion>;
+using AioCompRef = std::unique_ptr<AioCompletion>;
 
 class SampleDedupWorkerThread : public Thread
 {
 public:
   struct chunk_t {
-    string oid = "";
+    std::string oid = "";
     size_t start = 0;
     size_t size = 0;
-    string fingerprint = "";
+    std::string fingerprint = "";
     bufferlist data;
   };
 
@@ -188,13 +191,13 @@ public:
       }
     }
 
-    bool contains(string& fp) {
+    bool contains(const std::string& fp) {
       std::shared_lock lock(fingerprint_lock);
       return fp_map.contains(fp);
     }
 
     // return true if the chunk is duplicate
-    bool add(chunk_t& chunk) {
+    bool add(const chunk_t& chunk) {
       std::unique_lock lock(fingerprint_lock);
       auto entry = fp_map.find(chunk.fingerprint);
       total_bytes += chunk.size;
@@ -235,8 +238,7 @@ public:
   };
 
   struct SampleDedupGlobal {
-    FpStore fp_store;
-    const double sampling_ratio = -1;
+  public:
     SampleDedupGlobal(
       size_t chunk_threshold,
       int sampling_ratio,
@@ -244,6 +246,34 @@ public:
       size_t fpstore_threshold) :
       fp_store(chunk_threshold, report_period, fpstore_threshold),
       sampling_ratio(static_cast<double>(sampling_ratio) / 100) { }
+
+    bool is_all_stop() const {
+      std::shared_lock l{glock};
+      return all_stop;
+    }
+    static void set_all_stop() {
+      std::unique_lock l{glock};
+      all_stop = true;
+    }
+    static void handle_signal(int signum) 
+    {
+      switch (signum) {
+	case SIGINT:
+	case SIGTERM:
+	  set_all_stop();
+	  dout(0) << "got a signal(" << signum << "), daemon wil be terminiated" << dendl;
+	  break;
+
+	default:
+	  ceph_abort_msgf("unexpected signal %d", signum);
+      }
+    }
+    friend class SampleDedupWorkerThread;
+  private:
+    FpStore fp_store;
+    const double sampling_ratio = -1;
+    inline static ceph::shared_mutex glock = ceph::make_shared_mutex("glock");
+    inline static bool all_stop = false; // Accessed in the main thread and in other worker threads under glock
   };
 
   SampleDedupWorkerThread(
@@ -290,14 +320,14 @@ private:
     ObjectCursor end,
     size_t max_object_count);
   std::vector<size_t> sample_object(size_t count);
-  void try_dedup_and_accumulate_result(ObjectItem &object, snap_t snap = 0);
+  void try_dedup_and_accumulate_result(const ObjectItem &object, snap_t snap = 0);
   int do_chunk_dedup(chunk_t &chunk, snap_t snap);
-  bufferlist read_object(ObjectItem &object);
-  std::vector<std::tuple<bufferlist, pair<uint64_t, uint64_t>>> do_cdc(
-    ObjectItem &object,
-    bufferlist &data);
-  std::string generate_fingerprint(bufferlist chunk_data);
-  AioCompRef do_async_evict(string oid);
+  bufferlist read_object(const ObjectItem &object);
+  std::vector<std::tuple<bufferlist, std::pair<uint64_t, uint64_t>>> do_cdc(
+    const ObjectItem &object,
+    const bufferlist &data) const;
+  std::string generate_fingerprint(const bufferlist& chunk_data) const;
+  AioCompRef do_async_evict(const std::string& oid);
 
   IoCtx io_ctx;
   IoCtx chunk_io_ctx;
@@ -317,9 +347,7 @@ private:
 void SampleDedupWorkerThread::crawl()
 {
   ObjectCursor current_object = begin;
-  std::shared_lock l{glock};
-  while (!all_stop && current_object < end) {
-    l.unlock();
+  while (!sample_dedup_global.is_all_stop()  && current_object < end) {
     std::vector<ObjectItem> objects;
     // Get the list of object IDs to deduplicate
     std::tie(objects, current_object) = get_objects(current_object, end, 100);
@@ -338,27 +366,21 @@ void SampleDedupWorkerThread::crawl()
 	op.list_snaps(&snap_set, &snap_ret);
 	io_ctx.operate(target.oid, &op, NULL);
 
-	for (vector<librados::clone_info_t>::const_iterator r = snap_set.clones.begin();
-	  r != snap_set.clones.end();
-	  ++r) {
-	  io_ctx.snap_set_read(r->cloneid);
-	  try_dedup_and_accumulate_result(target, r->cloneid);
+	for (const auto& clone : snap_set.clones) {
+	  io_ctx.snap_set_read(clone.cloneid);
+	  try_dedup_and_accumulate_result(target, clone.cloneid);
 	}
       } else {
 	try_dedup_and_accumulate_result(target);
       }
-      l.lock();
-      if (all_stop) {
+      if (sample_dedup_global.is_all_stop()) {
 	oid_for_evict.clear();
 	break;
       }
-      l.unlock();
     }
-    l.lock();
   }
-  l.unlock();
 
-  vector<AioCompRef> evict_completions(oid_for_evict.size());
+  std::vector<AioCompRef> evict_completions(oid_for_evict.size());
   int i = 0;
   for (auto &oid : oid_for_evict) {
     if (snap) {
@@ -372,7 +394,7 @@ void SampleDedupWorkerThread::crawl()
   }
 }
 
-AioCompRef SampleDedupWorkerThread::do_async_evict(string oid)
+AioCompRef SampleDedupWorkerThread::do_async_evict(const std::string& oid)
 {
   Rados rados;
   ObjectReadOperation op_tier;
@@ -412,7 +434,7 @@ std::vector<size_t> SampleDedupWorkerThread::sample_object(size_t count)
   for (size_t i = 0 ; i < count ; i++) {
     indexes[i] = i;
   }
-  default_random_engine generator;
+  std::default_random_engine generator;
   shuffle(indexes.begin(), indexes.end(), generator);
   size_t sampling_count = static_cast<double>(count) *
     sample_dedup_global.sampling_ratio;
@@ -422,7 +444,7 @@ std::vector<size_t> SampleDedupWorkerThread::sample_object(size_t count)
 }
 
 void SampleDedupWorkerThread::try_dedup_and_accumulate_result(
-  ObjectItem &object, snap_t snap)
+  const ObjectItem &object, snap_t snap)
 {
   bufferlist data = read_object(object);
   if (data.length() == 0) {
@@ -446,7 +468,7 @@ void SampleDedupWorkerThread::try_dedup_and_accumulate_result(
   }
 
   size_t duplicated_size = 0;
-  list<chunk_t> redundant_chunks;
+  std::list<chunk_t> redundant_chunks;
   for (auto &chunk : chunks) {
     auto &chunk_data = std::get<0>(chunk);
     std::string fingerprint = generate_fingerprint(chunk_data);
@@ -483,7 +505,7 @@ void SampleDedupWorkerThread::try_dedup_and_accumulate_result(
   total_object_size += object_size;
 }
 
-bufferlist SampleDedupWorkerThread::read_object(ObjectItem &object)
+bufferlist SampleDedupWorkerThread::read_object(const ObjectItem &object)
 {
   bufferlist whole_data;
   size_t offset = 0;
@@ -505,14 +527,14 @@ bufferlist SampleDedupWorkerThread::read_object(ObjectItem &object)
   return whole_data;
 }
 
-std::vector<std::tuple<bufferlist, pair<uint64_t, uint64_t>>> SampleDedupWorkerThread::do_cdc(
-  ObjectItem &object,
-  bufferlist &data)
+std::vector<std::tuple<bufferlist, std::pair<uint64_t, uint64_t>>> SampleDedupWorkerThread::do_cdc(
+  const ObjectItem &object,
+  const bufferlist &data) const
 {
-  std::vector<std::tuple<bufferlist, pair<uint64_t, uint64_t>>> ret;
+  std::vector<std::tuple<bufferlist, std::pair<uint64_t, uint64_t>>> ret;
 
-  unique_ptr<CDC> cdc = CDC::create(chunk_algo, cbits(chunk_size) - 1);
-  vector<pair<uint64_t, uint64_t>> chunks;
+  std::unique_ptr<CDC> cdc = CDC::create(chunk_algo, cbits(chunk_size) - 1);
+  std::vector<std::pair<uint64_t, uint64_t>> chunks;
   cdc->calc_chunks(data, &chunks);
   for (auto &p : chunks) {
     bufferlist chunk;
@@ -523,9 +545,9 @@ std::vector<std::tuple<bufferlist, pair<uint64_t, uint64_t>>> SampleDedupWorkerT
   return ret;
 }
 
-std::string SampleDedupWorkerThread::generate_fingerprint(bufferlist chunk_data)
+std::string SampleDedupWorkerThread::generate_fingerprint(const bufferlist& chunk_data) const
 {
-  string ret;
+  std::string ret;
 
   switch (fp_type) {
     case pg_pool_t::TYPE_FINGERPRINT_SHA1:
@@ -576,10 +598,10 @@ int SampleDedupWorkerThread::do_chunk_dedup(chunk_t &chunk, snap_t snap)
   return ret;
 }
 
-int make_crawling_daemon(const po::variables_map &opts)
+int run_crawling_daemon(const po::variables_map &opts)
 {
-  string base_pool_name = get_opts_pool_name(opts);
-  string chunk_pool_name = get_opts_chunk_pool(opts);
+  std::string base_pool_name = get_opts_pool_name(opts);
+  std::string chunk_pool_name = get_opts_chunk_pool(opts);
   unsigned max_thread = get_opts_max_thread(opts);
   uint32_t report_period = get_opts_report_period(opts);
   bool run_once = false; // for debug
@@ -592,7 +614,7 @@ int make_crawling_daemon(const po::variables_map &opts)
   if (opts.count("chunk-size")) {
     chunk_size = opts["chunk-size"].as<int>();
   } else {
-    cout << "8192 is set as chunk size by default" << std::endl;
+    std::cout << "8192 is set as chunk size by default" << std::endl;
   }
   bool snap = false;
   if (opts.count("snap")) {
@@ -621,14 +643,14 @@ int make_crawling_daemon(const po::variables_map &opts)
   if (opts.count("wakeup-period")) {
     wakeup_period = opts["wakeup-period"].as<int>();
   } else {
-    cout << "100 second is set as wakeup period by default" << std::endl;
+    std::cout << "100 second is set as wakeup period by default" << std::endl;
   }
 
   const size_t fp_threshold = opts["fpstore-threshold"].as<size_t>();
 
   std::string fp_algo = get_opts_fp_algo(opts);
 
-  list<string> pool_names;
+  std::list<std::string> pool_names;
   IoCtx io_ctx, chunk_io_ctx;
   pool_names.push_back(base_pool_name);
   ret = rados.ioctx_create(base_pool_name.c_str(), io_ctx);
@@ -662,15 +684,13 @@ int make_crawling_daemon(const po::variables_map &opts)
     << ")" 
     << dendl;
 
-  std::shared_lock l(glock);
+  SampleDedupWorkerThread::SampleDedupGlobal state(
+    chunk_dedup_threshold, sampling_ratio, report_period, fp_threshold);
+  ret = 0;
 
-  while (!all_stop) {
-    l.unlock();
+  while (!state.is_all_stop()) {
     ObjectCursor begin = io_ctx.object_list_begin();
     ObjectCursor end = io_ctx.object_list_end();
-
-    SampleDedupWorkerThread::SampleDedupGlobal sample_dedup_global(
-      chunk_dedup_threshold, sampling_ratio, report_period, fp_threshold);
 
     std::list<SampleDedupWorkerThread> threads;
     size_t total_size = 0;
@@ -695,7 +715,7 @@ int make_crawling_daemon(const po::variables_map &opts)
 	chunk_size,
 	fp_algo,
 	chunk_algo,
-	sample_dedup_global,
+	state,
 	snap);
       threads.back().create("sample_dedup");
     }
@@ -713,7 +733,7 @@ int make_crawling_daemon(const po::variables_map &opts)
 
     sleep(wakeup_period);
 
-    map<string, librados::pool_stat_t> stats;
+    std::map<std::string, librados::pool_stat_t> stats;
     ret = rados.get_pool_stats(pool_names, stats);
     if (ret < 0) {
       derr << "error fetching pool stats: " << cpp_strerror(ret) << dendl;
@@ -724,38 +744,21 @@ int make_crawling_daemon(const po::variables_map &opts)
       return -EINVAL;
     }
 
-    l.lock();
     if (run_once) {
-      all_stop = true;
+      state.set_all_stop();
       break;
     }
   }
-  l.unlock();
 
   dout(0) << "done" << dendl;
-  return 0;
-}
-
-static void handle_signal(int signum) 
-{
-  std::unique_lock l{glock};
-  switch (signum) {
-    case SIGINT:
-    case SIGTERM:
-      all_stop = true;
-      dout(0) << "got a signal(" << signum << "), daemon wil be terminiated" << dendl;
-      break;
-
-    default:
-      ceph_abort_msgf("unexpected signal %d", signum);
-  }
+  return ret;
 }
 
 int main(int argc, const char **argv)
 {
   auto args = argv_to_vec(argc, argv);
   if (args.empty()) {
-    cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    std::cerr << argv[0] << ": -h or --help for usage" << std::endl;
     exit(1);
   }
 
@@ -773,7 +776,7 @@ int main(int argc, const char **argv)
     return 1;
   }
   if (opts.count("help") || opts.count("h")) {
-    cout<< desc << std::endl;
+    std::cout<< desc << std::endl;
     exit(0);
   }
 
@@ -786,7 +789,7 @@ int main(int argc, const char **argv)
     std::string err;
     int r = forker.prefork(err);
     if (r < 0) {
-      cerr << err << std::endl;
+      std::cerr << err << std::endl;
       return r;
     }
     if (forker.is_parent()) {
@@ -805,13 +808,17 @@ int main(int argc, const char **argv)
   }
 
   init_async_signal_handler();
-  register_async_signal_handler_oneshot(SIGINT, handle_signal);
-  register_async_signal_handler_oneshot(SIGTERM, handle_signal);
+  register_async_signal_handler_oneshot(SIGINT,
+    SampleDedupWorkerThread::SampleDedupGlobal::handle_signal);
+  register_async_signal_handler_oneshot(SIGTERM,
+    SampleDedupWorkerThread::SampleDedupGlobal::handle_signal);
 
-  int ret = make_crawling_daemon(opts);
+  int ret = run_crawling_daemon(opts);
 
-  unregister_async_signal_handler(SIGINT, handle_signal);
-  unregister_async_signal_handler(SIGTERM, handle_signal);
+  unregister_async_signal_handler(SIGINT,
+    SampleDedupWorkerThread::SampleDedupGlobal::handle_signal);
+  unregister_async_signal_handler(SIGTERM,
+    SampleDedupWorkerThread::SampleDedupGlobal::handle_signal);
   shutdown_async_signal_handler();
   
   return forker.signal_exit(ret);

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_WATCHER_H
 #define CEPHFS_MIRROR_WATCHER_H
@@ -27,6 +27,13 @@ public:
 
   void register_watch(Context *on_finish);
   void unregister_watch(Context *on_finish);
+
+  struct ErrorListener {
+    virtual ~ErrorListener() {
+    }
+    virtual void set_blocklisted_ts() = 0;
+    virtual void set_failed_ts() = 0;
+  };
 
 protected:
   std::string m_oid;

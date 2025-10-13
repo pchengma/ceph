@@ -6,7 +6,7 @@ import {
   ViewChild,
   ElementRef
 } from '@angular/core';
-import { AbstractControl, Validators } from '@angular/forms';
+import { AbstractControl, FormGroup, Validators } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 
 import _ from 'lodash';
@@ -16,16 +16,15 @@ import * as xml2js from 'xml2js';
 import { RgwBucketService } from '~/app/shared/api/rgw-bucket.service';
 import { RgwSiteService } from '~/app/shared/api/rgw-site.service';
 import { RgwUserService } from '~/app/shared/api/rgw-user.service';
-import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
+import { ActionLabelsI18n, AppConstants, URLVerbs } from '~/app/shared/constants/app.constants';
 import { Icons } from '~/app/shared/enum/icons.enum';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { CdForm } from '~/app/shared/forms/cd-form';
 import { CdFormBuilder } from '~/app/shared/forms/cd-form-builder';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
-import { RgwBucketEncryptionModel } from '../models/rgw-bucket-encryption';
+import { rgwBucketEncryptionModel } from '../models/rgw-bucket-encryption';
 import { RgwBucketMfaDelete } from '../models/rgw-bucket-mfa-delete';
 import {
   AclPermissionsType,
@@ -33,19 +32,22 @@ import {
   RgwBucketAclGrantee as Grantee
 } from './rgw-bucket-acl-permissions.enum';
 import { RgwBucketVersioning } from '../models/rgw-bucket-versioning';
-import { RgwConfigModalComponent } from '../rgw-config-modal/rgw-config-modal.component';
 import { BucketTagModalComponent } from '../bucket-tag-modal/bucket-tag-modal.component';
 import { TextAreaJsonFormatterService } from '~/app/shared/services/text-area-json-formatter.service';
 import { RgwMultisiteService } from '~/app/shared/api/rgw-multisite.service';
 import { RgwDaemonService } from '~/app/shared/api/rgw-daemon.service';
 import { map, switchMap } from 'rxjs/operators';
 import { TextAreaXmlFormatterService } from '~/app/shared/services/text-area-xml-formatter.service';
+import { RgwRateLimitComponent } from '../rgw-rate-limit/rgw-rate-limit.component';
+import { RgwRateLimitConfig } from '../models/rgw-rate-limit';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { RgwUserAccountsService } from '~/app/shared/api/rgw-user-accounts.service';
+import { RgwUser } from '../models/rgw-user';
 
 @Component({
   selector: 'cd-rgw-bucket-form',
   templateUrl: './rgw-bucket-form.component.html',
-  styleUrls: ['./rgw-bucket-form.component.scss'],
-  providers: [RgwBucketEncryptionModel]
+  styleUrls: ['./rgw-bucket-form.component.scss']
 })
 export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewChecked {
   @ViewChild('bucketPolicyTextArea')
@@ -55,7 +57,9 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
 
   bucketForm: CdFormGroup;
   editing = false;
-  owners: string[] = null;
+  owners: RgwUser[] = null;
+  accounts: string[] = [];
+  accountUsers: RgwUser[] = [];
   kmsProviders: string[] = null;
   action: string;
   resource: string;
@@ -64,8 +68,8 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
   isVersioningAlreadyEnabled = false;
   isMfaDeleteAlreadyEnabled = false;
   icons = Icons;
-  kmsVaultConfig = false;
-  s3VaultConfig = false;
+  kmsConfigured = false;
+  s3Configured = false;
   tags: Record<string, string>[] = [];
   dirtyTags = false;
   tagConfig = [
@@ -88,22 +92,24 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
     return this.bucketForm.getValue('mfa-delete');
   }
 
+  @ViewChild(RgwRateLimitComponent, { static: false }) rateLimitComponent!: RgwRateLimitComponent;
+
   constructor(
     private route: ActivatedRoute,
     private router: Router,
     private formBuilder: CdFormBuilder,
     private rgwBucketService: RgwBucketService,
     private rgwSiteService: RgwSiteService,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private rgwUserService: RgwUserService,
     private notificationService: NotificationService,
-    private rgwEncryptionModal: RgwBucketEncryptionModel,
     private textAreaJsonFormatterService: TextAreaJsonFormatterService,
     private textAreaXmlFormatterService: TextAreaXmlFormatterService,
     public actionLabels: ActionLabelsI18n,
     private readonly changeDetectorRef: ChangeDetectorRef,
     private rgwMultisiteService: RgwMultisiteService,
-    private rgwDaemonService: RgwDaemonService
+    private rgwDaemonService: RgwDaemonService,
+    private rgwAccountsService: RgwUserAccountsService
   ) {
     super();
     this.editing = this.router.url.startsWith(`/rgw/bucket/${URLVerbs.EDIT}`);
@@ -136,7 +142,14 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
           ? []
           : [CdValidators.bucketName(), CdValidators.bucketExistence(false, this.rgwBucketService)]
       ],
-      owner: [null, [Validators.required]],
+      owner: [
+        null,
+        [
+          CdValidators.requiredIf({
+            isAccountOwner: false
+          })
+        ]
+      ],
       kms_provider: ['vault'],
       'placement-target': [null],
       versioning: [null],
@@ -168,13 +181,23 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
       lifecycle: ['{}', CdValidators.jsonOrXml()],
       grantee: [Grantee.Owner, [Validators.required]],
       aclPermission: [[aclPermission.FullControl], [Validators.required]],
-      replication: [false]
+      replication: [false],
+      isAccountOwner: [false],
+      accountUser: [
+        null,
+        [
+          CdValidators.requiredIf({
+            isAccountOwner: true
+          })
+        ]
+      ]
     });
   }
 
   ngOnInit() {
     const promises = {
-      owners: this.rgwUserService.enumerate()
+      owners: this.rgwUserService.enumerate(true),
+      accounts: this.rgwAccountsService.list()
     };
     this.multisiteStatus$ = this.rgwMultisiteService.status();
     this.isDefaultZoneGroup$ = this.rgwDaemonService.selectedDaemon$.pipe(
@@ -187,15 +210,16 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
       )
     );
 
-    this.kmsProviders = this.rgwEncryptionModal.kmsProviders;
+    this.kmsProviders = rgwBucketEncryptionModel.kmsProviders;
     this.rgwBucketService.getEncryptionConfig().subscribe((data) => {
-      this.kmsVaultConfig = data[0];
-      this.s3VaultConfig = data[1];
-      if (this.kmsVaultConfig && this.s3VaultConfig) {
+      this.s3Configured = data.s3 && Object.keys(data.s3).length > 0;
+      this.kmsConfigured = data.kms && Object.keys(data.kms).length > 0;
+      // Set the encryption type based on the configurations
+      if (this.kmsConfigured && this.s3Configured) {
         this.bucketForm.get('encryption_type').setValue('');
-      } else if (this.kmsVaultConfig) {
+      } else if (this.kmsConfigured) {
         this.bucketForm.get('encryption_type').setValue('aws:kms');
-      } else if (this.s3VaultConfig) {
+      } else if (this.s3Configured) {
         this.bucketForm.get('encryption_type').setValue('AES256');
       } else {
         this.bucketForm.get('encryption_type').setValue('');
@@ -207,7 +231,12 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
     }
 
     // Process route parameters.
-    this.route.params.subscribe((params: { bid: string }) => {
+    this.route.params.subscribe((params: { bid: string; owner: string }) => {
+      let bucketOwner = '';
+      if (params.hasOwnProperty('owner')) {
+        // only used for showing bucket owned by account
+        bucketOwner = decodeURIComponent(params.owner);
+      }
       if (params.hasOwnProperty('bid')) {
         const bid = decodeURIComponent(params.bid);
         promises['getBid'] = this.rgwBucketService.get(bid);
@@ -215,8 +244,9 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
 
       forkJoin(promises).subscribe((data: any) => {
         // Get the list of possible owners.
-        this.owners = (<string[]>data.owners).sort();
-
+        this.accounts = data.accounts;
+        this.accountUsers = data.owners.filter((owner: RgwUser) => owner.account_id);
+        this.owners = data.owners.filter((owner: RgwUser) => !owner.account_id);
         // Get placement targets:
         if (data['getPlacementTargets']) {
           const placementTargets = data['getPlacementTargets'];
@@ -267,6 +297,22 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
           }
           this.bucketForm.setValue(value);
           if (this.editing) {
+            // Disable changing the owner of the bucket in case
+            // its owned by the account.
+            const ownersList = data.owners.map((owner: RgwUser) => owner.uid);
+            if (!ownersList.includes(value['owner'])) {
+              // creating dummy user object to show the account owner
+              // here value['owner] is the account user id
+              const user = Object.assign(
+                { uid: bucketOwner },
+                ownersList.find((owner: RgwUser) => owner.uid === AppConstants.defaultUser)
+              );
+              this.accountUsers.push(user);
+              this.bucketForm.get('isAccountOwner').setValue(true);
+              this.bucketForm.get('isAccountOwner').disable();
+              this.bucketForm.get('accountUser').setValue(bucketOwner);
+              this.bucketForm.get('accountUser').disable();
+            }
             this.isVersioningAlreadyEnabled = this.isVersioningEnabled;
             this.isMfaDeleteAlreadyEnabled = this.isMfaDeleteEnabled;
             this.setMfaDeleteValidators();
@@ -297,10 +343,12 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
   goToListView() {
     this.router.navigate(['/rgw/bucket']);
   }
-
+  rateLimitFormInit(rateLimitForm: FormGroup) {
+    this.bucketForm.addControl('rateLimit', rateLimitForm);
+  }
   submit() {
     // Exit immediately if the form isn't dirty.
-    if (this.bucketForm.pristine) {
+    if (this.bucketForm.pristine && this.rateLimitComponent.form.pristine) {
       this.goToListView();
       return;
     }
@@ -325,11 +373,27 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
       // Edit
       const versioning = this.getVersioningStatus();
       const mfaDelete = this.getMfaDeleteStatus();
+      // make the owner empty if the field is disabled.
+      // this ensures the bucket doesn't gets updated with owner when
+      // the bucket is owned by the account.
+      let owner;
+      if (this.bucketForm.get('accountUser').disabled) {
+        // If the bucket is owned by the account, then set the owner as account user.
+        owner = '';
+      } else if (values['isAccountOwner']) {
+        const accountUser: RgwUser = this.accountUsers.filter(
+          (user) => values['accountUser'] === user.uid
+        )[0];
+        owner = accountUser?.account_id ?? values['owner'];
+      } else {
+        owner = values['owner'];
+      }
+
       this.rgwBucketService
         .update(
           values['bid'],
           values['id'],
-          values['owner'],
+          owner,
           versioning,
           values['encryption_enabled'],
           values['encryption_type'],
@@ -351,6 +415,7 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
               NotificationType.success,
               $localize`Updated Object Gateway bucket '${values.bid}'.`
             );
+            this.updateBucketRateLimit();
             this.goToListView();
           },
           () => {
@@ -359,11 +424,12 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
           }
         );
     } else {
+      const owner = values['isAccountOwner'] ? values['accountUser'] : values['owner'];
       // Add
       this.rgwBucketService
         .create(
           values['bid'],
-          values['owner'],
+          owner,
           this.zonegroup,
           values['placement-target'],
           values['lock_enabled'],
@@ -384,12 +450,54 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
               $localize`Created Object Gateway bucket '${values.bid}'`
             );
             this.goToListView();
+            this.updateBucketRateLimit();
           },
           () => {
             // Reset the 'Submit' button.
             this.bucketForm.setErrors({ cdSubmitButton: true });
           }
         );
+    }
+  }
+
+  updateBucketRateLimit() {
+    /**
+     * Whenever we change the owner of bucket from non-tenanted to tenanted
+     * and vice-versa with the rate-limit changes there was issue in sending
+     * bucket name, hence the below logic caters to it.
+     *
+     * Scenario 1: Changing the bucket owner from tenanted to non-tenanted
+     * Scenario 2: Changing the bucket owner from non-tenanted to tenanted
+     * Scenario 3: Keeping the owner(tenanted) same and changing only rate limit
+     */
+    // in case of creating bucket with account user, owner will be empty
+    const owner = this.bucketForm.getValue('owner') || '';
+    const bidInput = this.bucketForm.getValue('bid');
+
+    let bid: string;
+
+    const hasOwnerWithDollar = owner.includes('$');
+    const bidHasSlash = bidInput.includes('/');
+
+    if (bidHasSlash && hasOwnerWithDollar) {
+      bid = bidInput;
+    } else if (hasOwnerWithDollar) {
+      const ownerPrefix = owner.split('$')[0];
+      bid = `${ownerPrefix}/${bidInput}`;
+    } else if (bidHasSlash) {
+      bid = bidInput.split('/')[1];
+    } else {
+      bid = bidInput;
+    }
+    // Check if bucket ratelimit has been modified.
+    const rateLimitConfig: RgwRateLimitConfig = this.rateLimitComponent.getRateLimitFormValue();
+    if (!!rateLimitConfig) {
+      this.rgwBucketService.updateBucketRateLimit(bid, rateLimitConfig).subscribe(
+        () => {},
+        (error: any) => {
+          this.notificationService.show(NotificationType.error, error);
+        }
+      );
     }
   }
 
@@ -459,16 +567,9 @@ export class RgwBucketFormComponent extends CdForm implements OnInit, AfterViewC
     this.bucketForm.updateValueAndValidity();
   }
 
-  openConfigModal() {
-    const modalRef = this.modalService.show(RgwConfigModalComponent, null, { size: 'lg' });
-    modalRef.componentInstance.configForm
-      .get('encryptionType')
-      .setValue(this.bucketForm.getValue('encryption_type') || 'AES256');
-  }
-
   showTagModal(index?: number) {
     const modalRef = this.modalService.show(BucketTagModalComponent);
-    const modalComponent = modalRef.componentInstance as BucketTagModalComponent;
+    const modalComponent = modalRef as BucketTagModalComponent;
     modalComponent.currentKeyTags = this.tags.map((item) => item.key);
 
     if (_.isNumber(index)) {

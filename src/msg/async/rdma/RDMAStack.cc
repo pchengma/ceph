@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -92,7 +93,6 @@ void RDMADispatcher::polling_start()
   ceph_assert(rx_cq);
 
   t = std::thread(&RDMADispatcher::polling, this);
-  ceph_pthread_setname(t.native_handle(), "rdma-polling");
 }
 
 void RDMADispatcher::polling_stop()
@@ -263,6 +263,7 @@ int RDMADispatcher::post_chunks_to_rq(int num, QueuePair *qp)
 
 void RDMADispatcher::polling()
 {
+  ceph_pthread_setname("rdma-polling");
   static int MAX_COMPLETIONS = 32;
   ibv_wc wc[MAX_COMPLETIONS];
 

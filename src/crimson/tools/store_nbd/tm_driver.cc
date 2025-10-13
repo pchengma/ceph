@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "tm_driver.h"
 
@@ -25,22 +25,23 @@ seastar::future<> TMDriver::write(
       return tm->with_transaction_intr(
         Transaction::src_t::MUTATE,
         "write",
+	CACHE_HINT_TOUCH,
         [this, offset, &ptr](auto& t)
       {
-        return tm->remove(t, offset
+        return tm->remove(t, laddr_t::from_byte_offset(offset)
         ).discard_result().handle_error_interruptible(
           crimson::ct_error::enoent::handle([](auto) { return seastar::now(); }),
           crimson::ct_error::pass_further_all{}
         ).si_then([this, offset, &t, &ptr] {
           logger().debug("dec_ref complete");
-          return tm->alloc_data_extents<TestBlock>(t, offset, ptr.length());
+          return tm->alloc_data_extents<TestBlock>(t, laddr_t::from_byte_offset(offset), ptr.length());
         }).si_then([this, offset, &t, &ptr](auto extents) mutable {
 	  boost::ignore_unused(offset);  // avoid clang warning;
 	  auto off = offset;
 	  auto left = ptr.length();
 	  size_t written = 0;
 	  for (auto &ext : extents) {
-	    assert(ext->get_laddr() == (size_t)off);
+	    assert(ext->get_laddr() == laddr_t::from_byte_offset(off));
 	    assert(ext->get_bptr().length() <= left);
 	    ptr.copy_out(written, ext->get_length(), ext->get_bptr().c_str());
 	    off += ext->get_length();
@@ -63,7 +64,7 @@ TMDriver::read_extents_ret TMDriver::read_extents(
   extent_len_t length)
 {
   return seastar::do_with(
-    lba_pin_list_t(),
+    lba_mapping_list_t(),
     lextent_list_t<TestBlock>(),
     [this, &t, offset, length](auto &pins, auto &ret) {
       return tm->get_pins(
@@ -77,16 +78,19 @@ TMDriver::read_extents_ret TMDriver::read_extents(
 	  [this, &t, &ret](auto &&pin) {
 	    logger().debug(
 	      "read_extents: get_extent {}~{}",
-	      pin->get_val(),
-	      pin->get_length());
+	      pin.get_val(),
+	      pin.get_length());
 	    return tm->read_pin<TestBlock>(
 	      t,
 	      std::move(pin)
-	    ).si_then([&ret](auto ref) mutable {
-	      ret.push_back(std::make_pair(ref->get_laddr(), ref));
+	    ).si_then([&ret](auto maybe_indirect_extent) mutable {
+	      assert(!maybe_indirect_extent.is_indirect());
+	      assert(!maybe_indirect_extent.is_clone);
+	      auto& e = maybe_indirect_extent.extent;
+	      ret.push_back(std::make_pair(e->get_laddr(), e));
 	      logger().debug(
 		"read_extents: got extent {}",
-		*ref);
+		*e);
 	      return seastar::now();
 	    });
 	  }).si_then([&ret] {
@@ -109,19 +113,20 @@ seastar::future<bufferlist> TMDriver::read(
     return tm->with_transaction_intr(
       Transaction::src_t::READ,
       "read",
+      CACHE_HINT_TOUCH,
       [=, &blret, this](auto& t)
     {
-      return read_extents(t, offset, size
+      return read_extents(t, laddr_t::from_byte_offset(offset), size
       ).si_then([=, &blret](auto ext_list) {
-        size_t cur = offset;
+        auto cur = laddr_t::from_byte_offset(offset);
         for (auto &i: ext_list) {
           if (cur != i.first) {
             assert(cur < i.first);
-            blret.append_zero(i.first - cur);
+            blret.append_zero(i.first.template get_byte_distance<size_t>(cur));
             cur = i.first;
           }
           blret.append(i.second->get_bptr());
-          cur += i.second->get_bptr().length();
+	  cur = (cur + i.second->get_bptr().length()).checked_to_laddr();
         }
         if (blret.length() != size) {
           assert(blret.length() < size);
@@ -139,11 +144,13 @@ seastar::future<bufferlist> TMDriver::read(
 
 void TMDriver::init()
 {
+  shard_stats = {};
+
   std::vector<Device*> sec_devices;
 #ifndef NDEBUG
-  tm = make_transaction_manager(device.get(), sec_devices, true);
+  tm = make_transaction_manager(device.get(), sec_devices, shard_stats, true);
 #else
-  tm = make_transaction_manager(device.get(), sec_devices, false);
+  tm = make_transaction_manager(device.get(), sec_devices, shard_stats, false);
 #endif
 }
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/compat.h"
 #include "common/Formatter.h"
@@ -29,6 +29,9 @@
 #include "tools/rbd_mirror/image_replayer/journal/Replayer.h"
 #include "tools/rbd_mirror/image_replayer/journal/StateBuilder.h"
 #include <map>
+#include <shared_mutex> // for std::shared_lock
+
+#include <boost/optional/optional_io.hpp>
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd_mirror
@@ -716,10 +719,12 @@ void ImageReplayer<I>::handle_update_mirror_image_replay_status(int r) {
   auto ctx = new LambdaContext([this](int) {
       update_mirror_image_status(false, boost::none);
 
-      std::unique_lock locker{m_lock};
-      std::unique_lock timer_locker{m_threads->timer_lock};
+      {
+	std::unique_lock locker{m_lock};
+	std::unique_lock timer_locker{m_threads->timer_lock};
 
-      schedule_update_mirror_image_replay_status();
+	schedule_update_mirror_image_replay_status();
+      }
       m_in_flight_op_tracker.finish_op();
     });
 

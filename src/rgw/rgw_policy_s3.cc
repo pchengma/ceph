@@ -1,12 +1,16 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
+#include "rgw_policy_s3.h"
 
 #include <errno.h>
 
 #include "common/ceph_json.h"
-#include "rgw_policy_s3.h"
+#include "common/Clock.h" // for ceph_clock_now()
+#include "include/timegm.h"
 #include "rgw_common.h"
 #include "rgw_crypt_sanitize.h"
+#include "rgw_cksum.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -101,15 +105,20 @@ bool RGWPolicyEnv::get_value(const string& s, string& val, map<string, bool, lts
   return get_var(var, val);
 }
 
-
-bool RGWPolicyEnv::match_policy_vars(map<string, bool, ltstr_nocase>& policy_vars, string& err_msg)
+bool RGWPolicyEnv::match_policy_vars(
+       map<string, bool, ltstr_nocase>& policy_vars, string& err_msg)
 {
   map<string, string, ltstr_nocase>::iterator iter;
   string ignore_prefix = "x-ignore-";
   for (iter = vars.begin(); iter != vars.end(); ++iter) {
     const string& var = iter->first;
-    if (strncasecmp(ignore_prefix.c_str(), var.c_str(), ignore_prefix.size()) == 0)
+    if (strncasecmp(ignore_prefix.c_str(), var.c_str(),
+		    ignore_prefix.size()) == 0) {
       continue;
+    }
+    if (rgw::cksum::is_checksum_hdr(var)) {
+      continue;
+    }
     if (policy_vars.count(var) == 0) {
       err_msg = "Policy missing condition: ";
       err_msg.append(iter->first);
@@ -118,7 +127,7 @@ bool RGWPolicyEnv::match_policy_vars(map<string, bool, ltstr_nocase>& policy_var
     }
   }
   return true;
-}
+} /* match_policy_vars */
 
 RGWPolicy::~RGWPolicy()
 {

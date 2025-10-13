@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,12 +13,15 @@
  *
  */
 
+#include "DamageTable.h"
+#include "BatchOp.h"
+
 #include "common/debug.h"
+#include "common/errno.h" // for cpp_strerror()
+#include "include/random.h"
 
 #include "mds/CDir.h"
 #include "mds/CInode.h"
-
-#include "DamageTable.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -123,6 +127,47 @@ class BacktraceDamage : public DamageEntry
     f->close_section();
   }
 };
+
+/**
+ * Record about Uninline failures during scrub
+ */
+class UninlineDamage : public DamageEntry
+{
+  public:
+  inodeno_t ino;
+  mds_rank_t rank;
+  int32_t failure_errno;
+  std::string scrub_tag;
+
+  UninlineDamage(
+    inodeno_t ino_, mds_rank_t rank_, int32_t errno_, std::string_view scrub_tag_)
+    : ino(ino_), rank(rank_), failure_errno(errno_), scrub_tag(scrub_tag_)
+  {}
+
+  damage_entry_type_t get_type() const override
+  {
+    return DAMAGE_ENTRY_UNINLINE_FILE;
+  }
+
+  void dump(Formatter *f) const override
+  {
+    f->open_object_section("uninline_damage");
+    f->dump_string("damage_type", "uninline");
+    f->dump_int("id", id);
+    f->dump_int("ino", ino);
+    f->dump_int("rank", rank);
+    f->dump_string("errno", cpp_strerror(failure_errno));
+    f->dump_string("scrub_tag", scrub_tag);
+    f->dump_string("path", path);
+    f->close_section();
+  }
+};
+}
+
+DamageEntry::DamageEntry()
+{
+  id = ceph::util::generate_random_number<damage_entry_id_t>(0, 0xffffffff);
+  reported_at = ceph_clock_now();
 }
 
 DamageEntry::~DamageEntry()
@@ -132,10 +177,6 @@ bool DamageTable::notify_dentry(
     inodeno_t ino, frag_t frag,
     snapid_t snap_id, std::string_view dname, std::string_view path)
 {
-  if (oversized()) {
-    return true;
-  }
-
   // Special cases: damage to these dirfrags is considered fatal to
   // the MDS rank that owns them.
   if (
@@ -144,7 +185,14 @@ bool DamageTable::notify_dentry(
       (MDS_INO_IS_STRAY(ino) && MDS_INO_STRAY_OWNER(ino) == rank)
      ) {
     derr << "Damage to dentries in fragment " << frag << " of ino " << ino
-         << "is fatal because it is a system directory for this rank" << dendl;
+         << " is fatal because it is a system directory for this rank" << dendl;
+    return true;
+  }
+
+  if (oversized()) {
+    derr << "Damage to dentries in fragment " << frag << " of ino " << ino
+         << " is fatal because maximum number of damage table entries "
+         << " has been reached" << dendl;
     return true;
   }
 
@@ -172,6 +220,9 @@ bool DamageTable::notify_dirfrag(inodeno_t ino, frag_t frag,
   }
 
   if (oversized()) {
+    derr << "Damage to fragment " << frag << " of ino " << ino
+         << " is fatal because maximum number of damage table entries"
+         << " has been reached" << dendl;
     return true;
   }
 
@@ -188,6 +239,9 @@ bool DamageTable::notify_dirfrag(inodeno_t ino, frag_t frag,
 bool DamageTable::notify_remote_damaged(inodeno_t ino, std::string_view path)
 {
   if (oversized()) {
+    derr << "Damage to remote " << path << " of ino " << ino
+         << " is fatal because maximum number of damage table entries"
+         << " has been reached" << dendl;
     return true;
   }
 
@@ -226,6 +280,30 @@ void DamageTable::remove_backtrace_damage_entry(inodeno_t ino)
   if (is_remote_damaged(ino)){
     erase(remotes.find(ino)->second->id);
   }  
+}
+
+bool DamageTable::notify_uninline_failed(
+  inodeno_t ino,
+  mds_rank_t rank,
+  int32_t failure_errno,
+  std::string_view scrub_tag,
+  std::string_view path)
+{
+  if (oversized()) {
+    derr << "Uninline failure for " << path << " of ino " << ino
+         << " is fatal because maximum number of damage table entries"
+         << " has been reached" << dendl;
+    return true;
+  }
+
+  if (auto [it, inserted] = uninline_failures.try_emplace(ino); inserted) {
+    auto entry = std::make_shared<UninlineDamage>(ino, rank, errno, scrub_tag);
+    entry->path = path;
+    it->second = entry;
+    by_id[entry->id] = std::move(entry);
+  }
+
+  return false;
 }
 
 bool DamageTable::oversized() const
@@ -293,6 +371,9 @@ void DamageTable::erase(damage_entry_id_t damage_id)
   } else if (type == DAMAGE_ENTRY_BACKTRACE) {
     auto backtrace_entry = std::static_pointer_cast<BacktraceDamage>(entry);
     remotes.erase(backtrace_entry->ino);
+  } else if (type == DAMAGE_ENTRY_UNINLINE_FILE) {
+    auto uninline_entry = std::static_pointer_cast<UninlineDamage>(entry);
+    uninline_failures.erase(uninline_entry->ino);
   } else {
     derr << "Invalid type " << type << dendl;
     ceph_abort();

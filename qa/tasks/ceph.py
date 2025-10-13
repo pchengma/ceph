@@ -376,7 +376,7 @@ def module_setup(ctx, config):
            cluster_name,
            'mgr',
            'module',
-           'emable',
+           'enable',
            m,
         ]
         log.info("enabling module %s", m)
@@ -414,6 +414,15 @@ def conf_setup(ctx, config):
     for p in procs:
         log.debug("waiting for %s", p)
         p.wait()
+    cmd = [
+        'sudo',
+        'ceph',
+        '--cluster',
+        cluster_name,
+        'config',
+        'dump',
+    ]
+    mon_remote.run(args=cmd)
     yield
 
 @contextlib.contextmanager
@@ -472,12 +481,7 @@ def create_rbd_pool(ctx, config):
             args=['sudo', 'ceph', '--cluster', cluster_name,
                   'osd', 'pool', 'create', 'rbd', '8'])
         mon_remote.run(
-            args=[
-                'sudo', 'ceph', '--cluster', cluster_name,
-                'osd', 'pool', 'application', 'enable',
-                'rbd', 'rbd', '--yes-i-really-mean-it'
-            ],
-            check_status=False)
+            args=['rbd', '--cluster', cluster_name, 'pool', 'init', 'rbd'])
     yield
 
 @contextlib.contextmanager
@@ -662,7 +666,8 @@ def create_simple_monmap(ctx, remote, conf, mons,
 
 
 def is_crimson(config):
-    return config.get('flavor', 'default') == 'crimson'
+    return config.get('flavor', 'default') == 'crimson-debug' or \
+        config.get('flavor', 'default') == 'crimson-release'
 
 
 def maybe_redirect_stderr(config, type_, args, log_path):
@@ -990,7 +995,9 @@ def cluster(ctx, config):
                 try:
                     remote.run(args=['yes', run.Raw('|')] + ['sudo'] + mkfs + [dev])
                 except run.CommandFailedError:
-                    # Newer btfs-tools doesn't prompt for overwrite, use -f
+                    if fs != 'btrfs':
+                        raise
+                    # Newer btrfs-tools doesn't prompt for overwrite, use -f
                     if '-f' not in mount_options:
                         mkfs_options.append('-f')
                         mkfs = ['mkfs.%s' % fs] + mkfs_options
@@ -1200,8 +1207,18 @@ def cluster(ctx, config):
             args.extend([
                 run.Raw('|'), 'head', '-n', '1',
             ])
-            stdout = mon0_remote.sh(args)
-            return stdout or None
+            r = mon0_remote.run(
+                stdout=BytesIO(),
+                args=args,
+                stderr=StringIO(),
+            )
+            stdout = r.stdout.getvalue().decode()
+            if stdout:
+                return stdout
+            stderr = r.stderr.getvalue()
+            if stderr:
+                return stderr
+            return None
 
         if first_in_ceph_log('\[ERR\]|\[WRN\]|\[SEC\]',
                              config['log_ignorelist']) is not None:
@@ -1508,7 +1525,8 @@ def run_daemon(ctx, config, type_):
     try:
         yield
     finally:
-        teuthology.stop_daemons_of_type(ctx, type_, cluster_name)
+        timeout = config.get('stop-daemons-timeout', 300)
+        teuthology.stop_daemons_of_type(ctx, type_, cluster_name, timeout=timeout)
 
 
 def healthy(ctx, config):

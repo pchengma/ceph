@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -25,6 +25,7 @@ struct RGWObjState {
   bool is_atomic{false};
   bool has_attrs{false};
   bool exists{false};
+  bool is_dm{false};
   uint64_t size{0}; //< size of raw object
   uint64_t accounted_size{0}; //< size before compression, encryption
   ceph::real_time mtime;
@@ -37,7 +38,6 @@ struct RGWObjState {
   bool has_data{false};
   bufferlist data;
   bool prefetch_data{false};
-  bool keep_tail{false};
   bool is_olh{false};
   bufferlist olh_tag;
   uint64_t pg_ver{false};
@@ -73,7 +73,6 @@ struct RGWObjState {
       data = rhs.data;
     }
     prefetch_data = rhs.prefetch_data;
-    keep_tail = rhs.keep_tail;
     is_olh = rhs.is_olh;
     objv_tracker = rhs.objv_tracker;
     pg_ver = rhs.pg_ver;
@@ -253,6 +252,26 @@ class StoreBucket : public Bucket {
         optional_yield y, const DoutPrefixProvider *dpp) override {return 0;}
     int remove_topics(RGWObjVersionTracker* objv_tracker, 
         optional_yield y, const DoutPrefixProvider *dpp) override {return 0;}
+    int get_logging_object_name(std::string& obj_name,
+        const std::string& prefix,
+        optional_yield y,
+        const DoutPrefixProvider *dpp,
+        RGWObjVersionTracker* objv_tracker) override { return 0; }
+    int set_logging_object_name(const std::string& obj_name,
+        const std::string& prefix,
+        optional_yield y,
+        const DoutPrefixProvider *dpp,
+        bool new_obj,
+        RGWObjVersionTracker* objv_tracker) override { return 0; }
+    int remove_logging_object_name(const std::string& prefix,
+        optional_yield y,
+        const DoutPrefixProvider *dpp,
+        RGWObjVersionTracker* objv_tracker) override { return 0; }
+    int commit_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp, const std::string& prefix, std::string* last_committed) override { return 0; }
+    int remove_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp) override { return 0; }
+    int write_logging_object(const std::string& obj_name, const std::string& record, optional_yield y, const DoutPrefixProvider *dpp, bool async_completion) override {
+      return 0;
+    }
 
     friend class BucketList;
 };
@@ -261,7 +280,6 @@ class StoreObject : public Object {
   protected:
     RGWObjState state;
     Bucket* bucket = nullptr;
-    bool delete_marker{false};
     jspan_context trace_ctx{false, false};
 
   public:
@@ -275,12 +293,13 @@ class StoreObject : public Object {
 
     virtual ~StoreObject() = default;
 
-    virtual void set_atomic() override { state.is_atomic = true; }
+    virtual void set_atomic(bool atomic) override { state.is_atomic = atomic; }
     virtual bool is_atomic() override { return state.is_atomic; }
     virtual void set_prefetch_data() override { state.prefetch_data = true; }
     virtual bool is_prefetch_data() override { return state.prefetch_data; }
     virtual void set_compressed() override { state.compressed = true; }
     virtual bool is_compressed() override { return state.compressed; }
+    virtual bool is_delete_marker() override { return state.is_dm; }
     virtual void invalidate() override {
       rgw_obj obj = state.obj;
       bool is_atomic = state.is_atomic;
@@ -324,7 +343,6 @@ class StoreObject : public Object {
     virtual std::string get_hash_source(void) override { return state.obj.index_hash_source; }
     virtual void set_hash_source(std::string s) override { state.obj.index_hash_source = s; }
     virtual std::string get_oid(void) const override { return state.obj.key.get_oid(); }
-    virtual bool get_delete_marker(void) override { return delete_marker; }
     virtual bool get_in_extra_data(void) override { return state.obj.is_in_extra_data(); }
     virtual bool exists(void) override { return state.exists; }
     virtual void set_in_extra_data(bool i) override { state.obj.set_in_extra_data(i); }
@@ -350,6 +368,15 @@ class StoreObject : public Object {
        * work with lifecycle */
       return -1;
     }
+    virtual int restore_obj_from_cloud(Bucket* bucket,
+			   rgw::sal::PlacementTier* tier,
+			   CephContext* cct,
+		           std::optional<uint64_t> days,
+			   bool& in_progress,
+			   const DoutPrefixProvider* dpp,
+			   optional_yield y) override {
+      return -1;
+    }
     jspan_context& get_trace() override { return trace_ctx; }
     void set_trace (jspan_context&& _trace_ctx) override { trace_ctx = std::move(_trace_ctx); }
 
@@ -362,6 +389,8 @@ class StoreObject : public Object {
       }
       return -ENOENT;
     }
+
+    virtual RGWObjVersionTracker& get_version_tracker() override { return state.objv_tracker; }
 
     virtual void print(std::ostream& out) const override {
       if (bucket)
@@ -426,72 +455,24 @@ public:
   virtual void print(std::ostream& out) const override { out << oid; }
 };
 
-class StoreLifecycle : public Lifecycle {
+class StoreRestoreSerializer : public RestoreSerializer {
+
+protected:
+  std::string oid;
+
 public:
-  struct StoreLCHead : LCHead {
-    time_t start_date{0};
-    time_t shard_rollover_date{0};
-    std::string marker;
+  StoreRestoreSerializer() {}
+  StoreRestoreSerializer(std::string _oid) : oid(_oid) {}
 
-    StoreLCHead() = default;
-    StoreLCHead(time_t _start_date, time_t _rollover_date, std::string& _marker) : start_date(_start_date), shard_rollover_date(_rollover_date), marker(_marker) {}
+  virtual ~StoreRestoreSerializer() = default;
+  virtual void print(std::ostream& out) const override { out << oid; }
+};
 
-    StoreLCHead& operator=(LCHead& _h) {
-      start_date = _h.get_start_date();
-      shard_rollover_date = _h.get_shard_rollover_date();
-      marker = _h.get_marker();
+class StoreRestore : public Restore {
 
-      return *this;
-    }
-
-    virtual time_t& get_start_date() override { return start_date; }
-    virtual void set_start_date(time_t _date) override { start_date = _date; }
-    virtual std::string& get_marker() override { return marker; }
-    virtual void set_marker(const std::string& _marker) override { marker = _marker; }
-    virtual time_t& get_shard_rollover_date() override { return shard_rollover_date; }
-    virtual void set_shard_rollover_date(time_t _date) override { shard_rollover_date = _date; }
-  };
-
-  struct StoreLCEntry : LCEntry {
-    std::string bucket;
-    std::string oid;
-    uint64_t start_time{0};
-    uint32_t status{0};
-
-    StoreLCEntry() = default;
-    StoreLCEntry(std::string& _bucket, uint64_t _time, uint32_t _status) : bucket(_bucket), start_time(_time), status(_status) {}
-    StoreLCEntry(std::string& _bucket, std::string _oid, uint64_t _time, uint32_t _status) : bucket(_bucket), oid(_oid), start_time(_time), status(_status) {}
-    StoreLCEntry(const StoreLCEntry& _e) = default;
-
-    StoreLCEntry& operator=(LCEntry& _e) {
-      bucket = _e.get_bucket();
-      oid = _e.get_oid();
-      start_time = _e.get_start_time();
-      status = _e.get_status();
-
-      return *this;
-    }
-
-    virtual std::string& get_bucket() override { return bucket; }
-    virtual void set_bucket(const std::string& _bucket) override { bucket = _bucket; }
-    virtual std::string& get_oid() override { return oid; }
-    virtual void set_oid(const std::string& _oid) override { oid = _oid; }
-    virtual uint64_t get_start_time() override { return start_time; }
-    virtual void set_start_time(uint64_t _time) override { start_time = _time; }
-    virtual uint32_t get_status() override { return status; }
-    virtual void set_status(uint32_t _status) override { status = _status; }
-    virtual void print(std::ostream& out) const override {
-      out << bucket << ":" << oid << ":" << start_time << ":" << status;
-    }
-  };
-
-  StoreLifecycle() = default;
-  virtual ~StoreLifecycle() = default;
-
-  virtual std::unique_ptr<LCEntry> get_entry() override {
-      return std::make_unique<StoreLCEntry>();
-  }
-  using Lifecycle::get_entry;
+public:
+  StoreRestore() = default;
+  virtual ~StoreRestore() = default;
 };
 
 class StoreNotification : public Notification {

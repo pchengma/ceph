@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_arn.h"
 #include "rgw_common.h"
@@ -328,15 +328,15 @@ bool ARN::match(const ARN& candidate) const {
     return false;
   }
 
-  if (!match_policy(region, candidate.region, MATCH_POLICY_ARN)) {
+  if (!match_wildcards(region, candidate.region, MATCH_CASE_INSENSITIVE)) {
     return false;
   }
 
-  if (!match_policy(account, candidate.account, MATCH_POLICY_ARN)) {
+  if (!match_wildcards(account, candidate.account, MATCH_CASE_INSENSITIVE)) {
     return false;
   }
 
-  if (!match_policy(resource, candidate.resource, MATCH_POLICY_RESOURCE)) {
+  if (!match_wildcards(resource, candidate.resource, 0)) {
     return false;
   }
 

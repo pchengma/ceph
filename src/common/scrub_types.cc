@@ -139,7 +139,8 @@ inconsistent_obj_wrapper::set_auth_missing(const hobject_t& hoid,
     else if (shard_map[pg_map.first].has_shallow_errors())
       ++shallow_errors;
     union_shards.errors |= shard_map[pg_map.first].errors;
-    shards.emplace(osd_shard_t{pg_map.first.osd, pg_map.first.shard}, shard_map[pg_map.first]);
+    shards.emplace(osd_shard_t{pg_map.first.osd,
+      static_cast<int8_t>(pg_map.first.shard)}, shard_map[pg_map.first]);
   }
 }
 
@@ -159,6 +160,13 @@ void inconsistent_obj_wrapper::encode(bufferlist& bl) const
   encode(shards, bl);
   encode(union_shards.errors, bl);
   ENCODE_FINISH(bl);
+}
+
+bufferlist inconsistent_obj_wrapper::encode() const
+{
+  bufferlist bl;
+  encode(bl);
+  return bl;
 }
 
 void inconsistent_obj_wrapper::decode(bufferlist::const_iterator& bp)
@@ -238,6 +246,13 @@ void inconsistent_snapset_wrapper::encode(bufferlist& bl) const
   encode(missing, bl);
   encode(ss_bl, bl);
   ENCODE_FINISH(bl);
+}
+
+bufferlist inconsistent_snapset_wrapper::encode() const
+{
+  bufferlist bl;
+  encode(bl);
+  return bl;
 }
 
 void inconsistent_snapset_wrapper::decode(bufferlist::const_iterator& bp)

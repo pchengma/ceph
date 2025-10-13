@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_MIRROR_WATCHER_H
 #define CEPHFS_MIRROR_MIRROR_WATCHER_H
@@ -28,11 +28,11 @@ class FSMirror;
 class MirrorWatcher : public Watcher {
 public:
   static MirrorWatcher *create(librados::IoCtx &ioctx, FSMirror *fs_mirror,
-                               ContextWQ *work_queue) {
-    return new MirrorWatcher(ioctx, fs_mirror, work_queue);
+                               ErrorListener &elistener, ContextWQ *work_queue) {
+    return new MirrorWatcher(ioctx, fs_mirror, elistener, work_queue);
   }
 
-  MirrorWatcher(librados::IoCtx &ioctx, FSMirror *fs_mirror,
+  MirrorWatcher(librados::IoCtx &ioctx, FSMirror *fs_mirror, ErrorListener &elistener,
                 ContextWQ *work_queue);
   ~MirrorWatcher();
 
@@ -48,24 +48,15 @@ public:
     return m_blocklisted;
   }
 
-  monotime get_blocklisted_ts() {
-    std::scoped_lock locker(m_lock);
-    return m_blocklisted_ts;
-  }
-
   bool is_failed() {
     std::scoped_lock locker(m_lock);
     return m_failed;
   }
 
-  monotime get_failed_ts() {
-    std::scoped_lock locker(m_lock);
-    return m_failed_ts;
-  }
-
 private:
   librados::IoCtx &m_ioctx;
   FSMirror *m_fs_mirror;
+  ErrorListener &m_elistener;
   ContextWQ *m_work_queue;
 
   ceph::mutex m_lock;
@@ -76,9 +67,6 @@ private:
 
   bool m_blocklisted = false;
   bool m_failed = false;
-
-  monotime m_blocklisted_ts;
-  monotime m_failed_ts;
 
   void register_watcher();
   void handle_register_watcher(int r);

@@ -1,7 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <iostream>
+#include <unordered_set>
 #include <unistd.h>
 
 #include "gtest/gtest.h"
@@ -26,7 +27,7 @@ public:
   std::atomic<uint64_t> m_send_request_index;
   std::atomic<uint64_t> m_recv_ack_index;
   WaitEvent m_wait_event;
-  unordered_set<std::string> m_hit_entry_set;
+  std::unordered_set<std::string> m_hit_entry_set;
 
   TestCommunication()
     : m_cache_server(nullptr), m_cache_client(nullptr),

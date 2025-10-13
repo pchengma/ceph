@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,7 +22,7 @@
 #if defined(WITH_BLUESTORE)
 #include "bluestore/BlueStore.h"
 #endif
-#ifndef WITH_SEASTAR
+#ifdef WITH_KSTORE
 #include "kstore/KStore.h"
 #endif
 
@@ -43,7 +44,6 @@ std::unique_ptr<ObjectStore> ObjectStore::create(
   return nullptr;
 }
 
-#ifndef WITH_SEASTAR
 std::unique_ptr<ObjectStore> ObjectStore::create(
   CephContext *cct,
   const string& type,
@@ -55,13 +55,15 @@ std::unique_ptr<ObjectStore> ObjectStore::create(
     lgeneric_derr(cct) << __func__ << ": FileStore has been deprecated and is no longer supported" << dendl;
     return nullptr;
   }
+  #ifdef WITH_KSTORE
   if (type == "kstore" &&
       cct->check_experimental_feature_enabled("kstore")) {
     return std::make_unique<KStore>(cct, data);
   }
+  #endif
   return create(cct, type, data);
 }
-#endif
+
 
 int ObjectStore::probe_block_device_fsid(
   CephContext *cct,
@@ -110,4 +112,9 @@ int ObjectStore::read_meta(const std::string& key,
   }
   *value = string(buf, r);
   return 0;
+}
+
+int ObjectStore::get_ideal_list_max()
+{
+  return cct->_conf->osd_objectstore_ideal_list_max;
 }

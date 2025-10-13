@@ -367,6 +367,9 @@ Commands
 :command:`group snap list` *group-spec*
   List snapshots of a group.
 
+:command:`group snap info` *group-snap-spec*
+  Get information about a snapshot of a group.
+
 :command:`group snap rm` *group-snap-spec*
   Remove a snapshot from a group.
 
@@ -389,7 +392,7 @@ Commands
 :command:`image-meta set` *image-spec* *key* *value*
   Set metadata key with the value. They will displayed in `image-meta list`.
 
-:command:`import` [--export-format *format (1 or 2)*] [--image-format *format-id*] [--object-size *size-in-B/K/M*] [--stripe-unit *size-in-B/K/M* --stripe-count *num*] [--image-feature *feature-name*]... [--image-shared] *src-path* [*image-spec*]
+:command:`import` [--export-format *format (1 or 2)*] [--image-format *format-id*] [--object-size *size-in-B/K/M*] [--stripe-unit *size-in-B/K/M* --stripe-count *num*] [--image-feature *feature-name*] [--estimated-size *size-in-M/G/T*]... [--image-shared] *src-path* [*image-spec*]
   Create a new image and import its data from path (use - for
   stdin).  The import operation will try to create sparse rbd images 
   if possible.  For import from stdin, the sparsification unit is
@@ -520,28 +523,31 @@ Commands
   Show RBD mirroring status for an image.
 
 :command:`mirror pool demote` [*pool-name*]
-  Demote all primary images within a pool to non-primary.
-  Every mirror-enabled image in the pool will be demoted.
+  Demote all primary images within a pool or namespace to non-primary.
+  Every mirror-enabled image in the pool or namespace will be demoted.
 
 :command:`mirror pool disable` [*pool-name*]
-  Disable RBD mirroring by default within a pool. When mirroring
-  is disabled on a pool in this way, mirroring will also be
-  disabled on any images (within the pool) for which mirroring
-  was enabled explicitly.
+  Disable RBD mirroring within a pool or namespace. When mirroring
+  is disabled on a pool or namespace in this way, mirroring will also be
+  disabled on all images (within the pool or namespace) for which mirroring
+  was enabled, whether by default or explicitly.
 
-:command:`mirror pool enable` [*pool-name*] *mode*
-  Enable RBD mirroring by default within a pool.
+:command:`mirror pool enable` *pool-name* *mode* [--remote-namespace *remote-namespace-name*]
+  Enable RBD mirroring within a pool or namespace.
   The mirroring mode can either be ``pool`` or ``image``.
-  If configured in ``pool`` mode, all images in the pool
+  If configured in ``pool`` mode, all images in the pool or namespace
   with the journaling feature enabled are mirrored.
   If configured in ``image`` mode, mirroring needs to be
   explicitly enabled (by ``mirror image enable`` command)
   on each image.
+  A namespace can be mirrored to a different namespace on the remote
+  pool using the ``--remote-namespace`` option.
 
 :command:`mirror pool info` [*pool-name*]
-  Show information about the pool mirroring configuration.
-  It includes mirroring mode, peer UUID, remote cluster name,
-  and remote client name.
+  Show information about the pool or namespace mirroring configuration.
+  For both pools and namespaces, it includes the mirroring mode, mirror UUID
+  and remote namespace. For pools, it additionally includes the site name,
+  peer UUID, remote cluster name, and remote client name.
 
 :command:`mirror pool peer add` [*pool-name*] *remote-cluster-spec*
   Add a mirroring peer to a pool.
@@ -552,7 +558,7 @@ Commands
   This requires mirroring to be enabled on the pool.
 
 :command:`mirror pool peer remove` [*pool-name*] *uuid*
-  Remove a mirroring peer from a pool. The peer uuid is available
+  Remove a mirroring peer from a pool. The peer UUID is available
   from ``mirror pool info`` command.
 
 :command:`mirror pool peer set` [*pool-name*] *uuid* *key* *value*
@@ -561,16 +567,20 @@ Commands
   is corresponding to remote client name or remote cluster name.
 
 :command:`mirror pool promote` [--force] [*pool-name*]
-  Promote all non-primary images within a pool to primary.
-  Every mirror-enabled image in the pool will be promoted.
+  Promote all non-primary images within a pool or namespace to primary.
+  Every mirror-enabled image in the pool or namespace will be promoted.
 
 :command:`mirror pool status` [--verbose] [*pool-name*]
-  Show status for all mirrored images in the pool.
+  Show status for all mirrored images in the pool or namespace.
   With ``--verbose``, show additional output status
-  details for every mirror-enabled image in the pool.
+  details for every mirror-enabled image in the pool or namespace.
 
 :command:`mirror snapshot schedule add` [-p | --pool *pool*] [--namespace *namespace*] [--image *image*] *interval* [*start-time*]
-  Add mirror snapshot schedule.
+  Add mirror snapshot schedule. The ``interval`` can be specified in
+  days, hours, or minutes using the d, h, m suffix respectively.
+  The ``start-time`` is a time string in ISO 8601 format. Not providing the
+  ``--pool``, ``--namespace`` and ``--image`` options creates a global
+  schedule which applies to all mirror-enabled images in the cluster.
 
 :command:`mirror snapshot schedule list` [-R | --recursive] [--format *format*] [--pretty-format] [-p | --pool *pool*] [--namespace *namespace*] [--image *image*]
   List mirror snapshot schedule.
@@ -885,7 +895,7 @@ Per mapping (block device) `rbd device map` options:
   backend that the data is incompressible, disabling compression in aggressive
   mode (since 5.8).
 
-* ms_mode=legacy - Use msgr1 on-the-wire protocol (since 5.11, default).
+* ms_mode=legacy - Use msgr1 on-the-wire protocol (since 5.11).
 
 * ms_mode=crc - Use msgr2.1 on-the-wire protocol, select 'crc' mode, also
   referred to as plain mode (since 5.11).  If the daemon denies 'crc' mode,
@@ -897,8 +907,8 @@ Per mapping (block device) `rbd device map` options:
   fail the connection.
 
 * ms_mode=prefer-crc - Use msgr2.1 on-the-wire protocol, select 'crc'
-  mode (since 5.11).  If the daemon denies 'crc' mode in favor of 'secure'
-  mode, agree to 'secure' mode.
+  mode (since 5.11, default).  If the daemon denies 'crc' mode in favor of
+  'secure' mode, agree to 'secure' mode.
 
 * ms_mode=prefer-secure - Use msgr2.1 on-the-wire protocol, select 'secure'
   mode (since 5.11).  If the daemon denies 'secure' mode in favor of 'crc'
@@ -1025,6 +1035,9 @@ To restore an image from trash and rename it::
 
        rbd trash restore mypool/myimage-id --image mynewimage
 
+To create a mirror snapshot schedule for an image::
+
+       rbd mirror snapshot schedule add --pool mypool --image myimage 12h 14:00:00-05:00
 
 Availability
 ============

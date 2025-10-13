@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Socket.h"
 
@@ -8,6 +8,7 @@
 #include <seastar/net/packet.hh>
 
 #include "crimson/common/log.h"
+#include "include/random.h" // for ceph::util::generate_random_number()
 #include "Errors.h"
 
 using crimson::common::local_conf;
@@ -290,7 +291,7 @@ Socket::connect(const entity_addr_t &peer_addr)
     auto ret = std::make_unique<Socket>(
       std::move(socket), side_t::connector, 0, construct_tag{});
     logger().debug("Socket::connect(): connected to {}, socket {}",
-                   peer_addr, fmt::ptr(ret));
+                   peer_addr, fmt::ptr(ret.get()));
     return ret;
   });
 }
@@ -331,7 +332,7 @@ Socket::try_trap_pre(bp_action_t& trap) {
     trap = action;
     break;
    default:
-    ceph_abort("unexpected action from trap");
+    ceph_abort_msg("unexpected action from trap");
   }
   return seastar::make_ready_future<>();
 }
@@ -348,7 +349,7 @@ Socket::try_trap_post(bp_action_t& trap) {
     force_shutdown();
     return blocker->block();
    default:
-    ceph_abort("unexpected action from trap");
+    ceph_abort_msg("unexpected action from trap");
   }
   return seastar::make_ready_future<>();
 }
@@ -431,7 +432,7 @@ ShardedServerSocket::accept(accept_func_t &&_fn_accept)
               peer_addr.get_port(), Socket::construct_tag{});
           logger().debug("ShardedServerSocket({})::accept(): accepted peer {}, "
                          "socket {}, dispatch_only_on_primary_sid = {}",
-                         ss.listen_addr, peer_addr, fmt::ptr(_socket),
+                         ss.listen_addr, peer_addr, fmt::ptr(_socket.get()),
                          ss.dispatch_only_on_primary_sid);
           std::ignore = seastar::with_gate(
               ss.shutdown_gate,

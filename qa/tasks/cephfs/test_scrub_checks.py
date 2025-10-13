@@ -176,6 +176,40 @@ done
 
         self._check_task_status_na()
 
+    def test_scrub_when_mds_is_inactive(self):
+        test_dir = "scrub_control_test_path"
+        abs_test_path = f"/{test_dir}"
+
+        self.create_scrub_data(test_dir)
+
+        # allow standby-replay
+        self.fs.set_max_mds(1)
+        self.fs.set_allow_standby_replay(True)
+        status = self.fs.wait_for_daemons()
+        sr_mds_id = self.fs.get_daemon_names('up:standby-replay', status=status)[0]
+
+        # start the scrub and verify
+        with self.assertRaises(CommandFailedError) as ce:
+            self.run_ceph_cmd('tell', f'mds.{sr_mds_id}', 'scrub', 
+                              'start', abs_test_path, 'recursive')
+        self.assertEqual(ce.exception.exitstatus, errno.EINVAL)
+
+        # pause and verify
+        with self.assertRaises(CommandFailedError) as ce:
+            self.run_ceph_cmd('tell', f'mds.{sr_mds_id}', 'scrub', 'pause')
+        self.assertEqual(ce.exception.exitstatus, errno.EINVAL)
+        
+        # abort and verify
+        with self.assertRaises(CommandFailedError) as ce:
+            self.run_ceph_cmd('tell', f'mds.{sr_mds_id}', 'scrub', 'abort')
+        self.assertEqual(ce.exception.exitstatus, errno.EINVAL)
+        
+        # resume and verify
+        with self.assertRaises(CommandFailedError) as ce:
+            self.run_ceph_cmd('tell', f'mds.{sr_mds_id}', 'scrub', 'resume')
+        self.assertEqual(ce.exception.exitstatus, errno.EINVAL)
+
+
 class TestScrubChecks(CephFSTestCase):
     """
     Run flush and scrub commands on the specified files in the filesystem. This
@@ -443,6 +477,44 @@ class TestScrubChecks(CephFSTestCase):
             timeout=30
         )
 
+    def test_scrub_remote_link(self):
+        """
+        test scrub remote link
+        """
+        test_dir_path = "test_dir"
+        self.mount_a.run_shell(["mkdir", test_dir_path])
+        file_dir_path = os.path.join(test_dir_path, "file_dir")
+        self.mount_a.run_shell(["mkdir", file_dir_path])
+        file_path = os.path.join(file_dir_path, "test_file.txt")
+        link_path = os.path.join(test_dir_path, "test_link")
+        abs_link_path = "/" + link_path
+        self.mount_a.run_shell(["touch", file_path])
+        self.mount_a.run_shell(["ln", file_path, link_path])
+        file_ino = self.mount_a.path_to_ino(file_path)
+        dir_ino = self.mount_a.path_to_ino(file_dir_path)
+        rados_obj_file = "{ino:x}.00000000".format(ino=file_ino)
+        rados_obj_dir = "{ino:x}.00000000".format(ino=dir_ino)
+        self.fs.flush()
+        self.fs.rados(["rm", rados_obj_file], pool=self.fs.get_data_pool_name())
+        self.fs.rados(["rm", rados_obj_dir], pool=self.fs.get_metadata_pool_name())
+        self.fs.mds_fail_restart()
+        self.fs.wait_for_daemons()
+        status = self.fs.mds_asok(['status'])
+        self.assertEqual("up:active", str(status['state']))
+        mds_rank = self.fs.get_rank()['rank']
+        success_validator = lambda j, r: self.json_validator(j, r, "return_code", 0)
+        scrub_json = self.tell_command(mds_rank, 
+            "scrub start /{0} recursive force".format(test_dir_path), 
+                success_validator)
+        self.assertEqual(
+            self.fs.wait_until_scrub_complete(tag=scrub_json["scrub_tag"]), True)
+        damage_json = self.tell_command(mds_rank, "damage ls")
+        found_remote_link_damage = False
+        for entry in damage_json:
+            if entry["path"] == abs_link_path :
+                found_remote_link_damage = True
+        self.assertEqual(found_remote_link_damage, True)
+
     def test_stray_evaluation_with_scrub(self):
         """
         test that scrub can iterate over ~mdsdir and evaluate strays
@@ -467,7 +539,7 @@ class TestScrubChecks(CephFSTestCase):
                 jv=element_value, ev=expected_value)
         return True, "Succeeded"
 
-    def tell_command(self, mds_rank, command, validator):
+    def tell_command(self, mds_rank, command, validator=None):
         log.info("Running command '{command}'".format(command=command))
 
         command_list = command.split()
@@ -476,9 +548,10 @@ class TestScrubChecks(CephFSTestCase):
         log.info("command '{command}' returned '{jout}'".format(
                      command=command, jout=jout))
 
-        success, errstring = validator(jout, 0)
-        if not success:
-            raise AsokCommandFailedError(command, 0, jout, errstring)
+        if validator:
+            success, errstring = validator(jout, 0)
+            if not success:
+                raise AsokCommandFailedError(command, 0, jout, errstring)
         return jout
 
     @staticmethod

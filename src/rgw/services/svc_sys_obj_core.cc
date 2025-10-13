@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "svc_sys_obj_core.h"
 #include "svc_zone.h"
@@ -74,7 +74,7 @@ int RGWSI_SysObj_Core::raw_stat(const DoutPrefixProvider *dpp, const rgw_raw_obj
     op.stat2(&size, &mtime_ts, nullptr);
   }
   bufferlist outbl;
-  r = rados_obj.operate(dpp, &op, &outbl, y);
+  r = rados_obj.operate(dpp, std::move(op), &outbl, y);
   if (r < 0)
     return r;
 
@@ -169,20 +169,20 @@ int RGWSI_SysObj_Core::read(const DoutPrefixProvider *dpp,
     }
   }
 
-  rgw_rados_ref rados_obj;
-  int r = get_rados_obj(dpp, zone_svc, obj, &rados_obj);
+  rgw_rados_ref ref;
+  int r = get_rados_obj(dpp, zone_svc, obj, &ref);
   if (r < 0) {
     ldpp_dout(dpp, 20) << "get_rados_obj() on obj=" << obj << " returned " << r << dendl;
     return r;
   }
-  r = rados_obj.operate(dpp, &op, nullptr, y);
+
+  version_t op_ver = 0;
+  r = rgw_rados_operate(dpp, ref.ioctx, obj.oid, std::move(op), nullptr, y, 0, nullptr, &op_ver);
   if (r < 0) {
     ldpp_dout(dpp, 20) << "rados_obj.operate() r=" << r << " bl.length=" << bl->length() << dendl;
     return r;
   }
   ldpp_dout(dpp, 20) << "rados_obj.operate() r=" << r << " bl.length=" << bl->length() << dendl;
-
-  uint64_t op_ver = rados_obj.ioctx.get_last_version();
 
   if (read_state.last_ver > 0 &&
       read_state.last_ver != op_ver) {
@@ -227,7 +227,7 @@ int RGWSI_SysObj_Core::get_attr(const DoutPrefixProvider *dpp,
   int rval;
   op.getxattr(name, dest, &rval);
 
-  r = rados_obj.operate(dpp, &op, nullptr, y);
+  r = rados_obj.operate(dpp, std::move(op), nullptr, y);
   if (r < 0)
     return r;
 
@@ -280,7 +280,7 @@ int RGWSI_SysObj_Core::set_attrs(const DoutPrefixProvider *dpp,
 
   bufferlist bl;
 
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   if (r < 0)
     return r;
 
@@ -315,7 +315,7 @@ int RGWSI_SysObj_Core::omap_get_vals(const DoutPrefixProvider *dpp,
     int rval;
     op.omap_get_vals2(start_after, count, &t, &more, &rval);
   
-    r = rados_obj.operate(dpp, &op, nullptr, y);
+    r = rados_obj.operate(dpp, std::move(op), nullptr, y);
     if (r < 0) {
       return r;
     }
@@ -357,7 +357,7 @@ int RGWSI_SysObj_Core::omap_get_all(const DoutPrefixProvider *dpp,
     int rval;
     op.omap_get_vals2(start_after, count, &t, &more, &rval);
 
-    r = rados_obj.operate(dpp, &op, nullptr, y);
+    r = rados_obj.operate(dpp, std::move(op), nullptr, y);
     if (r < 0) {
       return r;
     }
@@ -389,7 +389,7 @@ int RGWSI_SysObj_Core::omap_set(const DoutPrefixProvider *dpp, const rgw_raw_obj
   if (must_exist)
     op.assert_exists();
   op.omap_set(m);
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   return r;
 }
 
@@ -408,7 +408,7 @@ int RGWSI_SysObj_Core::omap_set(const DoutPrefixProvider *dpp, const rgw_raw_obj
   if (must_exist)
     op.assert_exists();
   op.omap_set(m);
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   return r;
 }
 
@@ -429,7 +429,7 @@ int RGWSI_SysObj_Core::omap_del(const DoutPrefixProvider *dpp, const rgw_raw_obj
 
   op.omap_rm_keys(k);
 
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   return r;
 }
 
@@ -467,7 +467,7 @@ int RGWSI_SysObj_Core::remove(const DoutPrefixProvider *dpp,
   }
 
   op.remove();
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   if (r < 0)
     return r;
 
@@ -525,7 +525,7 @@ int RGWSI_SysObj_Core::write(const DoutPrefixProvider *dpp,
     op.setxattr(name.c_str(), bl);
   }
 
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   if (r < 0) {
     return r;
   }
@@ -566,7 +566,7 @@ int RGWSI_SysObj_Core::write_data(const DoutPrefixProvider *dpp,
     objv_tracker->prepare_op_for_write(&op);
   }
   op.write_full(bl);
-  r = rados_obj.operate(dpp, &op, y);
+  r = rados_obj.operate(dpp, std::move(op), y);
   if (r < 0)
     return r;
 

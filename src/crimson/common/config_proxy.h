@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -73,7 +73,7 @@ class ConfigProxy : public seastar::peering_sharded_service<ConfigProxy>
         (*obs)->handle_conf_change(owner, keys);
       }
 
-      return seastar::parallel_for_each(boost::irange(1u, seastar::smp::count),
+      return seastar::parallel_for_each(std::views::iota(1u, seastar::smp::count),
                                         [&owner, new_values] (auto cpu) {
         return owner.container().invoke_on(cpu,
           [foreign_values = seastar::make_foreign(new_values)](ConfigProxy& proxy) mutable {

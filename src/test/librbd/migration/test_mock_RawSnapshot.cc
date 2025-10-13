@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -101,6 +101,19 @@ public:
       .WillOnce(WithArgs<1, 2>(Invoke([bl, r]
         (bufferlist* out_bl, Context* ctx) {
           *out_bl = bl;
+          ctx->complete(r);
+        })));
+  }
+
+  void expect_stream_list_sparse_extents(MockStreamInterface& mock_stream_interface,
+                                         const io::Extents& byte_extents,
+                                         const io::SparseExtents& sparse_extents,
+                                         int r) {
+    EXPECT_CALL(mock_stream_interface, list_sparse_extents(byte_extents, _, _))
+      .WillOnce(WithArgs<1, 2>(Invoke(
+        [sparse_extents, r](io::SparseExtents* out_sparse_extents,
+                            Context* ctx) {
+          out_sparse_extents->insert(sparse_extents);
           ctx->complete(r);
         })));
   }
@@ -232,6 +245,11 @@ TEST_F(TestMockMigrationRawSnapshot, ListSnap) {
   expect_stream_open(*mock_stream_interface, 0);
   expect_stream_get_size(*mock_stream_interface, 0, 0);
 
+  io::SparseExtents expected_sparse_extents;
+  expected_sparse_extents.insert(0, 123, {io::SPARSE_EXTENT_STATE_DATA, 123});
+  expect_stream_list_sparse_extents(*mock_stream_interface, {{0, 123}},
+                                    expected_sparse_extents, 0);
+
   expect_stream_close(*mock_stream_interface, 0);
 
   MockRawSnapshot mock_raw_snapshot(&mock_image_ctx, json_object,
@@ -245,6 +263,7 @@ TEST_F(TestMockMigrationRawSnapshot, ListSnap) {
   io::SparseExtents sparse_extents;
   mock_raw_snapshot.list_snap({{0, 123}}, 0, &sparse_extents, {}, &ctx2);
   ASSERT_EQ(0, ctx2.wait());
+  ASSERT_EQ(expected_sparse_extents, sparse_extents);
 
   C_SaferCond ctx3;
   mock_raw_snapshot.close(&ctx3);

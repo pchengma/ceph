@@ -1,15 +1,17 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/crc32c.h"
 #include "arch/probe.h"
 #include "arch/intel.h"
 #include "arch/arm.h"
 #include "arch/ppc.h"
+#include "arch/s390x.h"
 #include "common/sctp_crc32.h"
 #include "common/crc32c_intel_fast.h"
 #include "common/crc32c_aarch64.h"
 #include "common/crc32c_ppc.h"
+#include "common/crc32c_s390x.h"
 
 /*
  * choose best implementation based on the CPU architecture.
@@ -38,6 +40,10 @@ ceph_crc32c_func_t ceph_choose_crc32(void)
 #elif defined(__powerpc__) || defined(__ppc__)
   if (ceph_arch_ppc_crc32) {
     return ceph_crc32c_ppc;
+  }
+#elif defined(__s390__)
+  if (ceph_arch_s390x_crc32) {
+    return ceph_crc32c_s390x;
   }
 #endif
   // default

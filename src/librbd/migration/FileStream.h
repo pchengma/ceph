@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_MIGRATION_FILE_STREAM_H
 #define CEPH_LIBRBD_MIGRATION_FILE_STREAM_H
@@ -43,6 +43,10 @@ public:
 
   void read(io::Extents&& byte_extents, bufferlist* data,
             Context* on_finish) override;
+
+  void list_sparse_extents(io::Extents&& byte_extents,
+                           io::SparseExtents* sparse_extents,
+                           Context* on_finish) override;
 
 private:
   CephContext* m_cct;

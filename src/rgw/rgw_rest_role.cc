@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <algorithm>
 #include <errno.h>
@@ -40,7 +40,7 @@ int RGWRestRole::check_caps(const RGWUserCaps& caps)
   return caps.check_cap("roles", perm);
 }
 
-static void dump_iam_role(const rgw::sal::RGWRoleInfo& role, Formatter *f)
+static void dump_iam_role(const RGWRoleInfo& role, Formatter *f)
 {
   encode_json("RoleId", role.id, f);
   encode_json("RoleName", role.name, f);
@@ -114,7 +114,7 @@ static int load_role(const DoutPrefixProvider* dpp, optional_yield y,
                      rgw::ARN& resource, std::string& message)
 {
   role = driver->get_role(name, tenant, account_id);
-  const int r = role->get(dpp, y);
+  const int r = role->load_by_name(dpp, y);
   if (r == -ENOENT) {
     message = "No such RoleName in the tenant";
     return -ERR_NO_ROLE_FOUND;
@@ -269,7 +269,7 @@ void RGWCreateRole::execute(optional_yield y)
     }
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -312,10 +312,16 @@ void RGWCreateRole::execute(optional_yield y)
     ldpp_dout(this, 0) << "role_id decoded from master zonegroup response is " << role_id << dendl;
   }
 
-  op_ret = role->create(s, true, role_id, y);
+  op_ret = role->create(s, role_id, y);
   if (op_ret == -EEXIST) {
-    op_ret = -ERR_ROLE_EXISTS;
-    return;
+    if (site.is_meta_master()) {
+      op_ret = -ERR_ROLE_EXISTS;
+      return;
+    }
+    // the forwarded request succeeded on the metadata master. if we get
+    // EEXIST now, it's probably because metadata sync raced to replicate
+    // this first
+    op_ret = 0;
   }
 
   if (op_ret == 0) {
@@ -362,7 +368,7 @@ void RGWDeleteRole::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 0) << "forward_iam_request_to_master returned ret=" << op_ret << dendl;
       return;
@@ -473,7 +479,7 @@ void RGWModifyRoleTrustPolicy::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -483,7 +489,8 @@ void RGWModifyRoleTrustPolicy::execute(optional_yield y)
   op_ret = retry_raced_role_write(this, y, role.get(),
       [this, y] {
         role->update_trust_policy(trust_policy);
-        return role->update(this, y);
+        constexpr bool exclusive = false;
+        return role->store_info(this, exclusive, y);
       });
 
   s->formatter->open_object_section("UpdateAssumeRolePolicyResponse");
@@ -576,7 +583,7 @@ int RGWPutRolePolicy::init_processing(optional_yield y)
 
   try {
     // non-account identity policy is restricted to the current tenant
-    const rgw::sal::RGWRoleInfo& info = role->get_info();
+    const RGWRoleInfo& info = role->get_info();
     const std::string* policy_tenant = account_id.empty() ? &info.tenant : nullptr;
     const rgw::IAM::Policy p(
       s->cct, policy_tenant, perm_policy,
@@ -609,7 +616,7 @@ void RGWPutRolePolicy::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -619,7 +626,8 @@ void RGWPutRolePolicy::execute(optional_yield y)
   op_ret = retry_raced_role_write(this, y, role.get(),
       [this, y] {
         role->set_perm_policy(policy_name, perm_policy);
-        return role->update(this, y);
+        constexpr bool exclusive = false;
+        return role->store_info(this, exclusive, y);
       });
 
   if (op_ret == 0) {
@@ -742,7 +750,7 @@ void RGWDeleteRolePolicy::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -760,7 +768,8 @@ void RGWDeleteRolePolicy::execute(optional_yield y)
           return -ERR_NO_SUCH_ENTITY;
         }
         if (r == 0) {
-          r = role->update(this, y);
+          constexpr bool exclusive = false;
+          r = role->store_info(this, exclusive, y);
         }
         return r;
       });
@@ -816,7 +825,7 @@ void RGWTagRole::execute(optional_yield y)
     }
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -827,7 +836,8 @@ void RGWTagRole::execute(optional_yield y)
       [this, y] {
         int r = role->set_tags(this, tags);
         if (r == 0) {
-          r = role->update(this, y);
+          constexpr bool exclusive = false;
+          r = role->store_info(this, exclusive, y);
         }
         return r;
       });
@@ -924,7 +934,7 @@ void RGWUntagRole::execute(optional_yield y)
     }
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -934,7 +944,8 @@ void RGWUntagRole::execute(optional_yield y)
   op_ret = retry_raced_role_write(this, y, role.get(),
       [this, y] {
         role->erase_tags(untag);
-        return role->update(this, y);
+        constexpr bool exclusive = false;
+        return role->store_info(this, exclusive, y);
       });
 
   if (op_ret == 0) {
@@ -986,7 +997,7 @@ void RGWUpdateRole::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -1003,15 +1014,18 @@ void RGWUpdateRole::execute(optional_yield y)
           return -EINVAL;
         }
 
-        return role->update(this, y);
+        constexpr bool exclusive = false;
+        return role->store_info(this, exclusive, y);
       });
 
-  s->formatter->open_object_section("UpdateRoleResponse");
-  s->formatter->open_object_section("UpdateRoleResult");
-  s->formatter->open_object_section("ResponseMetadata");
-  s->formatter->dump_string("RequestId", s->trans_id);
-  s->formatter->close_section();
-  s->formatter->close_section();
+  if (op_ret == 0) {
+    s->formatter->open_object_section("UpdateRoleResponse");
+    s->formatter->open_object_section("UpdateRoleResult");
+    s->formatter->open_object_section("ResponseMetadata");
+    s->formatter->dump_string("RequestId", s->trans_id);
+    s->formatter->close_section();
+    s->formatter->close_section();
+  }
 }
 
 static bool validate_policy_arn(const std::string& arn, std::string& err)
@@ -1093,7 +1107,7 @@ void RGWAttachRolePolicy_IAM::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -1121,7 +1135,8 @@ void RGWAttachRolePolicy_IAM::execute(optional_yield y)
         if (!policies.arns.insert(policy_arn).second) {
           return 0;
         }
-        return role->update(this, y);
+        constexpr bool exclusive = false;
+        return role->store_info(this, exclusive, y);
       });
 
   if (op_ret == 0) {
@@ -1192,7 +1207,7 @@ void RGWDetachRolePolicy_IAM::execute(optional_yield y)
     s->info.args.remove("Version");
 
     op_ret = forward_iam_request_to_master(this, site, s->user->get_info(),
-                                           bl_post_body, parser, s->info, y);
+                                           bl_post_body, parser, s->info, s->err, y);
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "ERROR: forward_iam_request_to_master failed with error code: " << op_ret << dendl;
       return;
@@ -1211,7 +1226,9 @@ void RGWDetachRolePolicy_IAM::execute(optional_yield y)
           return -ERR_NO_SUCH_ENTITY;
         }
         policies.arns.erase(p);
-        return role->update(this, y);
+
+        constexpr bool exclusive = false;
+        return role->store_info(this, exclusive, y);
       });
 
   if (op_ret == 0) {

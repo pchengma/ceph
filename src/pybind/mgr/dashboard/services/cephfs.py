@@ -14,8 +14,11 @@ logger = logging.getLogger('cephfs')
 
 class CephFS(object):
     @classmethod
-    def list_filesystems(cls):
+    def list_filesystems(cls, all_info=False):
         fsmap = mgr.get("fs_map")
+
+        if all_info:
+            return fsmap['filesystems']
         return [{'id': fs['id'], 'name': fs['mdsmap']['fs_name']}
                 for fs in fsmap['filesystems']]
 
@@ -298,3 +301,12 @@ class CephFS(object):
             rfiles = int(self.cfs.getxattr(path, 'ceph.dir.rfiles'))
             rsubdirs = int(self.cfs.getxattr(path, 'ceph.dir.rsubdirs'))
         return {'bytes': rbytes, 'files': rfiles, 'subdirs': rsubdirs}
+
+    def rename_path(self, src_path, dst_path) -> None:
+        """
+        Rename a file or directory.
+        :param src: the path to the existing file or directory.
+        :param dst: the new name of the file or directory.
+        """
+        logger.info("Renaming: from %s to %s", src_path, dst_path)
+        self.cfs.rename(src_path, dst_path)

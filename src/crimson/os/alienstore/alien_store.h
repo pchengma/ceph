@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -10,6 +10,7 @@
 #include "os/ObjectStore.h"
 #include "osd/osd_types.h"
 
+#include "crimson/common/gated.h"
 #include "crimson/os/alienstore/thread_pool.h"
 #include "crimson/os/futurized_collection.h"
 #include "crimson/os/futurized_store.h"
@@ -35,7 +36,8 @@ public:
 
   base_errorator::future<bool> exists(
     CollectionRef c,
-    const ghobject_t& oid) final;
+    const ghobject_t& oid,
+    uint32_t op_flags = 0) final;
   mkfs_ertr::future<> mkfs(uuid_d new_osd_fsid) final;
   read_errorator::future<ceph::bufferlist> read(CollectionRef c,
                                    const ghobject_t& oid,
@@ -48,29 +50,35 @@ public:
 						 uint32_t op_flags = 0) final;
 					      
 
-  get_attr_errorator::future<ceph::bufferlist> get_attr(CollectionRef c,
-                                            const ghobject_t& oid,
-                                            std::string_view name) const final;
-  get_attrs_ertr::future<attrs_t> get_attrs(CollectionRef c,
-                                     const ghobject_t& oid) final;
+  get_attr_errorator::future<ceph::bufferlist> get_attr(
+    CollectionRef c,
+    const ghobject_t& oid,
+    std::string_view name,
+    uint32_t op_flags = 0) const final;
+  get_attrs_ertr::future<attrs_t> get_attrs(
+    CollectionRef c,
+    const ghobject_t& oid,
+    uint32_t op_flags = 0) final;
 
   read_errorator::future<omap_values_t> omap_get_values(
     CollectionRef c,
     const ghobject_t& oid,
-    const omap_keys_t& keys) final;
-
-  /// Retrieves paged set of values > start (if present)
-  read_errorator::future<std::tuple<bool, omap_values_t>> omap_get_values(
-    CollectionRef c,           ///< [in] collection
-    const ghobject_t &oid,     ///< [in] oid
-    const std::optional<std::string> &start ///< [in] start, empty for begin
-    ) final; ///< @return <done, values> values.empty() iff done
+    const omap_keys_t& keys,
+    uint32_t op_flags = 0) final;
 
   seastar::future<std::tuple<std::vector<ghobject_t>, ghobject_t>> list_objects(
     CollectionRef c,
     const ghobject_t& start,
     const ghobject_t& end,
-    uint64_t limit) const final;
+    uint64_t limit,
+    uint32_t op_flags = 0) const final;
+
+  read_errorator::future<ObjectStore::omap_iter_ret_t> omap_iterate(
+    CollectionRef c,
+    const ghobject_t &oid,
+    ObjectStore::omap_iter_seek_t start_from,
+    omap_iterate_cb_t callback,
+    uint32_t op_flags = 0) final;
 
   seastar::future<CollectionRef> create_new_collection(const coll_t& cid) final;
   seastar::future<CollectionRef> open_collection(const coll_t& cid) final;
@@ -96,24 +104,29 @@ public:
   unsigned get_max_attr_name_length() const final;
   seastar::future<struct stat> stat(
     CollectionRef,
-    const ghobject_t&) final;
+    const ghobject_t&,
+    uint32_t op_flags = 0) final;
+  seastar::future<std::string> get_default_device_class() final;
   get_attr_errorator::future<ceph::bufferlist> omap_get_header(
     CollectionRef,
-    const ghobject_t&) final;
+    const ghobject_t&,
+    uint32_t) final;
   read_errorator::future<std::map<uint64_t, uint64_t>> fiemap(
     CollectionRef,
     const ghobject_t&,
     uint64_t off,
-    uint64_t len) final;
+    uint64_t len,
+    uint32_t op_flags) final;
 
   FuturizedStore::Shard& get_sharded_store() final {
     return *this;
   }
 
 private:
+
   template <class... Args>
   auto do_with_op_gate(Args&&... args) const {
-    return seastar::with_gate(op_gate,
+    return op_gates.simple_dispatch("AlienStore::do_with_op_gate",
       // perfect forwarding in lambda's closure isn't available in C++17
       // using tuple as workaround; see: https://stackoverflow.com/a/49902823
       [args = std::make_tuple(std::forward<Args>(args)...)] () mutable {
@@ -130,7 +143,30 @@ private:
   uint64_t used_bytes = 0;
   std::unique_ptr<ObjectStore> store;
   std::unique_ptr<CephContext> cct;
-  mutable seastar::gate op_gate;
+  mutable crimson::common::gate_per_shard op_gates;
+
+  /**
+   * coll_map
+   *
+   * Contains a reference to every CollectionRef returned to the upper layer.
+   * It's important that ObjectStore::CollectionHandle instances (in particular,
+   * those from BlueStore) not be released from seastar reactor threads.
+   * Keeping a reference here and breaking the
+   * CollectionRef->ObjectStore::CollectionHandle links in AlienStore::stop()
+   * ensures that all CollectionHandle's are released in the alien thread pool.
+   *
+   * Long term, we probably want to drop this map.  To do that two things need
+   * to happen:
+   * 1. ~AlienCollection() needs to submit the ObjectStore::CollectionHandle
+   *    instance to the alien thread pool to be released.
+   * 2. OSD shutdown needs to *guarantee* that all outstanding CollectionRefs
+   *    are released before unmounting and stopping the store.
+   *
+   * coll_map is accessed exclusively from alien threadpool threads under the
+   * coll_map_lock.
+   */
+  std::mutex coll_map_lock;
   std::unordered_map<coll_t, CollectionRef> coll_map;
+  CollectionRef get_alien_coll_ref(ObjectStore::CollectionHandle c);
 };
 }

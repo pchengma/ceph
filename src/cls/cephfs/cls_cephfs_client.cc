@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -85,6 +86,7 @@ int ClsCephFSClient::fetch_inode_accumulate_result(
   inode_backtrace_t *backtrace,
   file_layout_t *layout,
   std::string *symlink,
+  inodeno_t *remote_inode,
   AccumulateResult *result)
 {
   ceph_assert(backtrace != NULL);
@@ -122,6 +124,11 @@ int ClsCephFSClient::fetch_inode_accumulate_result(
   int symlink_r = 0;
   bufferlist symlink_bl;
   op.getxattr("symlink", &symlink_bl, &symlink_r);
+  op.set_op_flags2(librados::OP_FAILOK);
+
+  int remote_inode_r = 0;
+  bufferlist remote_inode_bl;
+  op.getxattr("remote_inode", &remote_inode_bl, &remote_inode_r);
   op.set_op_flags2(librados::OP_FAILOK);
 
   bufferlist op_bl;
@@ -197,6 +204,16 @@ int ClsCephFSClient::fetch_inode_accumulate_result(
     try {
       auto q = symlink_bl.cbegin();
       decode(*symlink, q);
+    } catch (ceph::buffer::error &e) {
+      return -EINVAL;
+    }
+  }
+
+  // Deserialize remote_inode
+  if (remote_inode_bl.length()) {
+    try {
+      auto q = remote_inode_bl.cbegin();
+      decode(*remote_inode, q);
     } catch (ceph::buffer::error &e) {
       return -EINVAL;
     }

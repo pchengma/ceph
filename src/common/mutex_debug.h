@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -40,7 +41,7 @@ protected:
   bool backtrace; // gather backtrace on lock acquisition
 
   std::atomic<int> nlock = 0;
-  std::thread::id locked_by = {};
+  std::atomic<std::thread::id> locked_by = {};
 
   bool _enable_lockdep() const {
     return lockdep && g_lockdep;
@@ -58,8 +59,12 @@ public:
     return (nlock > 0);
   }
   bool is_locked_by_me() const {
-    return nlock.load(std::memory_order_acquire) > 0 && locked_by == std::this_thread::get_id();
+    if (nlock.load(std::memory_order_acquire) <= 0) {
+      return false;
+    }
+    return locked_by.load(std::memory_order_relaxed) == std::this_thread::get_id();
   }
+
   operator bool() const {
     return is_locked_by_me();
   }
@@ -150,39 +155,37 @@ public:
   }
 
   void _post_lock() {
-    if (!recursive)
-      ceph_assert(nlock == 0);
-    locked_by = std::this_thread::get_id();
+    if (!recursive) {
+      ceph_assert(nlock.load(std::memory_order_relaxed) == 0);
+    }
+    locked_by.store(std::this_thread::get_id(), std::memory_order_relaxed);
     nlock.fetch_add(1, std::memory_order_release);
   }
 
   void _pre_unlock() {
+    const int current_nlock = nlock.load(std::memory_order_relaxed);
     if (recursive) {
-      ceph_assert(nlock > 0);
+      ceph_assert(current_nlock > 0);
     } else {
-      ceph_assert(nlock == 1);
+      ceph_assert(current_nlock == 1);
     }
-    ceph_assert(locked_by == std::this_thread::get_id());
-    if (nlock == 1)
-      locked_by = std::thread::id();
+    ceph_assert(locked_by.load(std::memory_order_relaxed) == std::this_thread::get_id());
+    if (current_nlock == 1)
+      locked_by.store(std::thread::id(), std::memory_order_relaxed);
     nlock.fetch_sub(1, std::memory_order_release);
   }
 
   bool try_lock(bool no_lockdep = false) {
-    bool locked = try_lock_impl();
-    if (locked) {
-      if (enable_lockdep(no_lockdep))
-	_locked();
-      _post_lock();
-    }
-    return locked;
+    ceph_assert(recursive || !is_locked_by_me());
+    return _try_lock(no_lockdep);
   }
 
   void lock(bool no_lockdep = false) {
+    ceph_assert(recursive || !is_locked_by_me());
     if (enable_lockdep(no_lockdep))
       _will_lock(recursive);
 
-    if (try_lock(no_lockdep))
+    if (_try_lock(no_lockdep))
       return;
 
     lock_impl();
@@ -198,6 +201,16 @@ public:
     unlock_impl();
   }
 
+private:
+  bool _try_lock(bool no_lockdep) {
+    bool locked = try_lock_impl();
+    if (locked) {
+      if (enable_lockdep(no_lockdep))
+	_locked();
+      _post_lock();
+    }
+    return locked;
+  }
 };
 
 

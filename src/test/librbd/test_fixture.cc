@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "common/Cond.h"
 #include "test/librbd/test_fixture.h"
 #include "test/librbd/test_support.h"
@@ -17,6 +18,7 @@
 #include "test/librados/test.h"
 #include "test/librados/test_cxx.h"
 #include <iostream>
+#include <shared_mutex> // for std::shared_lock
 #include <sstream>
 #include <stdlib.h>
 

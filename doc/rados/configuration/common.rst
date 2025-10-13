@@ -188,6 +188,16 @@ Logging`_.
 Example ceph.conf
 =================
 
+Note that since the Mimic release the Monitors maintain a database of option
+settings: the *central config*.  Node-local ``ceph.conf`` files are still
+supported, but in most cases need only contain the first three lines shown
+below.  Maintaining full ``ceph.conf`` files across cluster nodes can be
+tedious and prone to omission and error, especially when daemons are containerized.
+The below file is provided as a reference example. Clusters running recent
+releases are best managed primary by central config, with a minimal ``ceph.conf``
+file that defines only how to reach the Monitors and thus rarely requires
+modification.
+
 .. literalinclude:: demo-ceph.conf
    :language: ini
 
@@ -200,7 +210,7 @@ Naming Clusters (deprecated)
 
 Each Ceph cluster has an internal name. This internal name is used as part of
 configuration, and as part of "log file" names as well as part of directory
-names and as part of mountpoint names. This name defaults to "ceph". Previous
+names and as part of mount point names. This name defaults to "ceph". Previous
 releases of Ceph allowed one to specify a custom name instead, for example
 "ceph2". This option was intended to facilitate the running of multiple logical
 clusters on the same physical hardware, but in practice it was rarely

@@ -1,10 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include <string>
 #include <list>
+#include <vector>
 #include <boost/container/flat_map.hpp>
 #include "common/ceph_time.h"
 #include "common/Formatter.h"
@@ -17,6 +18,8 @@
 #define CEPH_RGW_UPDATE 'u' // value 117
 #define CEPH_RGW_DIR_SUGGEST_LOG_OP  0x80
 #define CEPH_RGW_DIR_SUGGEST_OP_MASK 0x7f
+
+#define CLS_RGW_ERR_BUSY_RESHARDING 2300 // also in rgw_common.h, don't change!
 
 constexpr uint64_t CEPH_RGW_DEFAULT_TAG_TIMEOUT = 120; // in seconds
 
@@ -73,7 +76,7 @@ struct rgw_zone_set {
     ceph::decode(entries, bl);
   }
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_zone_set*>& o);
+  static std::list<rgw_zone_set> generate_test_instances();
   void insert(const std::string& zone, std::optional<std::string> location_key);
   bool exists(const std::string& zone, std::optional<std::string> location_key) const;
 };
@@ -167,7 +170,7 @@ struct rgw_bucket_pending_info {
   }
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<rgw_bucket_pending_info*>& o);
+  static std::list<rgw_bucket_pending_info> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_pending_info)
 
@@ -197,20 +200,17 @@ inline std::ostream& operator<<(std::ostream& out, RGWObjCategory c) {
 }
 
 struct rgw_bucket_dir_entry_meta {
-  RGWObjCategory category;
-  uint64_t size;
+  RGWObjCategory category = RGWObjCategory::None;
+  uint64_t size = 0;
   ceph::real_time mtime;
   std::string etag;
   std::string owner;
   std::string owner_display_name;
   std::string content_type;
-  uint64_t accounted_size;
+  uint64_t accounted_size = 0;
   std::string user_data;
   std::string storage_class;
-  bool appendable;
-
-  rgw_bucket_dir_entry_meta() :
-    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false) { }
+  bool appendable = false;
 
   void encode(ceph::buffer::list &bl) const {
     ENCODE_START(7, 3, bl);
@@ -252,7 +252,7 @@ struct rgw_bucket_dir_entry_meta {
   }
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<rgw_bucket_dir_entry_meta*>& o);
+  static std::list<rgw_bucket_dir_entry_meta> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_entry_meta)
 
@@ -352,7 +352,7 @@ struct rgw_bucket_entry_ver {
   }
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<rgw_bucket_entry_ver*>& o);
+  static std::list<rgw_bucket_entry_ver> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_entry_ver)
 
@@ -464,25 +464,24 @@ struct rgw_bucket_dir_entry {
 
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<rgw_bucket_dir_entry*>& o);
+  static std::list<rgw_bucket_dir_entry> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 
 enum class BIIndexType : uint8_t {
-  Invalid    = 0,
-  Plain      = 1,
-  Instance   = 2,
-  OLH        = 3,
+  Invalid        = 0,
+  Plain          = 1,
+  Instance       = 2,
+  OLH            = 3,
+  ReshardDeleted = 4,
 };
 
 struct rgw_bucket_category_stats;
 
 struct rgw_cls_bi_entry {
-  BIIndexType type;
+  BIIndexType type = BIIndexType::Invalid;
   std::string idx;
   ceph::buffer::list data;
-
-  rgw_cls_bi_entry() : type(BIIndexType::Invalid) {}
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);
@@ -504,22 +503,28 @@ struct rgw_cls_bi_entry {
 
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key = NULL);
-  static void generate_test_instances(std::list<rgw_cls_bi_entry*>& o);
+  static std::list<rgw_cls_bi_entry> generate_test_instances();
   bool get_info(cls_rgw_obj_key *key, RGWObjCategory *category,
-		rgw_bucket_category_stats *accounted_stats);
+		rgw_bucket_category_stats *accounted_stats) const;
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_entry)
 
 enum OLHLogOp {
   CLS_RGW_OLH_OP_UNKNOWN         = 0,
+  // link OLH entry to a specific object version
   CLS_RGW_OLH_OP_LINK_OLH        = 1,
+  // deletes OLH object from the data pool and removes OLH entry from the bucket index
   CLS_RGW_OLH_OP_UNLINK_OLH      = 2, /* object does not exist */
+  // remove a specific instance of an object, such as <obj_name>.<obj_version>
   CLS_RGW_OLH_OP_REMOVE_INSTANCE = 3,
 };
 
 struct rgw_bucket_olh_log_entry {
   uint64_t epoch;
   OLHLogOp op;
+  // Once the OLH Log Entries are processed for a given epoch (by apply_olh_log()) the corresponding olh.pending.*
+  // xattrs are removed from the corresponding OLH object (in the data pool). The pending xattrs to be removed
+  // are those that match op_tag.
   std::string op_tag;
   cls_rgw_obj_key key;
   bool delete_marker;
@@ -547,7 +552,7 @@ struct rgw_bucket_olh_log_entry {
     decode(delete_marker, bl);
     DECODE_FINISH(bl);
   }
-  static void generate_test_instances(std::list<rgw_bucket_olh_log_entry*>& o);
+  static std::list<rgw_bucket_olh_log_entry> generate_test_instances();
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
 };
@@ -556,8 +561,17 @@ WRITE_CLASS_ENCODER(rgw_bucket_olh_log_entry)
 struct rgw_bucket_olh_entry {
   cls_rgw_obj_key key;
   bool delete_marker;
+  // the epoch represents the latest modification timestamp for the S3 object identified by the key;
   uint64_t epoch;
+  // epoch -> op list mapping: stores pending modifications to the S3 object identified by the key;
+  // this is basically a per-S3-object WAL whose main purpose is crash safety and idempotency; operations
+  // PUT/DELETE that modify S3 object history write to this log first; it is being
+  // replayed by the apply_olh_log() on the same zone;
+  // usually there's only 1 op per epoch key but more than 1 op would be associated with an epoch in case
+  // of versioned DELETE for the current instance: [remove instance, link]
   std::map<uint64_t, std::vector<struct rgw_bucket_olh_log_entry> > pending_log;
+  // unique tag for this entry; it remains the same until the entry is deleted (like when versioning
+  // is suspended) and then re-created (by re-enabling versioning);
   std::string tag;
   bool exists;
   bool pending_removal;
@@ -588,9 +602,28 @@ struct rgw_bucket_olh_entry {
   }
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<rgw_bucket_olh_entry*>& o);
+  static std::list<rgw_bucket_olh_entry> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_olh_entry)
+
+struct rgw_bucket_deleted_entry {
+  cls_rgw_obj_key key;
+  rgw_bucket_deleted_entry() {}
+  void encode(ceph::buffer::list &bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(key, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator &bl) {
+    DECODE_START(1, bl);
+    decode(key, bl);
+    DECODE_FINISH(bl);
+  }
+  void dump(ceph::Formatter *f) const;
+  void decode_json(JSONObj *obj);
+  static std::list<rgw_bucket_deleted_entry> generate_test_instances();
+};
+WRITE_CLASS_ENCODER(rgw_bucket_deleted_entry)
 
 struct rgw_bi_log_entry {
   std::string id;
@@ -656,7 +689,7 @@ struct rgw_bi_log_entry {
   }
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<rgw_bi_log_entry*>& o);
+  static std::list<rgw_bi_log_entry> generate_test_instances();
 
   bool is_versioned() {
     return ((bilog_flags & RGW_BILOG_FLAG_VERSIONED_OP) != 0);
@@ -698,7 +731,7 @@ struct rgw_bucket_category_stats {
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_bucket_category_stats*>& o);
+  static std::list<rgw_bucket_category_stats> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_category_stats)
 
@@ -717,7 +750,8 @@ inline bool operator!=(const rgw_bucket_category_stats& lhs,
 enum class cls_rgw_reshard_status : uint8_t {
   NOT_RESHARDING  = 0,
   IN_PROGRESS     = 1,
-  DONE            = 2
+  DONE            = 2,
+  IN_LOGRECORD    = 3
 };
 std::ostream& operator<<(std::ostream&, cls_rgw_reshard_status);
 
@@ -726,6 +760,8 @@ inline std::string to_string(const cls_rgw_reshard_status status)
   switch (status) {
   case cls_rgw_reshard_status::NOT_RESHARDING:
     return "not-resharding";
+  case cls_rgw_reshard_status::IN_LOGRECORD:
+    return "in-logrecord";
   case cls_rgw_reshard_status::IN_PROGRESS:
     return "in-progress";
   case cls_rgw_reshard_status::DONE:
@@ -766,7 +802,7 @@ struct cls_rgw_bucket_instance_entry {
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<cls_rgw_bucket_instance_entry*>& o);
+  static std::list<cls_rgw_bucket_instance_entry> generate_test_instances();
 
   void clear() {
     reshard_status = RESHARD_STATUS::NOT_RESHARDING;
@@ -778,6 +814,10 @@ struct cls_rgw_bucket_instance_entry {
 
   bool resharding() const {
     return reshard_status != RESHARD_STATUS::NOT_RESHARDING;
+  }
+
+  bool resharding_in_logrecord() const {
+    return reshard_status == RESHARD_STATUS::IN_LOGRECORD;
   }
 
   bool resharding_in_progress() const {
@@ -801,11 +841,13 @@ struct rgw_bucket_dir_header {
   std::string max_marker;
   cls_rgw_bucket_instance_entry new_instance;
   bool syncstopped;
+  uint32_t reshardlog_entries;
 
-  rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false) {}
+  rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false),
+                            reshardlog_entries(0) {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(7, 2, bl);
+    ENCODE_START(8, 2, bl);
     encode(stats, bl);
     encode(tag_timeout, bl);
     encode(ver, bl);
@@ -813,10 +855,11 @@ struct rgw_bucket_dir_header {
     encode(max_marker, bl);
     encode(new_instance, bl);
     encode(syncstopped,bl);
+    encode(reshardlog_entries, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(6, 2, 2, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(8, 2, 2, bl);
     decode(stats, bl);
     if (struct_v > 2) {
       decode(tag_timeout, bl);
@@ -840,17 +883,28 @@ struct rgw_bucket_dir_header {
     if (struct_v >= 7) {
       decode(syncstopped,bl);
     }
+    if (struct_v >= 8) {
+      decode(reshardlog_entries, bl);
+    } else {
+      reshardlog_entries = 0;
+    }
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_bucket_dir_header*>& o);
+  static std::list<rgw_bucket_dir_header> generate_test_instances();
 
   bool resharding() const {
     return new_instance.resharding();
   }
+
+  bool resharding_in_logrecord() const {
+    return new_instance.resharding_in_logrecord();
+  }
+
   bool resharding_in_progress() const {
     return new_instance.resharding_in_progress();
   }
+
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_header)
 
@@ -871,7 +925,7 @@ struct rgw_bucket_dir {
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_bucket_dir*>& o);
+  static std::list<rgw_bucket_dir> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir)
 
@@ -903,7 +957,7 @@ struct rgw_s3select_usage_data {
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_s3select_usage_data*>& o);
+  static std::list<rgw_s3select_usage_data> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_s3select_usage_data)
 
@@ -941,7 +995,7 @@ struct rgw_usage_data {
     successful_ops += usage.successful_ops;
   }
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_usage_data*>& o);
+  static std::list<rgw_usage_data> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_usage_data)
 
@@ -1038,7 +1092,7 @@ struct rgw_usage_log_entry {
   }
 
   void dump(ceph::Formatter* f) const;
-  static void generate_test_instances(std::list<rgw_usage_log_entry*>& o);
+  static std::list<rgw_usage_log_entry> generate_test_instances();
 
 };
 WRITE_CLASS_ENCODER(rgw_usage_log_entry)
@@ -1058,7 +1112,7 @@ struct rgw_usage_log_info {
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter* f) const;
-  static void generate_test_instances(std::list<rgw_usage_log_info*>& o);
+  static std::list<rgw_usage_log_info> generate_test_instances();
 
   rgw_usage_log_info() {}
 };
@@ -1095,7 +1149,7 @@ struct rgw_user_bucket {
     return false;
   }
   void dump(ceph::Formatter* f) const;
-  static void generate_test_instances(std::list<rgw_user_bucket*>& o);
+  static std::list<rgw_user_bucket> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(rgw_user_bucket)
 
@@ -1138,12 +1192,14 @@ struct cls_rgw_obj {
     f->dump_string("key", loc);
     f->dump_string("instance", key.instance);
   }
-  static void generate_test_instances(std::list<cls_rgw_obj*>& ls) {
-    ls.push_back(new cls_rgw_obj);
-    ls.push_back(new cls_rgw_obj);
-    ls.back()->pool = "mypool";
-    ls.back()->key.name = "myoid";
-    ls.back()->loc = "mykey";
+  static std::list<cls_rgw_obj> generate_test_instances() {
+    std::list<cls_rgw_obj> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().pool = "mypool";
+    ls.back().key.name = "myoid";
+    ls.back().loc = "mykey";
+    return ls;
   }
 
   size_t estimate_encoded_size() const {
@@ -1159,16 +1215,14 @@ struct cls_rgw_obj {
 WRITE_CLASS_ENCODER(cls_rgw_obj)
 
 struct cls_rgw_obj_chain {
-  std::list<cls_rgw_obj> objs;
-
-  cls_rgw_obj_chain() {}
+  std::vector<cls_rgw_obj> objs;
 
   void push_obj(const std::string& pool, const cls_rgw_obj_key& key, const std::string& loc) {
     cls_rgw_obj obj;
     obj.pool = pool;
     obj.key = key;
     obj.loc = loc;
-    objs.push_back(obj);
+    objs.push_back(std::move(obj));
   }
 
   void encode(ceph::buffer::list& bl) const {
@@ -1185,15 +1239,17 @@ struct cls_rgw_obj_chain {
 
   void dump(ceph::Formatter *f) const {
     f->open_array_section("objs");
-    for (std::list<cls_rgw_obj>::const_iterator p = objs.begin(); p != objs.end(); ++p) {
+    for (const auto& o : objs) {
       f->open_object_section("obj");
-      p->dump(f);
+      o.dump(f);
       f->close_section();
     }
     f->close_section();
   }
-  static void generate_test_instances(std::list<cls_rgw_obj_chain*>& ls) {
-    ls.push_back(new cls_rgw_obj_chain);
+  static std::list<cls_rgw_obj_chain> generate_test_instances() {
+    std::list<cls_rgw_obj_chain> ls;
+    ls.emplace_back();
+    return ls;
   }
 
   bool empty() {
@@ -1243,12 +1299,14 @@ struct cls_rgw_gc_obj_info
     f->close_section();
     f->dump_stream("time") << time;
   }
-  static void generate_test_instances(std::list<cls_rgw_gc_obj_info*>& ls) {
-    ls.push_back(new cls_rgw_gc_obj_info);
-    ls.push_back(new cls_rgw_gc_obj_info);
-    ls.back()->tag = "footag";
+  static std::list<cls_rgw_gc_obj_info> generate_test_instances() {
+    std::list<cls_rgw_gc_obj_info> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().tag = "footag";
     ceph_timespec ts{ceph_le32(21), ceph_le32(32)};
-    ls.back()->time = ceph::real_clock::from_ceph_timespec(ts);
+    ls.back().time = ceph::real_clock::from_ceph_timespec(ts);
+    return ls;
   }
 
   size_t estimate_encoded_size() const {
@@ -1294,7 +1352,7 @@ struct cls_rgw_lc_obj_head
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<cls_rgw_lc_obj_head*>& ls);
+  static std::list<cls_rgw_lc_obj_head> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_lc_obj_head)
 
@@ -1327,7 +1385,7 @@ struct cls_rgw_lc_entry {
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<cls_rgw_lc_entry*>& ls);
+  static std::list<cls_rgw_lc_entry> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_rgw_lc_entry);
 
@@ -1369,7 +1427,7 @@ struct cls_rgw_reshard_entry
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(2, bl);
+    DECODE_START(3, bl);
     decode(time, bl);
     decode(tenant, bl);
     decode(bucket_name, bl);
@@ -1389,7 +1447,7 @@ struct cls_rgw_reshard_entry
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<cls_rgw_reshard_entry*>& o);
+  static std::list<cls_rgw_reshard_entry> generate_test_instances();
 
   static void generate_key(const std::string& tenant, const std::string& bucket_name, std::string *key);
   void get_key(std::string *key) const;

@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 #include <pthread.h>
 #include "include/buffer.h"
 #include "kv/KeyValueDB.h"
@@ -15,7 +15,6 @@
 
 using namespace std;
 
-const string CONTROL_PREFIX = "CONTROL";
 const string PRIMARY_PREFIX = "PREFIX";
 const int NUM_COPIES = 100;
 const int NUM_THREADS = 30;

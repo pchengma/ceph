@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <map>
 #include <random>
@@ -21,6 +21,8 @@
 #include "crimson/net/Dispatcher.h"
 #include "crimson/net/Messenger.h"
 #include "test/crimson/ctest_utils.h"
+
+#include <boost/random/uniform_int.hpp>
 
 using namespace std::chrono_literals;
 namespace bpo = boost::program_options;
@@ -447,15 +449,16 @@ class SyntheticWorkload {
    }
 
    seastar::future<> wait_for_done() {
-     int i = 0;
-     return seastar::do_until(
-       [this] { return !dispatcher.get_num_pending_msgs(); },
-       [this, &i]
-     {
-       if (i++ % 50 == 0){
-         print_internal_state(true);
-       }
-       return seastar::sleep(100ms);
+     return seastar::do_with(0, [this] (int &i) {
+       return seastar::do_until(
+         [this] { return !dispatcher.get_num_pending_msgs(); },
+         [this, &i] {
+           if (i++ % 50 == 0) {
+             print_internal_state(true);
+           }
+           return seastar::sleep(100ms);
+         }
+       );
      }).then([this] {
        return seastar::do_for_each(available_servers, [] (auto server) {
 	 if (verbose) {

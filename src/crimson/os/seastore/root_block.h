@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -41,7 +41,7 @@ struct RootBlock : CachedExtent {
   CachedExtent* lba_root_node = nullptr;
   CachedExtent* backref_root_node = nullptr;
 
-  RootBlock() : CachedExtent(zero_length_t()) {};
+  RootBlock() : CachedExtent(root_construct_t()) {};
 
   RootBlock(const RootBlock &rhs)
     : CachedExtent(rhs),
@@ -50,7 +50,7 @@ struct RootBlock : CachedExtent {
       backref_root_node(nullptr)
   {}
 
-  void on_rewrite(CachedExtent&, extent_len_t) final {}
+  void on_rewrite(Transaction&, CachedExtent&, extent_len_t) final {}
 
   CachedExtentRef duplicate_for_write(Transaction&) final {
     return CachedExtentRef(new RootBlock(*this));

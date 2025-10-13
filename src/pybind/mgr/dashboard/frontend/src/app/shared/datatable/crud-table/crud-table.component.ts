@@ -1,6 +1,5 @@
 import { Component, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 
 import _ from 'lodash';
 import { Observable } from 'rxjs';
@@ -15,8 +14,9 @@ import { FinishedTask } from '../../models/finished-task';
 import { Permission, Permissions } from '../../models/permissions';
 import { AuthStorageService } from '../../services/auth-storage.service';
 import { TaskWrapperService } from '../../services/task-wrapper.service';
-import { ModalService } from '../../services/modal.service';
-import { CriticalConfirmationModalComponent } from '../../components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '../../components/delete-confirmation-modal/delete-confirmation-modal.component';
+import { ModalCdsService } from '../../services/modal-cds.service';
+import { BaseModal } from 'carbon-components-angular';
 
 @Component({
   selector: 'cd-crud-table',
@@ -40,7 +40,7 @@ export class CRUDTableComponent implements OnInit {
   permission: Permission;
   selection = new CdTableSelection();
   expandedRow: { [key: string]: any } = {};
-  modalRef: NgbModalRef;
+  modalRef: BaseModal;
   tabs = {};
   resource: string;
   modalState = {};
@@ -52,7 +52,7 @@ export class CRUDTableComponent implements OnInit {
     private taskWrapper: TaskWrapperService,
     private cephUserService: CephUserService,
     private activatedRoute: ActivatedRoute,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private router: Router
   ) {
     this.permissions = this.authStorageService.getPermissions();
@@ -118,22 +118,25 @@ export class CRUDTableComponent implements OnInit {
   }
 
   delete() {
-    const selectedKey = this.selection.first()[this.meta.columnKey];
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    let selectedKeys: string[] = [];
+    this.selection.selected.forEach((item: any) => {
+      selectedKeys.push(item[this.meta.columnKey]);
+    });
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: $localize`${this.meta.resource}`,
-      itemNames: [selectedKey],
+      itemNames: selectedKeys,
       submitAction: () => {
         this.taskWrapper
           .wrapTaskAroundCall({
-            task: new FinishedTask('crud-component/id', selectedKey),
-            call: this.dataGatewayService.delete(this.resource, selectedKey)
+            task: new FinishedTask('crud-component/id', selectedKeys),
+            call: this.dataGatewayService.delete(this.resource, selectedKeys)
           })
           .subscribe({
             error: () => {
-              this.modalRef.close();
+              this.modalRef.closeModal();
             },
             complete: () => {
-              this.modalRef.close();
+              this.modalRef.closeModal();
             }
           });
       }
@@ -173,7 +176,7 @@ export class CRUDTableComponent implements OnInit {
         showSubmit: true,
         showCancel: false,
         onSubmit: () => {
-          this.modalRef.close();
+          this.modalRef.closeModal();
         }
       };
       this.modalState['authExportData'] = data.trim();

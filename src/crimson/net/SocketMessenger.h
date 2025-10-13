@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -152,6 +153,18 @@ public:
   Interceptor *interceptor = nullptr;
 #endif
 
+  seastar::future<> mark_down(const entity_addr_t& a) final {
+    auto conn = lookup_conn(a);
+    if (conn) {
+      return seastar::smp::submit_to(
+	conn->get_shard_id(),
+	[conn=conn.get()] {
+	conn->mark_down();
+	return seastar::now();
+      }).then([conn] { return seastar::now(); });
+    }
+    return seastar::now();
+  }
 private:
   seastar::future<> accept(SocketFRef &&, const entity_addr_t &);
 

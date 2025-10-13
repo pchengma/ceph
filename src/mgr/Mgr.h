@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,31 +18,28 @@
 // Python.h comes first because otherwise it clobbers ceph's assert
 #include <Python.h>
 
-#include "mds/FSMap.h"
-#include "messages/MFSMap.h"
-#include "msg/Messenger.h"
 #include "auth/Auth.h"
 #include "common/Finisher.h"
 #include "mon/MgrMap.h"
+#include "msg/Dispatcher.h"
+#include "msg/Messenger.h"
 
-#include "DaemonServer.h"
-#include "PyModuleRegistry.h"
-
-#include "DaemonState.h"
 #include "ClusterState.h"
+#include "DaemonServer.h"
+#include "DaemonState.h"
+#include "PyModuleRegistry.h"
 
 class MCommand;
 class MMgrDigest;
 class MLog;
 class MServiceMap;
 class Objecter;
-class Client;
+class MFSMap;
 
 class Mgr : public AdminSocketHook {
 protected:
   MonClient *monc;
   Objecter  *objecter;
-  Client    *client;
   Messenger *client_messenger;
 
   mutable ceph::mutex lock = ceph::make_mutex("Mgr::lock");
@@ -74,7 +72,7 @@ public:
   Mgr(MonClient *monc_, const MgrMap& mgrmap,
       PyModuleRegistry *py_module_registry_,
       Messenger *clientm_, Objecter *objecter_,
-      Client *client_, LogChannelRef clog_, LogChannelRef audit_clog_);
+      LogChannelRef clog_, LogChannelRef audit_clog_);
   ~Mgr();
 
   bool is_initialized() const {return initialized;}
@@ -91,7 +89,7 @@ public:
 
   bool got_mgr_map(const MgrMap& m);
 
-  bool ms_dispatch2(const ceph::ref_t<Message>& m);
+  Dispatcher::dispatch_result_t ms_dispatch2(const ceph::ref_t<Message>& m);
 
   void background_init(Context *completion);
 

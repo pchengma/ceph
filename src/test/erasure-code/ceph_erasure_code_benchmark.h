@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -50,9 +51,9 @@ class ErasureCodeBench {
 public:
   int setup(int argc, char** argv);
   int run();
-  int decode_erasures(const std::map<int, ceph::buffer::list> &all_chunks,
-		      const std::map<int, ceph::buffer::list> &chunks,
-		      unsigned i,
+  int decode_erasures(const shard_id_map<ceph::buffer::list> &all_chunks,
+		      const shard_id_map<ceph::buffer::list> &chunks,
+		      shard_id_t shard,
 		      unsigned want_erasures,
 		      ErasureCodeInterfaceRef erasure_code);
   int decode();

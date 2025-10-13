@@ -1,5 +1,6 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -32,7 +33,7 @@ extern "C" {
 #include "features.h"
 
 #define LIBRBD_VER_MAJOR 1
-#define LIBRBD_VER_MINOR 19
+#define LIBRBD_VER_MINOR 20
 #define LIBRBD_VER_EXTRA 0
 
 #define LIBRBD_VERSION(maj, min, extra) ((maj << 16) + (min << 8) + extra)
@@ -51,6 +52,8 @@ extern "C" {
 #define LIBRBD_SUPPORTS_WRITE_ZEROES 1
 #define LIBRBD_SUPPORTS_ENCRYPTION 1
 #define LIBRBD_SUPPORTS_ENCRYPTION_LOAD2 1
+#define LIBRBD_SUPPORTS_GROUP_SNAP_GET_INFO 1
+#define LIBRBD_SUPPORTS_DIFF_ITERATE3 1
 
 #if __GNUC__ >= 4
   #define CEPH_RBD_API          __attribute__ ((visibility ("default")))
@@ -150,7 +153,9 @@ typedef struct {
 typedef enum {
   RBD_MIRROR_MODE_DISABLED, /* mirroring is disabled */
   RBD_MIRROR_MODE_IMAGE,    /* mirroring enabled on a per-image basis */
-  RBD_MIRROR_MODE_POOL      /* mirroring enabled on all journaled images */
+  RBD_MIRROR_MODE_POOL,     /* mirroring enabled on all journaled images */
+  RBD_MIRROR_MODE_INIT_ONLY /* mirroring is initialized but not enabled
+                               (default namespace only) */
 } rbd_mirror_mode_t;
 
 typedef enum {
@@ -185,7 +190,8 @@ typedef enum {
 typedef enum {
   RBD_MIRROR_IMAGE_DISABLING = 0,
   RBD_MIRROR_IMAGE_ENABLED = 1,
-  RBD_MIRROR_IMAGE_DISABLED = 2
+  RBD_MIRROR_IMAGE_DISABLED = 2,
+  RBD_MIRROR_IMAGE_CREATING = 3
 } rbd_mirror_image_state_t;
 
 typedef struct {
@@ -249,10 +255,30 @@ typedef enum {
   RBD_GROUP_SNAP_STATE_COMPLETE
 } rbd_group_snap_state_t;
 
+typedef enum {
+  RBD_GROUP_SNAP_NAMESPACE_TYPE_USER = 0
+} rbd_group_snap_namespace_type_t;
+
+typedef struct {
+  char *image_name;
+  int64_t pool_id;
+  uint64_t snap_id;
+} rbd_group_image_snap_info_t;
+
 typedef struct {
   char *name;
   rbd_group_snap_state_t state;
 } rbd_group_snap_info_t;
+
+typedef struct {
+  char *id;
+  char *name;
+  char *image_snap_name;
+  rbd_group_snap_state_t state;
+  rbd_group_snap_namespace_type_t namespace_type;
+  size_t image_snaps_count;
+  rbd_group_image_snap_info_t *image_snaps;
+} rbd_group_snap_info2_t;
 
 typedef struct {
   int64_t group_pool;
@@ -378,6 +404,14 @@ typedef enum {
 /* rbd_write_zeroes / rbd_aio_write_zeroes flags */
 enum {
   RBD_WRITE_ZEROES_FLAG_THICK_PROVISION = (1U<<0), /* fully allocated zeroed extent */
+};
+
+/* rbd_diff_iterate3 flags */
+enum {
+  /* full history diff should include parent */
+  RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT = (1U<<0),
+  /* diff extents should cover whole object */
+  RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT = (1U<<1),
 };
 
 typedef enum {
@@ -561,6 +595,16 @@ CEPH_RBD_API int rbd_mirror_mode_get(rados_ioctx_t io_ctx,
                                      rbd_mirror_mode_t *mirror_mode);
 CEPH_RBD_API int rbd_mirror_mode_set(rados_ioctx_t io_ctx,
                                      rbd_mirror_mode_t mirror_mode);
+CEPH_RBD_API int rbd_mirror_remote_namespace_get(rados_ioctx_t io_ctx,
+                                                 char *remote_namespace,
+				                 size_t *max_len);
+/**
+ * The value can be set only if mirroring on io_ctx is disabled. The previously
+ * set value will be automatically reset to io_ctx's namespace when mirroring on
+ * io_ctx is disabled.
+ */
+CEPH_RBD_API int rbd_mirror_remote_namespace_set(rados_ioctx_t io_ctx,
+                                                 const char *remote_namespace);
 
 CEPH_RBD_API int rbd_mirror_uuid_get(rados_ioctx_t io_ctx,
                                      char *uuid, size_t *max_len);
@@ -1202,6 +1246,11 @@ CEPH_RBD_API int rbd_diff_iterate2(rbd_image_t image,
                                    uint8_t include_parent, uint8_t whole_object,
 		                   int (*cb)(uint64_t, size_t, int, void *),
                                    void *arg);
+CEPH_RBD_API int rbd_diff_iterate3(rbd_image_t image, uint64_t from_snap_id,
+                                   uint64_t ofs, uint64_t len, uint32_t flags,
+                                   int (*cb)(uint64_t, size_t, int, void *),
+                                   void *arg);
+
 CEPH_RBD_API ssize_t rbd_write(rbd_image_t image, uint64_t ofs, size_t len,
                                const char *buf);
 /*
@@ -1491,6 +1540,18 @@ CEPH_RBD_API int rbd_group_snap_list(rados_ioctx_t group_p,
 CEPH_RBD_API int rbd_group_snap_list_cleanup(rbd_group_snap_info_t *snaps,
                                              size_t group_snap_info_size,
                                              size_t num_entries);
+CEPH_RBD_API int rbd_group_snap_list2(rados_ioctx_t group_p,
+                                      const char *group_name,
+                                      rbd_group_snap_info2_t *snaps,
+                                      size_t *num_entries);
+CEPH_RBD_API void rbd_group_snap_list2_cleanup(rbd_group_snap_info2_t *snaps,
+                                               size_t num_entries);
+CEPH_RBD_API int rbd_group_snap_get_info(rados_ioctx_t group_p,
+                                         const char *group_name,
+                                         const char *snap_name,
+                                         rbd_group_snap_info2_t *group_snap);
+CEPH_RBD_API void rbd_group_snap_get_info_cleanup(
+    rbd_group_snap_info2_t *group_snap);
 CEPH_RBD_API int rbd_group_snap_rollback(rados_ioctx_t group_p,
                                          const char *group_name,
                                          const char *snap_name);

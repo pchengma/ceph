@@ -8,7 +8,7 @@ from ..container_types import CephContainer
 from ..context_getters import fetch_configs, get_config_and_keyring
 from ..daemon_form import register as register_daemon_form
 from ..daemon_identity import DaemonIdentity
-from ..constants import DEFAULT_NVMEOF_IMAGE
+from ceph.cephadm.images import DefaultImages
 from ..context import CephadmContext
 from ..data_utils import dict_get, is_fsid
 from ..deployment_utils import to_deployment_container
@@ -26,16 +26,20 @@ class CephNvmeof(ContainerDaemonForm):
 
     daemon_type = 'nvmeof'
     required_files = ['ceph-nvmeof.conf']
-    default_image = DEFAULT_NVMEOF_IMAGE
+    default_image = DefaultImages.NVMEOF.image_ref
 
     @classmethod
     def for_daemon_type(cls, daemon_type: str) -> bool:
         return cls.daemon_type == daemon_type
 
     def __init__(
-        self, ctx, fsid, daemon_id, config_json, image=DEFAULT_NVMEOF_IMAGE
-    ):
-        # type: (CephadmContext, str, Union[int, str], Dict, str) -> None
+        self,
+        ctx: CephadmContext,
+        fsid: str,
+        daemon_id: Union[int, str],
+        config_json: Dict,
+        image: str = DefaultImages.NVMEOF.image_ref,
+    ) -> None:
         self.ctx = ctx
         self.fsid = fsid
         self.daemon_id = daemon_id
@@ -48,8 +52,9 @@ class CephNvmeof(ContainerDaemonForm):
         self.validate()
 
     @classmethod
-    def init(cls, ctx, fsid, daemon_id):
-        # type: (CephadmContext, str, Union[int, str]) -> CephNvmeof
+    def init(
+        cls, ctx: CephadmContext, fsid: str, daemon_id: Union[int, str]
+    ) -> 'CephNvmeof':
         return cls(ctx, fsid, daemon_id, fetch_configs(ctx), ctx.image)
 
     @classmethod
@@ -63,7 +68,9 @@ class CephNvmeof(ContainerDaemonForm):
         return DaemonIdentity(self.fsid, self.daemon_type, self.daemon_id)
 
     @staticmethod
-    def _get_container_mounts(data_dir: str, log_dir: str) -> Dict[str, str]:
+    def _get_container_mounts(
+        data_dir: str, log_dir: str, mtls_dir: Optional[str] = None
+    ) -> Dict[str, str]:
         mounts = dict()
         mounts[os.path.join(data_dir, 'config')] = '/etc/ceph/ceph.conf:z'
         mounts[os.path.join(data_dir, 'keyring')] = '/etc/ceph/keyring:z'
@@ -71,9 +78,41 @@ class CephNvmeof(ContainerDaemonForm):
             os.path.join(data_dir, 'ceph-nvmeof.conf')
         ] = '/src/ceph-nvmeof.conf:z'
         mounts[os.path.join(data_dir, 'configfs')] = '/sys/kernel/config'
-        mounts['/dev/hugepages'] = '/dev/hugepages'
-        mounts['/dev/vfio/vfio'] = '/dev/vfio/vfio'
         mounts[log_dir] = '/var/log/ceph:z'
+        if mtls_dir:
+            mounts[mtls_dir] = '/src/mtls:z'
+        return mounts
+
+    def _get_huge_pages_mounts(self, files: Dict[str, str]) -> Dict[str, str]:
+        mounts = dict()
+        if 'spdk_mem_size' not in files:
+            mounts['/dev/hugepages'] = '/dev/hugepages'
+            mounts['/dev/vfio/vfio'] = '/dev/vfio/vfio'
+        return mounts
+
+    def _get_dsa_mounts(self, files: Dict[str, str]) -> Dict[str, str]:
+        mounts = dict()
+        if 'enable_dsa_acceleration' in files:
+            mounts['/dev/dsa'] = '/dev/dsa'
+            mounts['/dev/char'] = '/dev/char'
+        return mounts
+
+    def _get_tls_cert_key_mounts(
+        self, data_dir: str, files: Dict[str, str]
+    ) -> Dict[str, str]:
+        mounts = dict()
+        for fn in [
+            'server_cert',
+            'server_key',
+            'client_cert',
+            'client_key',
+            'root_ca_cert',
+            'encryption_key',
+        ]:
+            if fn in files:
+                mounts[
+                    os.path.join(data_dir, fn)
+                ] = f'/{fn.replace("_", ".")}'
         return mounts
 
     def customize_container_mounts(
@@ -81,7 +120,18 @@ class CephNvmeof(ContainerDaemonForm):
     ) -> None:
         data_dir = self.identity.data_dir(ctx.data_dir)
         log_dir = os.path.join(ctx.log_dir, self.identity.fsid)
-        mounts.update(self._get_container_mounts(data_dir, log_dir))
+        mtls_dir = os.path.join(ctx.data_dir, self.identity.fsid, 'mtls')
+        if os.path.exists(mtls_dir):
+            mounts.update(
+                self._get_container_mounts(
+                    data_dir, log_dir, mtls_dir=mtls_dir
+                )
+            )
+        else:
+            mounts.update(self._get_container_mounts(data_dir, log_dir))
+        mounts.update(self._get_huge_pages_mounts(self.files))
+        mounts.update(self._get_dsa_mounts(self.files))
+        mounts.update(self._get_tls_cert_key_mounts(data_dir, self.files))
 
     def customize_container_binds(
         self, ctx: CephadmContext, binds: List[List[str]]
@@ -152,6 +202,21 @@ class CephNvmeof(ContainerDaemonForm):
         # populate files from the config-json
         populate_files(data_dir, self.files, uid, gid)
 
+        # create /dev/dsa if DSA acceleration is enabled and the device doesn't exist
+        if (
+            'enable_dsa_acceleration' in self.files
+            and self.files['enable_dsa_acceleration'] == 'True'
+        ):
+            if not os.path.exists('/dev/dsa'):
+                try:
+                    # create a /dev/dsa as a directory to avoid podman start failure
+                    os.mkdir('/dev/dsa', mode=0o755)
+                    logger.info(
+                        'Created /dev/dsa directory, device file was not found'
+                    )
+                except Exception:
+                    logger.exception('Failed to create /dev/dsa')
+
     @staticmethod
     def configfs_mount_umount(data_dir, mount=True):
         # type: (str, bool) -> List[str]
@@ -168,8 +233,27 @@ class CephNvmeof(ContainerDaemonForm):
             )
         return cmd.split()
 
-    @staticmethod
-    def get_sysctl_settings() -> List[str]:
+    def get_sysctl_settings(self) -> List[str]:
+        if 'spdk_mem_size' in self.files:
+            return []
+
+        if 'spdk_huge_pages' in self.files:
+            try:
+                val = self.files['spdk_huge_pages']
+                huge_pages_value = int(val)
+                logger.debug(
+                    f'Found SPDK huge pages value {huge_pages_value}'
+                )
+                return [
+                    f'vm.nr_hugepages = {huge_pages_value}',
+                ]
+            except KeyError:
+                logger.exception('Failure getting SPDK huge pages value')
+            except ValueError:
+                logger.error(
+                    f'Invalid SPDK huge pages value {self.files[val]}'
+                )
+
         return [
             'vm.nr_hugepages = 4096',
         ]
@@ -192,4 +276,18 @@ class CephNvmeof(ContainerDaemonForm):
         args.append(ctx.container_engine.unlimited_pids_option)
         args.extend(['--ulimit', 'memlock=-1:-1'])
         args.extend(['--ulimit', 'nofile=10240'])
-        args.extend(['--cap-add=SYS_ADMIN', '--cap-add=CAP_SYS_NICE'])
+        args.extend(['--cap-add=CAP_SYS_NICE'])
+        # idxd/dsa
+        if 'enable_dsa_acceleration' in self.files:
+            args.extend(['--privileged'])
+            args.extend(['--cap-add=SYS_RAWIO'])
+        if 'spdk_mem_size' not in self.files:
+            args.extend(['--cap-add=SYS_ADMIN'])
+            if 'spdk_huge_pages' in self.files:
+                try:
+                    huge_pages_value = int(self.files['spdk_huge_pages'])
+                    args.extend(['-e', f'HUGEPAGES={huge_pages_value}'])
+                except KeyError:
+                    pass
+                except ValueError:
+                    pass

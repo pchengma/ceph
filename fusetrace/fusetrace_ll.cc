@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:4; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=4 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:4; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
 /*
     FUSE: Filesystem in Userspace
@@ -30,8 +30,6 @@
 #endif
 #include <time.h>
 
-
-#include "include/unordered_map.h"
 #include "include/hash_namespace.h"
 
 #ifndef __LP64__
@@ -50,6 +48,7 @@ CEPH_HASH_NAMESPACE_END
 #include <fstream>
 #include <map>
 #include <set>
+#include <unordered_map>
 using namespace std;
 
 #include "common/ceph_mutex.h"
@@ -87,7 +86,7 @@ struct Inode {
 };
 
 Inode *root = 0;
-ceph::unordered_map<ino_t, Inode*> inode_map;
+std::unordered_map<ino_t, Inode*> inode_map;
 
 bool make_inode_path(string &buf, Inode *in)
 {

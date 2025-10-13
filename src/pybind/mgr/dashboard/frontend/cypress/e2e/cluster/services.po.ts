@@ -100,6 +100,14 @@ export class ServicesPageHelper extends PageHelper {
           }
           break;
 
+        case 'oauth2-proxy':
+          cy.get('#https_address').type('localhost:8443');
+          cy.get('#provider_display_name').type('provider');
+          cy.get('#client_id').type('foo');
+          cy.get('#client_secret').type('bar');
+          cy.get('#oidc_issuer_url').type('http://127.0.0.0:8080/realms/ceph');
+          break;
+
         default:
           cy.get('#service_id').type('test');
           unmanaged
@@ -107,6 +115,7 @@ export class ServicesPageHelper extends PageHelper {
             : cy.get('#count').clear().type(String(count));
           break;
       }
+      cy.wait(1000);
       if (serviceType === 'snmp-gateway') {
         cy.get('cd-submit-button').dblclick();
       } else {
@@ -148,7 +157,7 @@ export class ServicesPageHelper extends PageHelper {
       cy.get('cd-service-daemon-list').within(() => {
         this.getTableCell(daemonNameIndex, daemon, true)
           .parent()
-          .find(`datatable-body-cell:nth-child(${statusIndex}) .badge`)
+          .find(`[cdstabledata]:nth-child(${statusIndex}) .badge`)
           .should(($ele) => {
             const status = $ele.toArray().map((v) => v.innerText);
             expect(status).to.include(expectedStatus);
@@ -160,7 +169,7 @@ export class ServicesPageHelper extends PageHelper {
   expectPlacementCount(serviceName: string, expectedCount: string) {
     this.getTableCell(this.columnIndex.service_name, serviceName)
       .parent()
-      .find(`datatable-body-cell:nth-child(${this.columnIndex.placement})`)
+      .find(`[cdstabledata]:nth-child(${this.columnIndex.placement})`)
       .should(($ele) => {
         const running = $ele.text().split(';');
         expect(running).to.include(`count:${expectedCount}`);
@@ -181,7 +190,7 @@ export class ServicesPageHelper extends PageHelper {
   isUnmanaged(serviceName: string, unmanaged: boolean) {
     this.getTableCell(this.columnIndex.service_name, serviceName)
       .parent()
-      .find(`datatable-body-cell:nth-child(${this.columnIndex.placement})`)
+      .find(`[cdstabledata]:nth-child(${this.columnIndex.placement})`)
       .should(($ele) => {
         const placement = $ele.text().split(';');
         unmanaged
@@ -191,25 +200,21 @@ export class ServicesPageHelper extends PageHelper {
   }
 
   deleteService(serviceName: string) {
-    const getRow = this.getTableCell.bind(this, this.columnIndex.service_name);
-    getRow(serviceName).click();
-
-    // Clicks on table Delete button
-    this.clickActionButton('delete');
+    this.clickRowActionButton(serviceName, 'delete', 3 * 1000);
 
     // Confirms deletion
-    cy.get('cd-modal .custom-control-label').click();
-    cy.contains('cd-modal button', 'Delete').click();
+    cy.get('cds-modal input#confirmation_input').click({ force: true });
+    cy.contains('cds-modal button', 'Delete').click();
 
     // Wait for modal to close
-    cy.get('cd-modal').should('not.exist');
+    cy.get('cds-modal').should('not.exist');
+    cy.wait(1 * 1000);
     this.checkExist(serviceName, false);
   }
 
   daemonAction(daemon: string, action: string) {
     cy.get('cd-service-daemon-list').within(() => {
-      this.getTableRow(daemon).click();
-      this.clickActionButton(action);
+      this.clickRowActionButton(daemon, action);
     });
   }
 }

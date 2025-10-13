@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,10 +17,17 @@
 #define CEPH_STRIPER_H
 
 #include "include/common_fwd.h"
+#include "include/fs_types.h" // for inodeno_t
 #include "include/types.h"
 #include "osd/osd_types.h"
 #include "osdc/StriperTypes.h"
 
+#include <cstdint>
+#include <cstdio> // for snprintf()
+#include <map>
+#include <vector>
+
+struct file_layout_t;
 
 //namespace ceph {
 

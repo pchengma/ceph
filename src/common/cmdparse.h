@@ -1,17 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_COMMON_CMDPARSE_H
 #define CEPH_COMMON_CMDPARSE_H
 
 #include <vector>
-#include <stdexcept>
+#include <exception>
+#include <map>
+#include <string>
 #include <optional>
-#include <ostream>
+#include <iosfwd>
 #include <boost/variant.hpp>
-#include "include/ceph_assert.h"	// boost clobbers this
 #include "include/common_fwd.h"
-#include "common/Formatter.h"
-#include "common/BackTrace.h"
+
+namespace ceph { class Formatter; }
 
 typedef boost::variant<std::string,
 		       bool,
@@ -101,11 +103,34 @@ T cmd_getval_or(const cmdmap_t& cmdmap, std::string_view k,
 		const V& defval)
 {
   auto found = cmdmap.find(k);
-  if (found == cmdmap.end()) {
+  if (found == cmdmap.cend()) {
     return T(defval);
   }
   try {
-    return boost::get<T>(cmdmap.find(k)->second);
+    return boost::get<T>(found->second);
+  } catch (boost::bad_get&) {
+    throw bad_cmd_get(k, cmdmap);
+  }
+}
+
+/**
+ * with default, to be used when the parameter type (which matches the type of the
+ * 'default' object) is not one of the limited set of parameters type.
+ * Added to support "safe types" - typed wrappers "around" simple types (e.g.
+ * shard_id_t which is a structure holding one int8_t), without requiring the
+ * user to specify the default in the 'internal type'.
+ *
+ * Throws if the key is found, but the type is not the expected one.
+ */
+template <typename CMD_TYPE, typename T>
+T cmd_getval_cast_or(const cmdmap_t& cmdmap, std::string_view k, T defval)
+{
+  auto found = cmdmap.find(k);
+  if (found == cmdmap.cend()) {
+    return defval;
+  }
+  try {
+    return T(boost::get<CMD_TYPE>(found->second));
   } catch (boost::bad_get&) {
     throw bad_cmd_get(k, cmdmap);
   }

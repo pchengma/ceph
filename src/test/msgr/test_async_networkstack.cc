@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,26 +32,16 @@
 #include "msg/async/Stack.h"
 
 using namespace std;
+using namespace std::literals;
 
 class NoopConfigObserver : public md_config_obs_t {
-  std::list<std::string> options;
-  const char **ptrs = 0;
+  std::vector<std::string> options;
 
 public:
-  NoopConfigObserver(std::list<std::string> l) : options(l) {
-    ptrs = new const char*[options.size() + 1];
-    unsigned j = 0;
-    for (auto& i : options) {
-      ptrs[j++] = i.c_str();
-    }
-    ptrs[j] = 0;
-  }
-  ~NoopConfigObserver() {
-    delete[] ptrs;
-  }
-
-  const char** get_tracked_conf_keys() const override {
-    return ptrs;
+  NoopConfigObserver(std::vector<std::string> l) : options(l) {}
+  ~NoopConfigObserver() = default;
+  std::vector<std::string> get_tracked_keys() const noexcept override {
+    return options;
   }
   void handle_conf_change(const ConfigProxy& conf,
 			  const std::set <std::string> &changed) override {

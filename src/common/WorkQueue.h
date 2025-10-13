@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,7 +16,7 @@
 #ifndef CEPH_WORKQUEUE_H
 #define CEPH_WORKQUEUE_H
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 // for ObjectStore.h
 struct ThreadPool {
   struct TPHandle {
@@ -31,7 +32,6 @@ struct ThreadPool {
 #include <vector>
 
 #include "common/ceph_mutex.h"
-#include "include/unordered_map.h"
 #include "common/config_obs.h"
 #include "common/HeartbeatMap.h"
 #include "common/Thread.h"
@@ -108,11 +108,15 @@ protected:
   // track thread pool size changes
   unsigned _num_threads;
   std::string _thread_num_option;
-  const char **_conf_keys;
 
-  const char **get_tracked_conf_keys() const override {
-    return _conf_keys;
+  std::vector<std::string> get_tracked_keys() const noexcept override {
+    if (_thread_num_option.empty()) {
+      return {};
+    } else {
+      return {_thread_num_option};
+    }
   }
+
   void handle_conf_change(const ConfigProxy& conf,
 			  const std::set <std::string> &changed) override;
 
@@ -552,8 +556,7 @@ protected:
     int result = 0;
     {
       std::lock_guard locker(m_lock);
-      ceph::unordered_map<Context *, int>::iterator it =
-        m_context_results.find(ctx);
+      auto it = m_context_results.find(ctx);
       if (it != m_context_results.end()) {
         result = it->second;
         m_context_results.erase(it);
@@ -563,7 +566,7 @@ protected:
   }
 private:
   ceph::mutex m_lock = ceph::make_mutex("ContextWQ::m_lock");
-  ceph::unordered_map<Context*, int> m_context_results;
+  std::unordered_map<Context*, int> m_context_results;
 };
 
 class ShardedThreadPool {

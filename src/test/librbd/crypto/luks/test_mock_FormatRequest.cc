@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -66,7 +66,7 @@ struct TestMockCryptoLuksFormatRequest : public TestMockFixture {
   void expect_image_write() {
     EXPECT_CALL(*mock_image_ctx->io_image_dispatcher, send(_))
             .WillOnce(Invoke([this](io::ImageDispatchSpec* spec) {
-                auto* write = boost::get<io::ImageDispatchSpec::Write>(
+                auto* write = std::get_if<io::ImageDispatchSpec::Write>(
                         &spec->request);
                 ASSERT_TRUE(write != nullptr);
 

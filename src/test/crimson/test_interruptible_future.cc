@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <seastar/core/sleep.hh>
 
@@ -67,7 +67,7 @@ TEST_F(seastar_test_suite_t, basic)
 	  return seastar::now();
 	  })
 	);
-      }, [](std::exception_ptr) {}, false).get0();
+      }, [](std::exception_ptr) {}, false).get();
 
     interruptor::with_interruption(
       [] {
@@ -79,7 +79,7 @@ TEST_F(seastar_test_suite_t, basic)
       }, [](std::exception_ptr) {
 	ceph_assert(!interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
 	return seastar::now();
-      }, true).get0();
+      }, true).get();
 
 
   });
@@ -177,7 +177,7 @@ TEST_F(seastar_test_suite_t, loops)
 	  ceph_assert(interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
 	  return seastar::now();
 	});
-      }, [](std::exception_ptr) {}, false).get0();
+      }, [](std::exception_ptr) {}, false).get();
   });
 }
 
@@ -208,7 +208,7 @@ TEST_F(seastar_test_suite_t, errorated)
 	return base_iertr::now();
       }
     );
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
 
@@ -221,7 +221,7 @@ TEST_F(seastar_test_suite_t, errorated_value)
 	  1
 	);
       });
-    EXPECT_EQ(ret.unsafe_get0(), 1);
+    EXPECT_EQ(ret.unsafe_get(), 1);
   });
 }
 
@@ -236,7 +236,7 @@ TEST_F(seastar_test_suite_t, expand_errorated_value)
 	  return base2_iertr::make_ready_future<>();
 	});
       });
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
 
@@ -260,7 +260,7 @@ TEST_F(seastar_test_suite_t, interruptible_async)
       ceph_assert(interruptible::interrupt_cond<
 	TestInterruptCondition>.ref_count == 1);
       return fut;
-    }, [](std::exception_ptr) {}, false).get0();
+    }, [](std::exception_ptr) {}, false).get();
   });
 }
 
@@ -278,12 +278,33 @@ TEST_F(seastar_test_suite_t, DISABLED_nested_interruptors)
         });
       }
     );
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
 
-#if 0
-// This seems to cause a hang in the gcc-9 linker on bionic
+TEST_F(seastar_test_suite_t, interruptible_repeat_eagain)
+{
+  using interruptor =
+    interruptible::interruptor<TestInterruptCondition>;
+  run_async([] {
+    interruptor::with_interruption([] {
+      return seastar::do_with(
+	0,
+	[](auto &i) {
+	return interruptor::repeat_eagain([&i]() -> base_iertr::future<> {
+	  if (++i < 5) {
+	    return crimson::ct_error::eagain::make();
+	  }
+	  return base_iertr::now();
+	}).si_then([&i] {
+	  std::cout << i << std::endl;
+	  ceph_assert(i == 5);
+	});
+      });
+    }, [](std::exception_ptr) {}, false).unsafe_get();
+  });
+}
+
 TEST_F(seastar_test_suite_t, handle_error)
 {
   run_async([] {
@@ -298,7 +319,6 @@ TEST_F(seastar_test_suite_t, handle_error)
 	  return base_iertr::now();
 	});
       });
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
-#endif

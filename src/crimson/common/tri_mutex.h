@@ -1,12 +1,11 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include <seastar/core/future.hh>
 #include <seastar/core/circular_buffer.hh>
 
-#include "common/hobject.h"
 #include "crimson/common/log.h"
 
 class read_lock {
@@ -47,9 +46,10 @@ class tri_mutex : private read_lock,
 public:
   tri_mutex() = default;
 #ifdef NDEBUG
-  tri_mutex(const hobject_t &obj_name) : name() {}
+  tri_mutex(const std::string &obj_str) : name() {}
 #else
-  tri_mutex(const hobject_t &obj_name) : name(obj_name) {}
+  tri_mutex(const std::string &obj_str) : name(obj_str) {
+  }
 #endif
   ~tri_mutex();
 
@@ -101,12 +101,11 @@ public:
     }
   }
 
-  const hobject_t &get_name() const{
+  std::string_view get_name() const{
     return name;
   }
 
 private:
-  void wake();
   unsigned readers = 0;
   unsigned writers = 0;
   bool exclusively_used = false;
@@ -116,6 +115,7 @@ private:
     exclusive,
     none,
   };
+  void wake(type_t);
   struct waiter_t {
     waiter_t(seastar::promise<>&& pr, type_t type)
       : pr(std::move(pr)), type(type)
@@ -124,7 +124,7 @@ private:
     type_t type;
   };
   seastar::circular_buffer<waiter_t> waiters;
-  const hobject_t name;
+  const std::string name;
   friend class read_lock;
   friend class write_lock;
   friend class excl_lock;
@@ -134,9 +134,9 @@ private:
 inline std::ostream& operator<<(std::ostream& os, const tri_mutex& tm)
 {
   os << fmt::format("tri_mutex {} writers {} readers {}"
-                    " exclusively_used {} waiters: {}",
+                    " exclusively_used {} waiters: {} address {}",
                     tm.get_name(), tm.get_writers(), tm.get_readers(),
-                    tm.exclusively_used, tm.waiters.size());
+                    tm.exclusively_used, tm.waiters.size(), fmt::ptr(&tm));
   return os;
 }
 

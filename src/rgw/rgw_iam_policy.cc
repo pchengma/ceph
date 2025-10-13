@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 
 #include <cstring>
@@ -94,6 +94,8 @@ static const actpair actpairs[] =
  { "s3:GetPublicAccessBlock", s3GetPublicAccessBlock },
  { "s3:GetObjectAcl", s3GetObjectAcl },
  { "s3:GetObject", s3GetObject },
+ { "s3:GetObjectAttributes", s3GetObjectAttributes },
+ { "s3:GetObjectVersionAttributes", s3GetObjectVersionAttributes },
  { "s3:GetObjectTorrent", s3GetObjectTorrent },
  { "s3:GetObjectVersionAcl", s3GetObjectVersionAcl },
  { "s3:GetObjectVersion", s3GetObjectVersion },
@@ -113,6 +115,7 @@ static const actpair actpairs[] =
  { "s3:PutBucketCORS", s3PutBucketCORS },
  { "s3:PutBucketEncryption", s3PutBucketEncryption },
  { "s3:PutBucketLogging", s3PutBucketLogging },
+ { "s3:PostBucketLogging", s3PostBucketLogging },
  { "s3:PutBucketNotification", s3PutBucketNotification },
  { "s3:PutBucketOwnershipControls", s3PutBucketOwnershipControls },
  { "s3:PutBucketPolicy", s3PutBucketPolicy },
@@ -135,6 +138,10 @@ static const actpair actpairs[] =
  { "s3:PutReplicationConfiguration", s3PutReplicationConfiguration },
  { "s3:RestoreObject", s3RestoreObject },
  { "s3:DescribeJob", s3DescribeJob },
+ { "s3:ReplicateDelete", s3ReplicateDelete },
+ { "s3:ReplicateObject", s3ReplicateObject },
+ { "s3:ReplicateTags", s3ReplicateTags },
+ { "s3:GetObjectVersionForReplication", s3GetObjectVersionForReplication },
  { "s3-object-lambda:GetObject", s3objectlambdaGetObject },
  { "s3-object-lambda:ListBucket", s3objectlambdaListBucket },
  { "iam:PutUserPolicy", iamPutUserPolicy },
@@ -160,6 +167,9 @@ static const actpair actpairs[] =
  { "iam:DeleteOIDCProvider", iamDeleteOIDCProvider},
  { "iam:GetOIDCProvider", iamGetOIDCProvider},
  { "iam:ListOIDCProviders", iamListOIDCProviders},
+ { "iam:AddClientIdToOIDCProvider", iamAddClientIdToOIDCProvider},
+ { "iam:RemoveCientIdFromOIDCProvider", iamRemoveClientIdFromOIDCProvider},
+ { "iam:UpdateOIDCProviderThumbprint", iamUpdateOIDCProviderThumbprint},
  { "iam:TagRole", iamTagRole},
  { "iam:ListRoleTags", iamListRoleTags},
  { "iam:UntagRole", iamUntagRole},
@@ -192,6 +202,7 @@ static const actpair actpairs[] =
  { "iam:GenerateServiceLastAccessedDetails", iamGenerateServiceLastAccessedDetails},
  { "iam:SimulateCustomPolicy", iamSimulateCustomPolicy},
  { "iam:SimulatePrincipalPolicy", iamSimulatePrincipalPolicy},
+ { "iam:GetAccountSummary", iamGetAccountSummary},
  { "sts:AssumeRole", stsAssumeRole},
  { "sts:AssumeRoleWithWebIdentity", stsAssumeRoleWithWebIdentity},
  { "sts:GetSessionToken", stsGetSessionToken},
@@ -578,6 +589,8 @@ boost::optional<Principal> ParseState::parse_principal(string&& s,
 	  "for an assumed role, "
 	  "`arn:aws:iam::tenant:user/user-name` for a user, "
 	  "`arn:aws:iam::tenant:oidc-provider/idp-url` for OIDC.", s);
+  } else if (w->id == TokenID::Service) {
+      return Principal::service(std::move(s));
   }
 
   if (errmsg)
@@ -594,6 +607,7 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
   bool is_action = false;
   bool is_valid_action = false;
   Statement* t = p.statements.empty() ? nullptr : &(p.statements.back());
+  ceph_assert(t || w->id == TokenID::Version || w->id == TokenID::Id);
 
   // Top level!
   if (w->id == TokenID::Version) {
@@ -701,11 +715,10 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
       return false;
     }
   } else if (w->kind == TokenKind::cond_key) {
-    auto& t = pp->policy.statements.back();
     if (l > 0 && *s == '$') {
       if (l >= 2 && *(s+1) == '{') {
         if (l > 0 && *(s+l-1) == '}') {
-          t.conditions.back().isruntime = true;
+          t->conditions.back().isruntime = true;
         } else {
 	  annotate(fmt::format("Invalid interpolation `{}`.",
 			       std::string_view{s, l}));
@@ -717,7 +730,7 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
         return false;
       }
     }
-    t.conditions.back().vals.emplace_back(s, l);
+    t->conditions.back().vals.emplace_back(s, l);
 
     // Principals
 
@@ -753,6 +766,13 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
   if (is_action && !is_valid_action) {
     annotate(fmt::format("`{}` is not a valid action.",
 			 std::string_view{s, l}));
+    return false;
+  }
+
+  // NotPrincipal must be used with "Effect":"Deny". Using it with "Effect":"Allow" is not supported.
+  // cf. https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html
+  if (t && t->effect == Effect::Allow && !t->noprinc.empty()) {
+    annotate("Allow with NotPrincipal is not allowed.");
     return false;
   }
 
@@ -839,6 +859,18 @@ ostream& operator <<(ostream& m, const MaskedIP& ip) {
   return m;
 }
 
+// Case-sensitive matching of the ARN. Each of the six colon-delimited
+// components of the ARN is checked separately and each can include multi-
+// character match wildcards (*) or single-character match wildcards (?).
+static bool arn_like(const std::string& input, const std::string& pattern)
+{
+  constexpr auto delim = [] (char c) { return c == ':'; };
+  if (std::count_if(input.begin(), input.end(), delim) != 5) {
+    return false;
+  }
+  return match_policy(pattern, input, MATCH_POLICY_ARN);
+}
+
 bool Condition::eval(const Environment& env) const {
   std::vector<std::string> runtime_vals;
   auto i = env.find(key);
@@ -873,117 +905,104 @@ bool Condition::eval(const Environment& env) const {
     // String!
   case TokenID::ForAnyValueStringEquals:
   case TokenID::StringEquals:
-    return orrible(std::equal_to<std::string>(), itr, isruntime? runtime_vals : vals);
+    return multimap_any(std::equal_to<std::string>(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::StringNotEquals:
-    return orrible(std::not_fn(std::equal_to<std::string>()),
-		   itr, isruntime? runtime_vals : vals);
+    return multimap_none(std::equal_to<std::string>(),
+     itr, isruntime? runtime_vals : vals);
 
   case TokenID::ForAnyValueStringEqualsIgnoreCase:
   case TokenID::StringEqualsIgnoreCase:
-    return orrible(ci_equal_to(), itr, isruntime? runtime_vals : vals);
+    return multimap_any(ci_equal_to(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::StringNotEqualsIgnoreCase:
-    return orrible(std::not_fn(ci_equal_to()), itr, isruntime? runtime_vals : vals);
+    return multimap_none(ci_equal_to(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::ForAnyValueStringLike:
   case TokenID::StringLike:
-    return orrible(string_like(), itr, isruntime? runtime_vals : vals);
+    return multimap_any(string_like(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::StringNotLike:
-    return orrible(std::not_fn(string_like()), itr, isruntime? runtime_vals : vals);
+    return multimap_none(string_like(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::ForAllValuesStringEquals:
-    return andible(std::equal_to<std::string>(), itr, isruntime? runtime_vals : vals);
+    return multimap_all(std::equal_to<std::string>(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::ForAllValuesStringLike:
-    return andible(string_like(), itr, isruntime? runtime_vals : vals);
+    return multimap_all(string_like(), itr, isruntime? runtime_vals : vals);
 
   case TokenID::ForAllValuesStringEqualsIgnoreCase:
-    return andible(ci_equal_to(), itr, isruntime? runtime_vals : vals);
+    return multimap_all(ci_equal_to(), itr, isruntime? runtime_vals : vals);
 
     // Numeric
   case TokenID::NumericEquals:
-    return shortible(std::equal_to<double>(), as_number, s, vals);
+    return typed_any(std::equal_to<double>(), as_number, s, vals);
 
   case TokenID::NumericNotEquals:
-    return shortible(std::not_fn(std::equal_to<double>()),
-		     as_number, s, vals);
+    return typed_none(std::equal_to<double>(),
+       as_number, s, vals);
 
 
   case TokenID::NumericLessThan:
-    return shortible(std::less<double>(), as_number, s, vals);
+    return typed_any(std::less<double>(), as_number, s, vals);
 
 
   case TokenID::NumericLessThanEquals:
-    return shortible(std::less_equal<double>(), as_number, s, vals);
+    return typed_any(std::less_equal<double>(), as_number, s, vals);
 
   case TokenID::NumericGreaterThan:
-    return shortible(std::greater<double>(), as_number, s, vals);
+    return typed_any(std::greater<double>(), as_number, s, vals);
 
   case TokenID::NumericGreaterThanEquals:
-    return shortible(std::greater_equal<double>(), as_number, s, vals);
+    return typed_any(std::greater_equal<double>(), as_number, s,
+       vals);
 
     // Date!
   case TokenID::DateEquals:
-    return shortible(std::equal_to<ceph::real_time>(), as_date, s, vals);
+    return typed_any(std::equal_to<ceph::real_time>(), as_date, s, vals);
 
   case TokenID::DateNotEquals:
-    return shortible(std::not_fn(std::equal_to<ceph::real_time>()),
-		     as_date, s, vals);
-
+    return typed_none(std::equal_to<ceph::real_time>(),
+       as_date, s, vals);
   case TokenID::DateLessThan:
-    return shortible(std::less<ceph::real_time>(), as_date, s, vals);
+    return typed_any(std::less<ceph::real_time>(), as_date, s, vals);
 
 
   case TokenID::DateLessThanEquals:
-    return shortible(std::less_equal<ceph::real_time>(), as_date, s, vals);
+    return typed_any(std::less_equal<ceph::real_time>(), as_date, s, vals);
 
   case TokenID::DateGreaterThan:
-    return shortible(std::greater<ceph::real_time>(), as_date, s, vals);
+    return typed_any(std::greater<ceph::real_time>(), as_date, s, vals);
 
   case TokenID::DateGreaterThanEquals:
-    return shortible(std::greater_equal<ceph::real_time>(), as_date, s,
+    return typed_any(std::greater_equal<ceph::real_time>(), as_date, s,
 		     vals);
 
     // Bool!
   case TokenID::Bool:
-    return shortible(std::equal_to<bool>(), as_bool, s, vals);
+    return typed_any(std::equal_to<bool>(), as_bool, s, vals);
 
     // Binary!
   case TokenID::BinaryEquals:
-    return shortible(std::equal_to<ceph::bufferlist>(), as_binary, s,
+    return typed_any(std::equal_to<ceph::bufferlist>(), as_binary, s,
 		     vals);
 
     // IP Address!
   case TokenID::IpAddress:
-    return shortible(std::equal_to<MaskedIP>(), as_network, s, vals);
+    return typed_any(std::equal_to<MaskedIP>(), as_network, s, vals);
 
   case TokenID::NotIpAddress:
-    {
-      auto xc = as_network(s);
-      if (!xc) {
-	return false;
-      }
+    return typed_none(std::equal_to<MaskedIP>(),
+      as_network, s, vals);
 
-      for (const string& d : vals) {
-	auto xd = as_network(d);
-	if (!xd) {
-	  continue;
-	}
-
-	if (xc == xd) {
-	  return false;
-	}
-      }
-      return true;
-    }
-
-#if 0
-    // Amazon Resource Names! (Does S3 need this?)
-    TokenID::ArnEquals, TokenID::ArnNotEquals, TokenID::ArnLike,
-      TokenID::ArnNotLike,
-#endif
+    // Amazon Resource Names!
+    // The ArnEquals and ArnLike condition operators behave identically.
+  case TokenID::ArnEquals:
+  case TokenID::ArnLike:
+    return multimap_any(arn_like, itr, isruntime? runtime_vals : vals);
+  case TokenID::ArnNotEquals:
+  case TokenID::ArnNotLike:
+    return multimap_none(arn_like, itr, isruntime? runtime_vals : vals);
 
   default:
     return false;
@@ -1269,7 +1288,6 @@ Effect Statement::eval_conditions(const Environment& e) const {
   return Effect::Deny;
 }
 
-namespace {
 const char* action_bit_string(uint64_t action) {
   switch (action) {
   case s3GetObject:
@@ -1325,6 +1343,7 @@ const char* action_bit_string(uint64_t action) {
 
   case s3ListBucketVersions:
     return "s3:ListBucketVersions";
+
   case s3ListAllMyBuckets:
     return "s3:ListAllMyBuckets";
 
@@ -1397,6 +1416,9 @@ const char* action_bit_string(uint64_t action) {
   case s3PutBucketLogging:
     return "s3:PutBucketLogging";
 
+    case s3PostBucketLogging:
+      return "s3:PostBucketLogging";
+
   case s3GetBucketTagging:
     return "s3:GetBucketTagging";
 
@@ -1466,8 +1488,26 @@ const char* action_bit_string(uint64_t action) {
   case s3BypassGovernanceRetention:
     return "s3:BypassGovernanceRetention";
 
+  case s3GetObjectAttributes:
+    return "s3:GetObjectAttributes";
+
+  case s3GetObjectVersionAttributes:
+    return "s3:GetObjectVersionAttributes";
+
   case s3DescribeJob:
     return "s3:DescribeJob";
+
+  case s3ReplicateDelete:
+    return "s3:ReplicateDelete";
+
+  case s3ReplicateObject:
+    return "s3:ReplicateObject";
+
+  case s3ReplicateTags:
+    return "s3:ReplicateTags";
+
+  case s3GetObjectVersionForReplication:
+    return "s3:GetObjectVersionForReplication";
 
   case s3objectlambdaGetObject:
     return "s3-object-lambda:GetObject";
@@ -1543,6 +1583,15 @@ const char* action_bit_string(uint64_t action) {
 
   case iamListOIDCProviders:
     return "iam:ListOIDCProviders";
+
+  case iamAddClientIdToOIDCProvider:
+    return "iam:AddClientIdToOIDCProvider";
+
+  case iamRemoveClientIdFromOIDCProvider:
+    return "iam:RemoveClientIdFromOIDCProvider";
+
+  case iamUpdateOIDCProviderThumbprint:
+    return "iam:UpdateOIDCProviderThumbprint";
 
   case iamTagRole:
     return "iam:TagRole";
@@ -1640,6 +1689,9 @@ const char* action_bit_string(uint64_t action) {
   case iamSimulatePrincipalPolicy:
     return "iam:SimulatePrincipalPolicy";
 
+  case iamGetAccountSummary:
+    return "iam:GetAccountSummary";
+
   case stsAssumeRole:
     return "sts:AssumeRole";
 
@@ -1703,6 +1755,7 @@ const char* action_bit_string(uint64_t action) {
   return "s3Invalid";
 }
 
+namespace {
 ostream& print_actions(ostream& m, const Action_t a) {
   bool begun = false;
   m << "[ ";
@@ -1887,14 +1940,10 @@ struct IsPublicStatement
   bool operator() (const Statement &s) const {
     if (s.effect == Effect::Allow) {
       for (const auto& p : s.princ) {
-	if (p.is_wildcard()) {
-	  return s.eval_conditions(iam_all_env) == Effect::Allow;
-	}
+        if (p.is_wildcard()) {
+          return s.eval_conditions(iam_all_env) == Effect::Allow;
+        }
       }
-      // no princ should not contain fixed values
-      return std::none_of(s.noprinc.begin(), s.noprinc.end(), [](const rgw::auth::Principal& p) {
-								return p.is_wildcard();
-							      });
     }
     return false;
   }

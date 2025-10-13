@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -50,8 +51,8 @@ struct Recover_d {
   int k;
   int m;
   int c;
-  set<int> want;
-  set<int> avail;
+  shard_id_set want;
+  shard_id_set avail;
 };
 struct std::vector<Recover_d> cannot_recover;
 
@@ -59,6 +60,7 @@ class ParameterTest : public ::testing::TestWithParam<struct Param_d> {
 
 };
 
+IGNORE_DEPRECATED
 TEST_P(ParameterTest, parameter_all)
 {
   int result;
@@ -99,7 +101,7 @@ TEST_P(ParameterTest, parameter_all)
 
   //minimum_to_decode
   //want_to_decode will be a combination that chooses 1~c from k+m
-  set<int> want_to_decode, available_chunks, minimum_chunks;
+  shard_id_set want_to_decode, available_chunks, minimum_chunks;
   int array_want_to_decode[shec->get_chunk_count()];
   struct Recover_d comb;
 
@@ -115,12 +117,12 @@ TEST_P(ParameterTest, parameter_all)
 
     do {
       for (unsigned int i = 0; i < shec->get_chunk_count(); i++) {
-	available_chunks.insert(i);
+	available_chunks.insert(shard_id_t(i));
       }
       for (unsigned int i = 0; i < shec->get_chunk_count(); i++) {
 	if (array_want_to_decode[i]) {
-	  want_to_decode.insert(i);
-	  available_chunks.erase(i);
+	  want_to_decode.insert(shard_id_t(i));
+	  available_chunks.erase(shard_id_t(i));
 	}
       }
 
@@ -152,14 +154,14 @@ TEST_P(ParameterTest, parameter_all)
   }
 
   //minimum_to_decode_with_cost
-  set<int> want_to_decode_with_cost, minimum_chunks_with_cost;
-  map<int, int> available_chunks_with_cost;
+  shard_id_set want_to_decode_with_cost, minimum_chunks_with_cost;
+  shard_id_map<int> available_chunks_with_cost(shec->get_chunk_count());
 
   for (unsigned int i = 0; i < 1; i++) {
-    want_to_decode_with_cost.insert(i);
+    want_to_decode_with_cost.insert(shard_id_t(i));
   }
   for (unsigned int i = 0; i < shec->get_chunk_count(); i++) {
-    available_chunks_with_cost[i] = i;
+    available_chunks_with_cost[shard_id_t(i)] = i;
   }
 
   result = shec->minimum_to_decode_with_cost(
@@ -261,6 +263,7 @@ TEST_P(ParameterTest, parameter_all)
   delete profile;
   delete crush;
 }
+END_IGNORE_DEPRECATED
 
 INSTANTIATE_TEST_SUITE_P(Test, ParameterTest, ::testing::ValuesIn(param));
 

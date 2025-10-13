@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -222,15 +222,15 @@ public:
       // silence warning that we are discarding an exceptional future
       if (_future.failed()) _future.get_exception();
       if constexpr (is_errorated) {
-	return maybe_fut->unsafe_get0();
+	return (T)maybe_fut->unsafe_get();
       } else {
-	return maybe_fut->get0();
+	return (T)maybe_fut->get();
       }
     } else {
       if constexpr (is_errorated) {
-	return _future.unsafe_get0();
+	return (T)_future.unsafe_get();
       } else {
-	return _future.get0();
+	return (T)_future.get();
       }
     }
   }

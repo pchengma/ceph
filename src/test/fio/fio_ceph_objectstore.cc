@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  *  Ceph ObjectStore engine
  *
@@ -15,6 +16,7 @@
 
 #include "os/ObjectStore.h"
 #include "global/global_init.h"
+#include "common/debug.h"
 #include "common/errno.h"
 #include "include/intarith.h"
 #include "include/stringify.h"
@@ -28,6 +30,12 @@
 
 #include "include/ceph_assert.h" // fio.h clobbers our assert.h
 #include <algorithm>
+
+#ifdef WITH_CRIMSON
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_
@@ -338,7 +346,8 @@ struct Engine {
       Formatter* f = Formatter::create(
 	"json-pretty", "json-pretty", "json-pretty");
       f->open_object_section("perf_output");
-      cct->get_perfcounters_collection()->dump_formatted(f, false, false);
+      cct->get_perfcounters_collection()->dump_formatted(
+	  f, false, select_labeled_t::unlabeled);
       if (g_conf()->rocksdb_perf) {
 	f->open_object_section("rocksdb_perf");
         os->get_db_statistics(f);

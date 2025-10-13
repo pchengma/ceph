@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,6 +17,7 @@
 #include "common/Formatter.h"
 #include "common/debug.h"
 #include "common/errno.h"
+#include "include/types.h" // for operator<<(std::pair)
 #include "librbd/Utils.h"
 
 #define dout_context g_ceph_context
@@ -30,7 +32,6 @@ namespace mirror {
 template <typename I>
 Throttler<I>::Throttler(CephContext *cct, const std::string &config_key)
   : m_cct(cct), m_config_key(config_key),
-    m_config_keys{m_config_key.c_str(), nullptr},
     m_lock(ceph::make_mutex(
       librbd::util::unique_lock_name("rbd::mirror::Throttler", this))),
     m_max_concurrent_ops(cct->_conf.get_val<uint64_t>(m_config_key)) {
@@ -219,11 +220,6 @@ void Throttler<I>::print_status(ceph::Formatter *f) {
   f->dump_int("max_parallel_requests", m_max_concurrent_ops);
   f->dump_int("running_requests", m_inflight_ops.size());
   f->dump_int("waiting_requests", m_queue.size());
-}
-
-template <typename I>
-const char** Throttler<I>::get_tracked_conf_keys() const {  
-  return m_config_keys;
 }
 
 template <typename I>

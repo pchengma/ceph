@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -85,7 +85,6 @@ class RGWListRoles : public RGWRestRole {
   std::string path_prefix;
   std::string marker;
   int max_items = 100;
-  std::string next_marker;
 public:
   RGWListRoles() : RGWRestRole(rgw::IAM::iamListRoles, RGW_CAP_READ) {}
   int init_processing(optional_yield y) override;

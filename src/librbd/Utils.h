@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_UTILS_H
 #define CEPH_LIBRBD_UTILS_H
@@ -268,6 +268,7 @@ int snap_create_flags_api_to_internal(CephContext *cct, uint32_t api_flags,
                                       uint64_t *internal_flags);
 
 uint32_t get_default_snap_create_flags(ImageCtx *ictx);
+uint32_t get_default_snap_create_flags(librados::IoCtx& group_ioctx);
 
 SnapContext get_snap_context(
     const std::optional<

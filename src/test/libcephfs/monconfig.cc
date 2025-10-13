@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -68,7 +69,7 @@ TEST_F(MonConfig, MonAddrsMissing) {
   ASSERT_NE(nullptr, cct);
   clear_mon_config(cct);
 
-  ASSERT_EQ(-CEPHFS_ENOENT, ceph_mount(ca, NULL));
+  ASSERT_EQ(-ENOENT, ceph_mount(ca, NULL));
 }
 
 TEST_F(MonConfig, MonAddrsInConfigProxy) {

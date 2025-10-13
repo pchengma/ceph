@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,9 +15,11 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <fcntl.h>
 
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include "common/config.h"
@@ -33,6 +36,7 @@
 
 #include "common/ceph_argparse.h"
 #include "common/pick_address.h"
+#include "common/JSONFormatter.h"
 #include "common/Throttle.h"
 #include "common/Timer.h"
 #include "common/errno.h"
@@ -250,7 +254,7 @@ int main(int argc, const char **argv)
 {
   // reset our process name, in case we did a respawn, so that it's not
   // left as "exe".
-  ceph_pthread_setname(pthread_self(), "ceph-mon");
+  ceph_pthread_setname("ceph-mon");
 
   int err;
 

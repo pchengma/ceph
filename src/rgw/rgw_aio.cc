@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -52,7 +52,7 @@ void cb(librados::completion_t, void* arg) {
 
 template <typename Op>
 Aio::OpFunc aio_abstract(librados::IoCtx ctx, Op&& op, jspan_context* trace_ctx = nullptr) {
-  return [ctx = std::move(ctx), op = std::move(op), trace_ctx] (Aio* aio, AioResult& r) mutable {
+  return [ctx = std::move(ctx), op = std::forward<Op>(op), trace_ctx] (Aio* aio, AioResult& r) mutable {
       constexpr bool read = std::is_same_v<std::decay_t<Op>, librados::ObjectReadOperation>;
       // use placement new to construct the rados state inside of user_data
       auto s = new (&r.user_data) state(aio, ctx, r);
@@ -76,12 +76,12 @@ struct Handler {
   librados::IoCtx ctx;
   AioResult& r;
   // write callback
-  void operator()(boost::system::error_code ec) const {
+  void operator()(boost::system::error_code ec, version_t) const {
     r.result = -ec.value();
     throttle->put(r);
   }
   // read callback
-  void operator()(boost::system::error_code ec, bufferlist bl) const {
+  void operator()(boost::system::error_code ec, version_t, bufferlist bl) const {
     r.result = -ec.value();
     r.data = std::move(bl);
     throttle->put(r);
@@ -92,12 +92,12 @@ template <typename Op>
 Aio::OpFunc aio_abstract(librados::IoCtx ctx, Op&& op,
                          boost::asio::yield_context yield,
                          jspan_context* trace_ctx) {
-  return [ctx = std::move(ctx), op = std::move(op), yield, trace_ctx] (Aio* aio, AioResult& r) mutable {
+  return [ctx = std::move(ctx), op = std::forward<Op>(op), yield, trace_ctx] (Aio* aio, AioResult& r) mutable {
       // arrange for the completion Handler to run on the yield_context's strand
       // executor so it can safely call back into Aio without locking
       auto ex = yield.get_executor();
 
-      librados::async_operate(yield, ctx, r.obj.oid, &op, 0, trace_ctx,
+      librados::async_operate(ex, ctx, r.obj.oid, std::move(op), 0, trace_ctx,
                               bind_executor(ex, Handler{aio, ctx, r}));
     };
 }

@@ -10,7 +10,7 @@ import cherrypy
 
 from .. import mgr
 from ..exceptions import InvalidCredentialsError, UserDoesNotExist
-from ..services.auth import AuthManager, JwtManager
+from ..services.auth import AuthManager, AuthType, BaseAuth, JwtManager, OAuth2
 from ..services.cluster import ClusterModel
 from ..settings import Settings
 from . import APIDoc, APIRouter, ControllerAuthMixin, EndpointDoc, RESTController, allow_empty_body
@@ -66,7 +66,7 @@ class Auth(RESTController, ControllerAuthMixin):
             fsid = mgr.get('config')['fsid']
         except KeyError:
             fsid = ''
-        if max_attempt == 0 or mgr.ACCESS_CTRL_DB.get_attempt(username) < max_attempt:
+        if max_attempt == 0 or mgr.ACCESS_CTRL_DB.get_attempt(username) < max_attempt:  # pylint: disable=R1702,line-too-long # noqa: E501
             if user_data:
                 user_perms = user_data.get('permissions')
                 pwd_expiration_date = user_data.get('pwdExpirationDate', None)
@@ -94,20 +94,26 @@ class Auth(RESTController, ControllerAuthMixin):
                     multicluster_config = Settings.MULTICLUSTER_CONFIG.copy()
                 try:
                     if fsid in multicluster_config['config']:
-                        existing_entries = multicluster_config['config'][fsid]
-                        if not any((entry['user'] == username or entry['cluster_alias'] == 'local-cluster') for entry in existing_entries):  # noqa E501 #pylint: disable=line-too-long
-                            existing_entries.append({
+                        cluster_configurations = multicluster_config['config'][fsid]
+                        for config_item in cluster_configurations:
+                            if config_item['user'] == username or config_item['cluster_alias'] == 'local-cluster':  # noqa E501  #pylint: disable=line-too-long
+                                config_item['token'] = token  # Update token
+                                break
+                        else:
+                            cluster_configurations.append({
                                 "name": fsid,
                                 "url": origin,
                                 "cluster_alias": "local-cluster",
-                                "user": username
+                                "user": username,
+                                "token": token
                             })
                     else:
                         multicluster_config['config'][fsid] = [{
                             "name": fsid,
                             "url": origin,
                             "cluster_alias": "local-cluster",
-                            "user": username
+                            "user": username,
+                            "token": token
                         }]
 
                 except KeyError:
@@ -121,18 +127,19 @@ class Auth(RESTController, ControllerAuthMixin):
                                     "name": fsid,
                                     "url": origin,
                                     "cluster_alias": "local-cluster",
-                                    "user": username
+                                    "user": username,
+                                    "token": token
                                 }
                             ]
                         }
                     }
-                Settings.MULTICLUSTER_CONFIG = multicluster_config
+                Settings.MULTICLUSTER_CONFIG = json.dumps(multicluster_config)
                 return {
                     'token': token,
                     'username': username,
                     'permissions': user_perms,
                     'pwdExpirationDate': pwd_expiration_date,
-                    'sso': mgr.SSO_DB.protocol == 'saml2',
+                    'sso': BaseAuth.from_protocol(mgr.SSO_DB.protocol).sso,
                     'pwdUpdateRequired': pwd_update_required
                 }
             mgr.ACCESS_CTRL_DB.increment_attempt(username)
@@ -156,21 +163,14 @@ class Auth(RESTController, ControllerAuthMixin):
     @RESTController.Collection('POST')
     @allow_empty_body
     def logout(self):
-        logger.debug('Logout successful')
-        token = JwtManager.get_token_from_header()
+        logger.debug('Logout started')
+        token = JwtManager.get_token(cherrypy.request)
         JwtManager.blocklist_token(token)
         self._delete_token_cookie(token)
-        redirect_url = '#/login'
-        if mgr.SSO_DB.protocol == 'saml2':
-            redirect_url = 'auth/saml2/slo'
         return {
-            'redirect_url': redirect_url
+            'redirect_url': BaseAuth.from_db(mgr.SSO_DB).LOGOUT_URL,
+            'protocol': BaseAuth.from_db(mgr.SSO_DB).get_auth_name()
         }
-
-    def _get_login_url(self):
-        if mgr.SSO_DB.protocol == 'saml2':
-            return 'auth/saml2/login'
-        return '#/login'
 
     @RESTController.Collection('POST', query_params=['token'])
     @EndpointDoc("Check token Authentication",
@@ -178,15 +178,18 @@ class Auth(RESTController, ControllerAuthMixin):
                  responses={201: AUTH_CHECK_SCHEMA})
     def check(self, token):
         if token:
-            user = JwtManager.get_user(token)
+            if mgr.SSO_DB.protocol == AuthType.OAUTH2:
+                user = OAuth2.get_user(token)
+            else:
+                user = JwtManager.get_user(token)
             if user:
                 return {
                     'username': user.username,
                     'permissions': user.permissions_dict(),
-                    'sso': mgr.SSO_DB.protocol == 'saml2',
+                    'sso': BaseAuth.from_db(mgr.SSO_DB).sso,
                     'pwdUpdateRequired': user.pwd_update_required
                 }
         return {
-            'login_url': self._get_login_url(),
+            'login_url': BaseAuth.from_db(mgr.SSO_DB).LOGIN_URL,
             'cluster_status': ClusterModel.from_db().dict()['status']
         }

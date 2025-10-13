@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -200,7 +200,6 @@ public:
    * io behavior accordingly.
    */
   enum class io_state_t : uint8_t {
-    none,    // no IO is possible as the connection is not available to the user yet.
     delay,   // IO is delayed until open.
     open,    // Dispatch In and Out concurrently.
     drop,    // Drop IO as the connection is closed.
@@ -255,7 +254,7 @@ public:
   class shard_states_t {
   public:
     shard_states_t(seastar::shard_id _sid, io_state_t state)
-      : sid{_sid}, io_state{state} {}
+      : sid{_sid}, io_state{state}, gate{_sid} {}
 
     seastar::shard_id get_shard_id() const {
       return sid;
@@ -309,7 +308,7 @@ public:
       in_exit_dispatching = std::nullopt;
     }
 
-    bool try_enter_out_dispatching() {
+    bool try_enter_out_dispatching(SocketConnection &conn) {
       assert(seastar::this_shard_id() == sid);
       if (out_dispatching) {
         // already dispatching out
@@ -327,7 +326,10 @@ public:
         // do not dispatch out
         return false;
       default:
-        ceph_abort("impossible");
+        crimson::get_logger(ceph_subsys_ms).error(
+          "{} try_enter_out_dispatching() got wrong io_state {}",
+          conn, io_state);
+        ceph_abort_msg("impossible");
       }
     }
 
@@ -541,7 +543,7 @@ struct fmt::formatter<crimson::net::io_handler_state> {
   }
 
   template <typename FormatContext>
-  auto format(crimson::net::io_handler_state state, FormatContext& ctx) {
+  auto format(crimson::net::io_handler_state state, FormatContext& ctx) const {
     return fmt::format_to(
         ctx.out(),
         "io(in_seq={}, is_out_queued={}, has_out_sent={})",
@@ -555,13 +557,10 @@ template <>
 struct fmt::formatter<crimson::net::IOHandler::io_state_t>
   : fmt::formatter<std::string_view> {
   template <typename FormatContext>
-  auto format(crimson::net::IOHandler::io_state_t state, FormatContext& ctx) {
+  auto format(crimson::net::IOHandler::io_state_t state, FormatContext& ctx) const {
     using enum crimson::net::IOHandler::io_state_t;
     std::string_view name;
     switch (state) {
-    case none:
-      name = "none";
-      break;
     case delay:
       name = "delay";
       break;
@@ -574,6 +573,8 @@ struct fmt::formatter<crimson::net::IOHandler::io_state_t>
     case switched:
       name = "switched";
       break;
+    default:
+      name = "undefined";
     }
     return formatter<string_view>::format(name, ctx);
   }

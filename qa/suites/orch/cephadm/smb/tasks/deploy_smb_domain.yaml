@@ -14,7 +14,7 @@ overrides:
     log-only-match:
       - CEPHADM_
 tasks:
-- cephadm.deploy_samba_ad_dc:
+- smb.deploy_samba_ad_dc:
     role: host.b
 - cephadm:
 
@@ -42,20 +42,23 @@ tasks:
           globals = ["default", "domain"]
           instance_name = "SAMBA"
           [shares.share1.options]
-          "vfs objects" = "ceph"
+          "vfs objects" = "acl_xattr ceph_snapshots ceph"
           path = "/"
+          "acl_xattr:security_acl_name" = "user.NTACL"
           "ceph:config_file" = "/etc/ceph/ceph.conf"
           "ceph:user_id" = "smbdata"
           "kernel share modes" = "no"
           "read only" = "no"
           "browseable" = "yes"
+          "comment" = ""
+          "max connections" = "0"
           [globals.default.options]
-          "server min protocol" = "SMB2"
           "load printers" = "no"
           "printing" = "bsd"
           "printcap name" = "/dev/null"
           "disable spoolss" = "yes"
           "guest ok" = "no"
+          "smbd profiling level" = "on"
           [globals.domain.options]
           security = "ads"
           workgroup = "DOMAIN1"
@@ -86,7 +89,7 @@ tasks:
 - cephadm.wait_for_service:
     service: smb.admem1
 
-- cephadm.exec:
+- template.exec:
     host.b:
       - sleep 30
       - "{{ctx.samba_client_container_cmd|join(' ')}} smbclient -U DOMAIN1\\\\ckent%1115Rose. //{{'host.a'|role_to_remote|attr('ip_address')}}/share1 -c ls"

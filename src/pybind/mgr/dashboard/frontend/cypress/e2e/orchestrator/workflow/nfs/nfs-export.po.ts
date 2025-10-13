@@ -17,7 +17,7 @@ export class NFSPageHelper extends PageHelper {
       this.selectOption('fs_name', 'myfs');
       cy.get('#security_label').click({ force: true });
     } else {
-      cy.get('input[data-testid=rgw_path]').type(rgwPath);
+      cy.get('input[id=path]').type(rgwPath);
     }
 
     cy.get('input[name=pseudo]').type(pseudo);
@@ -28,15 +28,15 @@ export class NFSPageHelper extends PageHelper {
     cy.get('input[name=addresses]').type(client['addresses']);
 
     // Check if we can remove clients and add it again
-    cy.get('span[name=remove_client]').click({ force: true });
+    cy.get('[data-testid=remove_client]').click({ force: true });
     cy.get('button[name=add_client]').click({ force: true });
     cy.get('input[name=addresses]').type(client['addresses']);
 
     cy.get('cd-submit-button').click();
   }
 
-  editExport(pseudo: string, editPseudo: string, url: string) {
-    this.navigateEdit(pseudo, true, true, url);
+  editExport(pseudo: string, editPseudo: string) {
+    this.navigateEdit(pseudo, true, true);
 
     cy.get('input[name=pseudo]').clear().type(editPseudo);
 

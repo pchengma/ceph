@@ -8,7 +8,7 @@ overrides:
         debug ms: 1
         debug client: 20
       mds:
-        debug ms: 1
+        debug ms: 2
         debug mds: 20
       osd: # force bluestore since it's required for ec overwrites
         osd objectstore: bluestore
@@ -29,3 +29,13 @@ tasks:
     clients:
       client.0:
         - fs/full/subvolume_snapshot_rm.sh
+- workunit:
+    cleanup: true
+    clients:
+      client.0:
+        - fs/full/subvolume_ls.sh
+- workunit:
+    cleanup: true
+    clients:
+      client.0:
+        - fs/full/subvol_rm_retained_snap_when_cluster_is_full.sh

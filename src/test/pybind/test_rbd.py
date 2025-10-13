@@ -1,4 +1,4 @@
-# vim: expandtab smarttab shiftwidth=4 softtabstop=4
+# vim: expandtab shiftwidth=4 softtabstop=4
 import base64
 import copy
 import errno
@@ -20,8 +20,8 @@ from rados import (Rados,
                    LIBRADOS_OP_FLAG_FADVISE_NOCACHE,
                    LIBRADOS_OP_FLAG_FADVISE_RANDOM)
 from rbd import (RBD, Group, Image, ImageNotFound, InvalidArgument, ImageExists,
-                 ImageBusy, ImageHasSnapshots, ReadOnlyImage,
-                 FunctionNotSupported, ArgumentOutOfRange,
+                 ImageBusy, ImageHasSnapshots, ReadOnlyImage, ObjectNotFound,
+                 FunctionNotSupported, ArgumentOutOfRange, ImageMemberOfGroup,
                  ECANCELED, OperationCanceled,
                  DiskQuotaExceeded, ConnectionShutdown, PermissionError,
                  RBD_FEATURE_LAYERING, RBD_FEATURE_STRIPINGV2,
@@ -29,8 +29,9 @@ from rbd import (RBD, Group, Image, ImageNotFound, InvalidArgument, ImageExists,
                  RBD_FEATURE_DEEP_FLATTEN, RBD_FEATURE_FAST_DIFF,
                  RBD_FEATURE_OBJECT_MAP,
                  RBD_MIRROR_MODE_DISABLED, RBD_MIRROR_MODE_IMAGE,
-                 RBD_MIRROR_MODE_POOL, RBD_MIRROR_IMAGE_ENABLED,
-                 RBD_MIRROR_IMAGE_DISABLED, MIRROR_IMAGE_STATUS_STATE_UNKNOWN,
+                 RBD_MIRROR_MODE_POOL, RBD_MIRROR_MODE_INIT_ONLY,
+                 RBD_MIRROR_IMAGE_ENABLED, RBD_MIRROR_IMAGE_DISABLED,
+                 MIRROR_IMAGE_STATUS_STATE_UNKNOWN,
                  RBD_MIRROR_IMAGE_MODE_JOURNAL, RBD_MIRROR_IMAGE_MODE_SNAPSHOT,
                  RBD_LOCK_MODE_EXCLUSIVE, RBD_OPERATION_FEATURE_GROUP,
                  RBD_OPERATION_FEATURE_CLONE_CHILD,
@@ -49,7 +50,8 @@ from rbd import (RBD, Group, Image, ImageNotFound, InvalidArgument, ImageExists,
                  RBD_SNAP_CREATE_IGNORE_QUIESCE_ERROR,
                  RBD_WRITE_ZEROES_FLAG_THICK_PROVISION,
                  RBD_ENCRYPTION_FORMAT_LUKS1, RBD_ENCRYPTION_FORMAT_LUKS2,
-                 RBD_ENCRYPTION_FORMAT_LUKS)
+                 RBD_ENCRYPTION_FORMAT_LUKS, RBD_GROUP_SNAP_STATE_COMPLETE,
+                 RBD_GROUP_SNAP_NAMESPACE_TYPE_USER)
 
 rados = None
 ioctx = None
@@ -692,15 +694,15 @@ class TestImage(object):
         data = rand_data(256)
         self.image.write(data, 0)
         self.image.write_zeroes(0, 256)
-        eq(self.image.read(256, 256), b'\0' * 256)
-        check_diff(self.image, 0, IMG_SIZE, None, [])
+        eq(self.image.read(0, 256), b'\0' * 256)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [])
 
     def test_write_zeroes_thick_provision(self):
         data = rand_data(256)
         self.image.write(data, 0)
         self.image.write_zeroes(0, 256, RBD_WRITE_ZEROES_FLAG_THICK_PROVISION)
-        eq(self.image.read(256, 256), b'\0' * 256)
-        check_diff(self.image, 0, IMG_SIZE, None, [(0, 256, True)])
+        eq(self.image.read(0, 256), b'\0' * 256)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 256, True)])
 
     def test_read(self):
         data = self.image.read(0, 20)
@@ -815,7 +817,6 @@ class TestImage(object):
         self._test_copy(features, self.image.stat()['order'],
                         self.image.stripe_unit(), self.image.stripe_count())
 
-    @pytest.mark.skip_if_crimson
     def test_deep_copy(self):
         global ioctx
         global features
@@ -1392,21 +1393,145 @@ class TestImage(object):
         eq([], self.image.list_lockers())
 
     def test_diff_iterate(self):
-        check_diff(self.image, 0, IMG_SIZE, None, [])
+        def cb(offset, length, exists):
+            raise Exception()
+
+        assert_raises(TypeError, self.image.diff_iterate, 0, IMG_SIZE, 1.0, cb)
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      LIBRADOS_SNAP_HEAD, cb)
+
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [])
         self.image.write(b'a' * 256, 0)
-        check_diff(self.image, 0, IMG_SIZE, None, [(0, 256, True)])
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 256, True)])
         self.image.write(b'b' * 256, 256)
-        check_diff(self.image, 0, IMG_SIZE, None, [(0, 512, True)])
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
         self.image.discard(128, 256)
-        check_diff(self.image, 0, IMG_SIZE, None, [(0, 512, True)])
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+
+        check_diff(self.image, 0, 0, None, 0, [])
+        check_diff(self.image, IMG_SIZE - 1, 0, None, 0, [])
+        check_diff(self.image, IMG_SIZE, 0, None, 0, [])
 
         self.image.create_snap('snap1')
+        snap_id1 = self.image.snap_get_id('snap1')
+        self.image.remove_snap('snap1')
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      'snap1', cb)
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      snap_id1, cb)
+
+        self.image.create_snap('snap1')
+        snap_id1 = self.image.snap_get_id('snap1')
         self.image.discard(0, 1 << IMG_ORDER)
         self.image.create_snap('snap2')
+        snap_id2 = self.image.snap_get_id('snap2')
+
+        self.image.write(b'c' * 16, 16)
+        self.image.write(b'c', 1 << IMG_ORDER)
+
+        self.image.set_snap('snap1')
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+        check_diff(self.image, 0, IMG_SIZE, None, 0,
+                   [(0, 1 << IMG_ORDER, True)], whole_object=True)
+        check_diff(self.image, 0, IMG_SIZE, 'snap1', snap_id1, [])
+        assert_raises(InvalidArgument, self.image.diff_iterate, 0, IMG_SIZE,
+                      'snap2', cb)
+        assert_raises(InvalidArgument, self.image.diff_iterate, 0, IMG_SIZE,
+                      snap_id2, cb)
+
         self.image.set_snap('snap2')
-        check_diff(self.image, 0, IMG_SIZE, 'snap1', [(0, 512, False)])
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [])
+        check_diff(self.image, 0, IMG_SIZE, 'snap1', snap_id1,
+                   [(0, 512, False)])
+        check_diff(self.image, 0, IMG_SIZE, 'snap1', snap_id1,
+                   [(0, 1 << IMG_ORDER, False)], whole_object=True)
+        check_diff(self.image, 0, IMG_SIZE, 'snap2', snap_id2, [])
+
+        self.image.set_snap(None)
+        expected_whole_object = [(0, 1 << IMG_ORDER, True),
+                                 (1 << IMG_ORDER, 1 << IMG_ORDER, True)]
+        check_diff(self.image, 0, IMG_SIZE, None, 0,
+                   [(0, 32, True), (1 << IMG_ORDER, 1, True)])
+        check_diff(self.image, 0, IMG_SIZE, None, 0,
+                   expected_whole_object, whole_object=True)
+        check_diff(self.image, 0, IMG_SIZE, 'snap1', snap_id1,
+                   [(0, 32, True),
+                    (32, 480, False),
+                    (1 << IMG_ORDER, 1, True)])
+        check_diff(self.image, 0, IMG_SIZE, 'snap1', snap_id1,
+                   expected_whole_object, whole_object=True)
+        check_diff(self.image, 0, IMG_SIZE, 'snap2', snap_id2,
+                   [(0, 32, True), (1 << IMG_ORDER, 1, True)])
+        check_diff(self.image, 0, IMG_SIZE, 'snap2', snap_id2,
+                   expected_whole_object, whole_object=True)
+
         self.image.remove_snap('snap1')
         self.image.remove_snap('snap2')
+
+    @require_features([RBD_FEATURE_LAYERING])
+    def test_diff_iterate_from_trash_snap(self):
+        def cb(offset, length, exists):
+            raise Exception()
+
+        self.image.write(b'a' * 256, 0)
+        self.image.create_snap('snap')
+        snap_id = self.image.snap_get_id('snap')
+        clone_name = get_temp_image_name()
+        self.rbd.clone(ioctx, image_name, 'snap', ioctx, clone_name, features,
+                       clone_format=2)
+
+        self.image.write(b'b' * 256, 256)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+        check_diff(self.image, 0, IMG_SIZE, 'snap', snap_id, [(256, 256, True)])
+
+        self.image.remove_snap('snap')
+        image_snaps = list(self.image.list_snaps())
+        assert [s['namespace'] for s in image_snaps] == [RBD_SNAP_NAMESPACE_TYPE_TRASH]
+        assert image_snaps[0]['id'] == snap_id
+
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      'snap', cb)
+        check_diff_one(self.image, 0, IMG_SIZE, snap_id, [(256, 256, True)])
+        self.image.write(b'c' * 256, 128)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+        check_diff_one(self.image, 0, IMG_SIZE, snap_id, [(128, 384, True)])
+        check_diff_one(self.image, 0, IMG_SIZE, snap_id,
+                       [(0, 1 << IMG_ORDER, True)], whole_object=True)
+
+        self.rbd.remove(ioctx, clone_name)
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      'snap', cb)
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      snap_id, cb)
+
+    @require_features([RBD_FEATURE_LAYERING])
+    def test_diff_iterate_exclude_parent(self):
+        self.image.write(b'a' * 256, 0)
+        self.image.create_snap('snap')
+        clone_name = get_temp_image_name()
+        self.rbd.clone(ioctx, image_name, 'snap', ioctx, clone_name, features,
+                       clone_format=2)
+
+        self.image.write(b'b' * 256, 256)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+
+        with Image(ioctx, clone_name) as clone:
+            check_diff(clone, 0, IMG_SIZE, None, 0, [(0, 256, True)])
+            clone.write(b'c' * 256, 1 << IMG_ORDER)
+            check_diff(clone, 0, IMG_SIZE, None, 0,
+                       [(0, 256, True), (1 << IMG_ORDER, 256, True)])
+            check_diff(clone, 0, IMG_SIZE, None, 0,
+                       [(0, 1 << IMG_ORDER, True),
+                        (1 << IMG_ORDER, 1 << IMG_ORDER, True)],
+                       whole_object=True)
+            check_diff(clone, 0, IMG_SIZE, None, 0,
+                       [(1 << IMG_ORDER, 256, True)], include_parent=False)
+            check_diff(clone, 0, IMG_SIZE, None, 0,
+                       [(1 << IMG_ORDER, 1 << IMG_ORDER, True)],
+                       include_parent=False, whole_object=True)
+
+        self.rbd.remove(ioctx, clone_name)
+        self.image.remove_snap('snap')
 
     def test_aio_read(self):
         # this is a list so that the local cb() can modify it
@@ -1478,7 +1603,7 @@ class TestImage(object):
         eq(retval[0], 0)
         eq(comp.get_return_value(), 0)
         eq(sys.getrefcount(comp), 2)
-        eq(self.image.read(256, 256), b'\0' * 256)
+        eq(self.image.read(0, 256), b'\0' * 256)
 
     def test_aio_flush(self):
         retval = [None]
@@ -1633,12 +1758,19 @@ class TestImageId(object):
         info = self.image2.stat()
         check_stat(info, new_size, IMG_ORDER)
 
-def check_diff(image, offset, length, from_snapshot, expected):
+def check_diff_one(image, offset, length, from_snapshot, expected, **kwargs):
     extents = []
     def cb(offset, length, exists):
         extents.append((offset, length, exists))
-    image.diff_iterate(0, IMG_SIZE, from_snapshot, cb)
+    image.diff_iterate(offset, length, from_snapshot, cb, **kwargs)
     eq(extents, expected)
+
+def check_diff(image, offset, length, from_snap_name, from_snap_id, expected,
+               **kwargs):
+    assert from_snap_name is None or isinstance(from_snap_name, str)
+    assert isinstance(from_snap_id, int)
+    check_diff_one(image, offset, length, from_snap_name, expected, **kwargs)
+    check_diff_one(image, offset, length, from_snap_id, expected, **kwargs)
 
 class TestClone(object):
 
@@ -1730,6 +1862,11 @@ class TestClone(object):
 
     def test_clone_format(self):
         clone_name2 = get_temp_image_name()
+        assert_raises(InvalidArgument, self.rbd.clone, ioctx, image_name,
+                       'snap1', ioctx, clone_name2, features, clone_format=0)
+        assert_raises(InvalidArgument, self.rbd.clone, ioctx, image_name,
+                       'snap1', ioctx, clone_name2, features, clone_format=3)
+
         self.rbd.clone(ioctx, image_name, 'snap1', ioctx, clone_name2,
                        features, clone_format=1)
         with Image(ioctx, clone_name2) as clone2:
@@ -2312,7 +2449,6 @@ class TestExclusiveLock(object):
             image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE)
             image.lock_release()
 
-    @pytest.mark.skip_if_crimson
     def test_break_lock(self):
         blocklist_rados = Rados(conffile='')
         blocklist_rados.connect()
@@ -2386,6 +2522,94 @@ class TestMirroring(object):
         self.rbd.mirror_site_name_set(rados, "")
         eq(rados.get_fsid(), self.rbd.mirror_site_name_get(rados))
 
+    def test_mirror_remote_namespace(self):
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # cannot set remote namespace while mirroring enabled
+        assert_raises(InvalidArgument, self.rbd.mirror_remote_namespace_set,
+                      ioctx, "remote-ns1")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        assert_raises(InvalidArgument, self.rbd.mirror_remote_namespace_set,
+                      ioctx, "")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_INIT_ONLY)
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # set remote namespace for the default namespace while in init-only
+        self.rbd.mirror_remote_namespace_set(ioctx, "remote-ns1")
+        eq("remote-ns1", self.rbd.mirror_remote_namespace_get(ioctx))
+        # reset remote namespace for the default namespace while in init-only
+        self.rbd.mirror_remote_namespace_set(ioctx, "")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # change remote namespace for the default namespace while in init-only
+        self.rbd.mirror_remote_namespace_set(ioctx, "remote-ns2")
+        eq("remote-ns2", self.rbd.mirror_remote_namespace_get(ioctx))
+        # disabling mirroring also resets remote namespace
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_DISABLED)
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # set remote namespace for the default namespace while mirroring disabled
+        self.rbd.mirror_remote_namespace_set(ioctx, "remote-ns3")
+        eq("remote-ns3", self.rbd.mirror_remote_namespace_get(ioctx))
+        # reset remote namespace for the default namespace while mirroring disabled
+        self.rbd.mirror_remote_namespace_set(ioctx, "")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # change remote namespace for the default namespace while mirroring disabled
+        self.rbd.mirror_remote_namespace_set(ioctx, "remote-ns4")
+        eq("remote-ns4", self.rbd.mirror_remote_namespace_get(ioctx))
+        # moving to init-only or an enabled state preserves remote namespace
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_INIT_ONLY)
+        eq("remote-ns4", self.rbd.mirror_remote_namespace_get(ioctx))
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_POOL)
+        eq("remote-ns4", self.rbd.mirror_remote_namespace_get(ioctx))
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_IMAGE)
+        eq("remote-ns4", self.rbd.mirror_remote_namespace_get(ioctx))
+
+        self.rbd.namespace_create(ioctx, "ns1")
+        ioctx.set_namespace("ns1")
+        eq("ns1", self.rbd.mirror_remote_namespace_get(ioctx))
+        # set remote namespace on a non-default namespace while mirroring disabled
+        self.rbd.mirror_remote_namespace_set(ioctx, "remote-ns1")
+        eq("remote-ns1", self.rbd.mirror_remote_namespace_get(ioctx))
+        # reset remote namespace on a non-default namespace while mirroring disabled
+        self.rbd.mirror_remote_namespace_set(ioctx, "ns1")
+        eq("ns1", self.rbd.mirror_remote_namespace_get(ioctx))
+        # change remote namespace on a non-default namespace while mirroring disabled
+        self.rbd.mirror_remote_namespace_set(ioctx, "remote-ns2")
+        eq("remote-ns2", self.rbd.mirror_remote_namespace_get(ioctx))
+        # cannot move to init-only on a non-default namespace
+        assert_raises(InvalidArgument, self.rbd.mirror_mode_set,
+                      ioctx, RBD_MIRROR_MODE_INIT_ONLY)
+        eq(RBD_MIRROR_MODE_DISABLED, self.rbd.mirror_mode_get(ioctx))
+        # moving to an enabled state preserves remote namespace
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_IMAGE)
+        eq("remote-ns2", self.rbd.mirror_remote_namespace_get(ioctx))
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_POOL)
+        eq("remote-ns2", self.rbd.mirror_remote_namespace_get(ioctx))
+        # disabling mirroring also resets remote namespace
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_DISABLED)
+        eq("ns1", self.rbd.mirror_remote_namespace_get(ioctx))
+        # set remote namespace on a non-default namespace to the default namespace
+        self.rbd.mirror_remote_namespace_set(ioctx, "")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # moving to an enabled state preserves remote namespace
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_POOL)
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_IMAGE)
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # cannot set remote namespace while mirroring enabled
+        assert_raises(InvalidArgument, self.rbd.mirror_remote_namespace_set,
+                      ioctx, "remote-ns1")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        assert_raises(InvalidArgument, self.rbd.mirror_remote_namespace_set,
+                      ioctx, "ns1")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        assert_raises(InvalidArgument, self.rbd.mirror_remote_namespace_set,
+                      ioctx, "")
+        eq("", self.rbd.mirror_remote_namespace_get(ioctx))
+        # disabling mirroring clears remote namespace
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_DISABLED)
+        eq("ns1", self.rbd.mirror_remote_namespace_get(ioctx))
+        ioctx.set_namespace("")
+        self.rbd.namespace_remove(ioctx, "ns1")
+
     def test_mirror_peer_bootstrap(self):
         eq([], list(self.rbd.mirror_peer_list(ioctx)))
 
@@ -2452,6 +2676,11 @@ class TestMirroring(object):
         self.image.mirror_image_disable(True)
         info = self.image.mirror_image_get_info()
         self.check_info(info, '', RBD_MIRROR_IMAGE_DISABLED, False)
+        assert_raises(InvalidArgument, self.image.mirror_image_get_mode)
+        assert_raises(InvalidArgument, self.image.mirror_image_promote, False)
+        assert_raises(InvalidArgument, self.image.mirror_image_promote, True)
+        assert_raises(InvalidArgument, self.image.mirror_image_demote)
+        assert_raises(InvalidArgument, self.image.mirror_image_resync)
 
         self.image.mirror_image_enable()
         info = self.image.mirror_image_get_info()
@@ -2609,15 +2838,37 @@ class TestMirroring(object):
         peer_uuid = self.rbd.mirror_peer_add(ioctx, "cluster", "client")
         self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_IMAGE)
         self.image.mirror_image_disable(False)
-        self.image.mirror_image_enable(RBD_MIRROR_IMAGE_MODE_SNAPSHOT)
 
+        # this is a list so that the local cb() can modify it
+        info = [123]
+        def cb(_, _info):
+            info[0] = _info
+
+        comp = self.image.aio_mirror_image_get_info(cb)
+        comp.wait_for_complete_and_cb()
+        assert_not_equal(info[0], None)
+        eq(comp.get_return_value(), 0)
+        eq(sys.getrefcount(comp), 2)
+        info = info[0]
+        self.check_info(info, "", RBD_MIRROR_IMAGE_DISABLED, False)
+
+        mode = [123]
+        def cb(_, _mode):
+            mode[0] = _mode
+
+        comp = self.image.aio_mirror_image_get_mode(cb)
+        comp.wait_for_complete_and_cb()
+        eq(comp.get_return_value(), -errno.EINVAL)
+        eq(sys.getrefcount(comp), 2)
+        eq(mode[0], None)
+
+        self.image.mirror_image_enable(RBD_MIRROR_IMAGE_MODE_SNAPSHOT)
         snaps = list(self.image.list_snaps())
         eq(1, len(snaps))
         snap = snaps[0]
         eq(snap['namespace'], RBD_SNAP_NAMESPACE_TYPE_MIRROR)
         eq(RBD_SNAP_MIRROR_STATE_PRIMARY, snap['mirror']['state'])
 
-        # this is a list so that the local cb() can modify it
         info = [None]
         def cb(_, _info):
             info[0] = _info
@@ -2809,6 +3060,9 @@ def test_list_groups_after_removed():
     eq([], RBD().group_list(ioctx))
 
 class TestGroups(object):
+    img_snap_keys = ['image_name', 'pool_id', 'snap_id']
+    gp_snap_keys = ['id', 'image_snap_name', 'image_snaps', 'name',
+                    'namespace_type', 'state']
 
     def setup_method(self, method):
         global snap_name
@@ -2840,13 +3094,19 @@ class TestGroups(object):
 
     def test_group_image_list_move_to_trash(self):
         eq([], list(self.group.list_images()))
-        with Image(ioctx, image_name) as image:
-            image_id = image.id()
         self.group.add_image(ioctx, image_name)
         eq([image_name], [img['name'] for img in self.group.list_images()])
-        RBD().trash_move(ioctx, image_name, 0)
+        assert_raises(ImageMemberOfGroup, RBD().trash_move, ioctx, image_name, 0)
+        eq([image_name], [img['name'] for img in self.group.list_images()])
+
+    def test_group_image_list_remove(self):
+        # need a closed image to get ImageMemberOfGroup instead of ImageBusy
+        self.image_names.append(create_image())
         eq([], list(self.group.list_images()))
-        RBD().trash_restore(ioctx, image_id, image_name)
+        self.group.add_image(ioctx, image_name)
+        eq([image_name], [img['name'] for img in self.group.list_images()])
+        assert_raises(ImageMemberOfGroup, RBD().remove, ioctx, image_name)
+        eq([image_name], [img['name'] for img in self.group.list_images()])
 
     def test_group_get_id(self):
         id = self.group.id()
@@ -2881,6 +3141,49 @@ class TestGroups(object):
         eq([], list(self.group.list_images()))
         with Image(ioctx, image_name) as image:
             eq(0, image.op_features() & RBD_OPERATION_FEATURE_GROUP)
+
+    def test_group_snap_get_info(self):
+        self.image_names.append(create_image())
+        self.image_names.sort()
+        self.group.add_image(ioctx, self.image_names[0])
+        self.group.add_image(ioctx, self.image_names[1])
+        pool_id = ioctx.get_pool_id()
+
+        assert_raises(ObjectNotFound, self.group.get_snap_info, "")
+
+        self.group.create_snap(snap_name)
+        snap_info_dict = self.group.get_snap_info(snap_name)
+        image_names = []
+        assert sorted(snap_info_dict.keys()) == self.gp_snap_keys
+        assert snap_info_dict['name'] == snap_name
+        assert snap_info_dict['state'] == RBD_GROUP_SNAP_STATE_COMPLETE
+        assert snap_info_dict['namespace_type'] == RBD_GROUP_SNAP_NAMESPACE_TYPE_USER
+        for image_snap in snap_info_dict['image_snaps']:
+            assert sorted(image_snap.keys()) == self.img_snap_keys
+            assert image_snap['pool_id'] == pool_id
+            image_names.append(image_snap['image_name'])
+            with Image(ioctx, image_snap['image_name']) as member_image:
+                snaps = [snap for snap in member_image.list_snaps()]
+            assert len(snaps) == 1
+            assert snaps[0]['name'] == snap_info_dict['image_snap_name']
+            assert snaps[0]['id'] == image_snap['snap_id']
+        assert sorted(image_names) == self.image_names
+
+        self.group.remove_snap(snap_name)
+        assert_raises(ObjectNotFound, self.group.get_snap_info, snap_name)
+
+    def test_group_snap_get_info_no_member_images(self):
+        self.group.create_snap(snap_name)
+
+        snap_info_dict = self.group.get_snap_info(snap_name)
+        assert sorted(snap_info_dict.keys()) == self.gp_snap_keys
+        assert snap_info_dict['name'] == snap_name
+        assert snap_info_dict['state'] == RBD_GROUP_SNAP_STATE_COMPLETE
+        assert snap_info_dict['namespace_type'] == RBD_GROUP_SNAP_NAMESPACE_TYPE_USER
+        assert snap_info_dict['image_snap_name'] == ""
+        assert snap_info_dict['image_snaps'] == []
+
+        self.group.remove_snap(snap_name)
 
     def test_group_snap(self):
         global snap_name
@@ -2919,18 +3222,30 @@ class TestGroups(object):
         eq([], list(self.group.list_snaps()))
 
     def test_group_snap_list_many(self):
+        self.image_names.append(create_image())
+        self.image_names.sort()
+        self.group.add_image(ioctx, self.image_names[0])
+        self.group.add_image(ioctx, self.image_names[1])
+
         global snap_name
-        eq([], list(self.group.list_snaps()))
+        assert list(self.group.list_snaps()) == []
         snap_names = []
         for x in range(0, 20):
             snap_names.append(snap_name)
             self.group.create_snap(snap_name)
             snap_name = get_temp_snap_name()
 
-        snap_names.sort()
-        answer = [snap['name'] for snap in self.group.list_snaps()]
-        answer.sort()
-        eq(snap_names, answer)
+        gp_snaps_list = self.group.list_snaps()
+        gp_snap_names = []
+        for gp_snap in gp_snaps_list:
+            assert sorted(gp_snap.keys()) == self.gp_snap_keys
+            gp_snap_names.append(gp_snap['name'])
+            image_names = []
+            for img_snap in gp_snap['image_snaps']:
+                assert sorted(img_snap.keys()) == self.img_snap_keys
+                image_names.append(img_snap['image_name'])
+            assert sorted(image_names) == self.image_names
+        assert sorted(gp_snap_names) == sorted(snap_names)
 
     def test_group_snap_namespace(self):
         global snap_name
@@ -3055,6 +3370,37 @@ class TestGroups(object):
             assert read == data
 
         self.rbd.remove(ioctx, clone_name)
+
+    def test_group_snap_diff_iterate(self):
+        def cb(offset, length, exists):
+            raise Exception()
+
+        self.image.write(b'a' * 256, 0)
+        self.group.add_image(ioctx, image_name)
+        self.group.create_snap(snap_name)
+        image_snaps = list(self.image.list_snaps())
+        assert [s['namespace'] for s in image_snaps] == [RBD_SNAP_NAMESPACE_TYPE_GROUP]
+        image_snap_name = image_snaps[0]['name']
+        image_snap_id = image_snaps[0]['id']
+
+        self.image.write(b'b' * 256, 256)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      image_snap_name, cb)
+        check_diff_one(self.image, 0, IMG_SIZE, image_snap_id,
+                       [(256, 256, True)])
+        self.image.write(b'c' * 256, 128)
+        check_diff(self.image, 0, IMG_SIZE, None, 0, [(0, 512, True)])
+        check_diff_one(self.image, 0, IMG_SIZE, image_snap_id,
+                       [(128, 384, True)])
+        check_diff_one(self.image, 0, IMG_SIZE, image_snap_id,
+                       [(0, 1 << IMG_ORDER, True)], whole_object=True)
+
+        self.group.remove_snap(snap_name)
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      image_snap_name, cb)
+        assert_raises(ImageNotFound, self.image.diff_iterate, 0, IMG_SIZE,
+                      image_snap_id, cb)
 
     def test_group_snap_rollback(self):
         for _ in range(1, 3):

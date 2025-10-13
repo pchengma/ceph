@@ -5,7 +5,8 @@ options:
 - name: mgr_data
   type: str
   level: advanced
-  desc: Filesystem path to the ceph-mgr data directory, used to contain keyring.
+  desc: Filesystem path to the Manager's data directory, which contains
+    keyrings and other data 
   fmt_desc: Path to load daemon data (such as keyring)
   default: /var/lib/ceph/mgr/$cluster-$id
   services:
@@ -152,7 +153,7 @@ options:
     first started after installation, to populate the list of enabled manager modules.  Subsequent
     updates are done using the 'mgr module [enable|disable]' commands.  List may be
     comma or space separated.
-  default: restful iostat nfs
+  default: iostat nfs
   services:
   - mon
   - common
@@ -292,6 +293,15 @@ options:
   default: true
   services:
   - mgr
+- name: mon_warn_on_pool_no_app_grace
+  type: secs
+  level: dev
+  desc: time after which POOL_APP_NOT_ENABLED health warning is issued
+  default: 5_min
+  services:
+  - mgr
+  see_also:
+  - mon_warn_on_pool_no_app
 - name: mon_warn_on_too_few_osds
   type: bool
   level: advanced
@@ -302,11 +312,13 @@ options:
 - name: mon_target_pg_per_osd
   type: uint
   level: advanced
-  desc: Automated PG management creates this many PGs per OSD
-  long_desc: When creating pools, the automated PG management logic will attempt to
-    reach this target.  In some circumstances, it may exceed this target, up to the
+  desc: Target number of PG replicas per OSD
+  long_desc: The placement group (PG) autoscaler will arrange for approximately this number of PG
+    replicas on each OSD as shown by the PGS column of a ``ceph osd df``
+    report. In some circumstances it may exceed this target, up to the
     ``mon_max_pg_per_osd`` limit. Conversely, a lower number of PGs per OSD may be
-    created if the cluster is not yet fully utilised
+    set if the cluster is not yet fully utilized or when the sum of power-of-two
+    per-pool ``pg_num`` values does not permit a perfect fit.
   default: 100
   min: 1
 # min pgs per osd for reweight-by-pg command

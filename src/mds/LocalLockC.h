@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -30,7 +31,7 @@ public:
   }
 
   bool can_xlock_local() const {
-    return !is_wrlocked() && (get_xlock_by() == MutationRef());
+    return !is_wrlocked() && !has_xlock_by();
   }
 
   bool can_wrlock() const {

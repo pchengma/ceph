@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_common.h"
 #include "rgw_coroutine.h"
@@ -16,14 +16,23 @@
 
 #define dout_subsys ceph_subsys_rgw
 
-RGWMetadataHandler *RGWSyncModuleInstance::alloc_bucket_meta_handler(librados::Rados& rados)
+auto RGWSyncModuleInstance::alloc_bucket_meta_handler(librados::Rados& rados,
+                                                      RGWSI_Bucket* svc_bucket,
+                                                      RGWBucketCtl* ctl_bucket)
+    -> std::unique_ptr<RGWMetadataHandler>
 {
-  return RGWBucketMetaHandlerAllocator::alloc(rados);
+  return create_bucket_metadata_handler(rados, svc_bucket, ctl_bucket);
 }
 
-RGWBucketInstanceMetadataHandlerBase* RGWSyncModuleInstance::alloc_bucket_instance_meta_handler(rgw::sal::Driver* driver)
+auto RGWSyncModuleInstance::alloc_bucket_instance_meta_handler(rgw::sal::Driver* driver,
+                                                               RGWSI_Zone* svc_zone,
+                                                               RGWSI_Bucket* svc_bucket,
+                                                               RGWSI_BucketIndex* svc_bi,
+                                                               RGWDataChangesLog *svc_datalog)
+    -> std::unique_ptr<RGWMetadataHandler>
 {
-  return RGWBucketInstanceMetaHandlerAllocator::alloc(driver);
+  return create_bucket_instance_metadata_handler(driver, svc_zone,
+                                                 svc_bucket, svc_bi, svc_datalog);
 }
 
 RGWStatRemoteObjCBCR::RGWStatRemoteObjCBCR(RGWDataSyncCtx *_sc,

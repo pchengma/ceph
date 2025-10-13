@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -39,7 +40,7 @@ int ErasureCodePluginJerasure::factory(const std::string& directory,
     std::string t;
     if (profile.find("technique") != profile.end())
       t = profile.find("technique")->second;
-    if (t == "reed_sol_van") {
+    if (t == "reed_sol_van" || t == "") { // Default!
       interface = new ErasureCodeJerasureReedSolomonVandermonde();
     } else if (t == "reed_sol_r6_op") {
       interface = new ErasureCodeJerasureReedSolomonRAID6();
@@ -80,5 +81,10 @@ int __erasure_code_init(char *plugin_name, char *directory)
   if (r) {
     return -r;
   }
-  return instance.add(plugin_name, new ErasureCodePluginJerasure());
+  auto plugin = std::make_unique<ErasureCodePluginJerasure>();
+  r = instance.add(plugin_name, plugin.get());
+  if (r == 0) {
+    plugin.release();
+  }
+  return r;
 }

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -43,7 +44,7 @@ OpSchedulerRef make_scheduler(
       mClockScheduler>(cct, whoami, num_shards, shard_id, is_rotational,
         op_queue_cut_off, monc);
   } else {
-    ceph_assert("Invalid choice of wq" == 0);
+    ceph_abort_msg("Invalid choice of wq");
   }
 }
 

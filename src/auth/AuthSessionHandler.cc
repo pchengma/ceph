@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,7 +32,7 @@ AuthSessionHandler *get_auth_session_handler(
 {
 
   // Should add code to only print the SHA1 hash of the key, unless in secure debugging mode
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   ldout(cct,10) << "In get_auth_session_handler for protocol " << protocol << dendl;
 #endif
   switch (protocol) {

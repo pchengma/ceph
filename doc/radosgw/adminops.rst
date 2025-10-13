@@ -486,6 +486,19 @@ A tenant name may also specified as a part of ``uid``, by following the syntax
 :Example: tenant1
 :Required: No
 
+``default-placement``
+
+:Description: default placement for the user.
+:Type: string
+:Example: default-placement
+:Required: No
+
+``default-storage-class``
+:Description: default storage class for the user, default-placement must be defined when setting this option.
+:Type: string
+:Example: STANDARD-1A
+:Required: No
+
 Response Entities
 ~~~~~~~~~~~~~~~~~
 
@@ -681,6 +694,19 @@ Request Parameters
 :Description: The op-mask of the user to be modified.
 :Type: String
 :Example: ``read, write, delete, *``
+:Required: No
+
+``default-placement``
+
+:Description: default placement for the user.
+:Type: string
+:Example: default-placement
+:Required: No
+
+``default-storage-class``
+:Description: default storage class for the user, default-placement must be defined when setting this option.
+:Type: string
+:Example: STANDARD-1A
 :Required: No
 
 Response Entities
@@ -1293,6 +1319,10 @@ without ``bucket`` then all buckets belonging to the user will be returned. If
 ``bucket`` alone is specified, information for that particular bucket will be
 retrieved.
 
+If ``max-entries`` is specified to limit the number of buckets returned, the
+response body will change and contain the keys ``buckets``, ``count`` and
+``truncated``. If ``truncated`` is true the ``marker`` key will also be added.
+
 :caps: buckets=read
 
 Syntax
@@ -1326,6 +1356,20 @@ Request Parameters
 :Description: Return bucket statistics.
 :Type: Boolean
 :Example: True [False]
+:Required: No
+
+``max-entries``
+
+:Description: The number of bucket list entries to return.
+:Type: Integer
+:Example: 100
+:Required: No
+
+``marker``
+
+:Description: The marker to use when listing buckets.
+:Type: String (bucket name)
+:Example: my-bucket
 :Required: No
 
 Response Entities
@@ -1391,6 +1435,22 @@ the desired bucket information.
 :Description: Status of bucket index.
 :Type: String
 :Parent: ``bucket``
+
+``count``
+
+:Description: Number of returned buckets, only if ``max-entries`` is specified.
+:Type: Integer
+
+``truncated``
+
+:Description: Reported if the response is truncated when ``max-entries`` is specified.
+:Type: Boolean
+
+``marker``
+
+:Description: If ``truncated`` is true the ``marker`` key is returned with
+              the marker (bucket name) to use to continue pagination.
+:Type: String
 
 Special Error Responses
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1484,9 +1544,23 @@ Request Parameters
 :Example: ``foo_bucket``
 :Required: Yes
 
+``tenant``
+
+:Description: The tenant under which the bucket is to be removed.
+:Type: String
+:Example: ``tenant1``
+:Required: No
+
 ``purge-objects``
 
 :Description: Remove a buckets objects before deletion.
+:Type: Boolean
+:Example: True [False]
+:Required: No
+
+``bypass-gc``
+
+:Description: Bypass garbage collection.
 :Type: Boolean
 :Example: True [False]
 :Required: No

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "EventPreprocessor.h"
 #include "common/debug.h"
@@ -11,7 +11,8 @@
 #include "librbd/Utils.h"
 #include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/Types.h"
-#include <boost/variant.hpp>
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd_mirror
@@ -93,8 +94,8 @@ void EventPreprocessor<I>::preprocess_event() {
   m_snap_seqs = m_client_meta->snap_seqs;
   m_snap_seqs_updated = prune_snap_map(&m_snap_seqs);
 
-  int r = boost::apply_visitor(PreprocessEventVisitor(this),
-                               m_event_entry->event);
+  int r = std::visit(PreprocessEventVisitor(this),
+                     m_event_entry->event);
   if (r < 0) {
     finish(r);
     return;

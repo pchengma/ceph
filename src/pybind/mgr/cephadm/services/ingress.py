@@ -2,20 +2,48 @@ import ipaddress
 import logging
 import random
 import string
-from typing import List, Dict, Any, Tuple, cast, Optional
+from typing import List, Dict, Any, Tuple, cast, Optional, TYPE_CHECKING
 
-from ceph.deployment.service_spec import ServiceSpec, IngressSpec
+from ceph.deployment.service_spec import ServiceSpec, IngressSpec, MonitorCertSource
 from mgr_util import build_url
 from cephadm import utils
 from orchestrator import OrchestratorError, DaemonDescription
 from cephadm.services.cephadmservice import CephadmDaemonDeploySpec, CephService
+from .service_registry import register_cephadm_service
+from cephadm.tlsobject_types import TLSCredentials
+
+if TYPE_CHECKING:
+    from ..module import CephadmOrchestrator
 
 logger = logging.getLogger(__name__)
 
 
+@register_cephadm_service
 class IngressService(CephService):
     TYPE = 'ingress'
     MAX_KEEPALIVED_PASS_LEN = 8
+
+    @property
+    def needs_monitoring(self) -> bool:
+        return True
+
+    @property
+    def haproxy_stats_cert_name(self) -> str:
+        return 'haproxy_monitor_ssl_cert'
+
+    @property
+    def haproxy_stats_key_name(self) -> str:
+        return 'haproxy_monitor_ssl_key'
+
+    @classmethod
+    def get_dependencies(cls, mgr: "CephadmOrchestrator",
+                         spec: Optional[ServiceSpec] = None,
+                         daemon_type: Optional[str] = None) -> List[str]:
+        if daemon_type == 'haproxy':
+            return IngressService.get_haproxy_dependencies(mgr, spec)
+        elif daemon_type == 'keepalived':
+            return IngressService.get_keepalived_dependencies(mgr, spec)
+        return []
 
     def primary_daemon_type(self, spec: Optional[ServiceSpec] = None) -> str:
         if spec:
@@ -42,6 +70,7 @@ class IngressService(CephService):
             self,
             daemon_spec: CephadmDaemonDeploySpec,
     ) -> CephadmDaemonDeploySpec:
+        super().prepare_create(daemon_spec)
         if daemon_spec.daemon_type == 'haproxy':
             return self.haproxy_prepare_create(daemon_spec)
         if daemon_spec.daemon_type == 'keepalived':
@@ -75,6 +104,26 @@ class IngressService(CephService):
 
         return daemon_spec
 
+    @staticmethod
+    def get_haproxy_dependencies(mgr: "CephadmOrchestrator", spec: Optional[ServiceSpec]) -> List[str]:
+        # because cephadm creates new daemon instances whenever
+        # port or ip changes, identifying daemons by name is
+        # sufficient to detect changes.
+        if not spec:
+            return []
+
+        ingress_spec = cast(IngressSpec, spec)
+        assert ingress_spec.backend_service
+        daemons = mgr.cache.get_daemons_by_service(ingress_spec.backend_service)
+        deps = [d.name() for d in daemons]
+        for attr in ['ssl_cert', 'ssl_key']:
+            ssl_cert_key = getattr(ingress_spec, attr, None)
+            if ssl_cert_key:
+                assert isinstance(ssl_cert_key, str)
+                deps.append(f'ssl-cert-key:{str(utils.md5_hash(ssl_cert_key))}')
+
+        return sorted(deps)
+
     def haproxy_generate_config(
             self,
             daemon_spec: CephadmDaemonDeploySpec,
@@ -86,7 +135,6 @@ class IngressService(CephService):
                 f'{spec.service_name()} backend service {spec.backend_service} does not exist')
         backend_spec = self.mgr.spec_store[spec.backend_service].spec
         daemons = self.mgr.cache.get_daemons_by_service(spec.backend_service)
-        deps = [d.name() for d in daemons]
 
         # generate password?
         pw_key = f'{spec.service_name()}/monitor_password'
@@ -169,10 +217,29 @@ class IngressService(CephService):
         if spec.enable_haproxy_protocol:
             server_opts.append("send-proxy-v2")
         logger.debug("enabled default server opts: %r", server_opts)
-        ip = '[..]' if spec.virtual_ips_list else str(spec.virtual_ip).split('/')[0] or daemon_spec.ip or '[..]'
+        ip = '[::]' if spec.virtual_ips_list else str(spec.virtual_ip).split('/')[0] or daemon_spec.ip or '[::]'
+        v4v6_flag = "v4v6" if ip == "[::]" else ""
+
         frontend_port = daemon_spec.ports[0] if daemon_spec.ports else spec.frontend_port
-        if ip != '[..]' and frontend_port:
+        if ip != '[::]' and frontend_port:
             daemon_spec.port_ips = {str(frontend_port): ip}
+
+        monitor_ip, monitor_port = self.get_monitoring_details(daemon_spec.service_name, daemon_spec.host)
+        if monitor_ip:
+            monitor_ips = [monitor_ip]
+            daemon_spec.port_ips.update({str(monitor_port): monitor_ip})
+        else:
+            monitor_ips = [ip, host_ip]
+
+        monitor_ssl_file = None
+        cert_ips = [ip]
+        if spec.monitor_ssl:
+            if spec.monitor_cert_source == MonitorCertSource.REUSE_SERVICE_CERT.value:
+                monitor_ssl_file = 'haproxy.pem'
+                cert_ips.extend(monitor_ips)
+            else:
+                monitor_ssl_file = 'stats_haproxy.pem'
+
         haproxy_conf = self.mgr.template.render(
             'services/ingress/haproxy.cfg.j2',
             {
@@ -183,11 +250,13 @@ class IngressService(CephService):
                 'user': spec.monitor_user or 'admin',
                 'password': password,
                 'ip': ip,
+                'monitor_ips': monitor_ips,
                 'frontend_port': frontend_port,
-                'monitor_port': daemon_spec.ports[1] if daemon_spec.ports else spec.monitor_port,
-                'local_host_ip': host_ip,
+                'monitor_port': spec.monitor_port,
                 'default_server_opts': server_opts,
                 'health_check_interval': spec.health_check_interval or '2s',
+                'v4v6_flag': v4v6_flag,
+                'monitor_ssl_file': monitor_ssl_file,
             }
         )
         config_files = {
@@ -195,13 +264,35 @@ class IngressService(CephService):
                 "haproxy.cfg": haproxy_conf,
             }
         }
-        if spec.ssl_cert:
-            ssl_cert = spec.ssl_cert
-            if isinstance(ssl_cert, list):
-                ssl_cert = '\n'.join(ssl_cert)
-            config_files['files']['haproxy.pem'] = ssl_cert
 
-        return config_files, sorted(deps)
+        if spec.ssl:
+            tls_pair = self.get_certificates(daemon_spec)
+            combined_pem = tls_pair.cert + '\n' + tls_pair.key
+            config_files['files']['haproxy.pem'] = combined_pem
+
+        if spec.monitor_ssl and spec.monitor_cert_source != MonitorCertSource.REUSE_SERVICE_CERT.value:
+            tls_creds = self.get_stats_certs(spec, daemon_spec, monitor_ips)
+            monitor_ssl_cert = [tls_creds.cert, tls_creds.key]
+            config_files['files']['stats_haproxy.pem'] = '\n'.join(monitor_ssl_cert)
+
+        return config_files, self.get_haproxy_dependencies(self.mgr, spec)
+
+    def get_stats_certs(
+        self,
+        svc_spec: IngressSpec,
+        daemon_spec: CephadmDaemonDeploySpec,
+        ips: Optional[List[str]] = None,
+    ) -> TLSCredentials:
+        return self.get_certificates_generic(
+            svc_spec=svc_spec,
+            daemon_spec=daemon_spec,
+            cert_attr='monitor_ssl_cert',
+            key_attr='monitor_ssl_key',
+            cert_source_attr='monitor_cert_source',
+            cert_name=self.haproxy_stats_cert_name,
+            key_name=self.haproxy_stats_key_name,
+            ips=ips
+        )
 
     def keepalived_prepare_create(
             self,
@@ -219,6 +310,16 @@ class IngressService(CephService):
         daemon_spec.final_config, daemon_spec.deps = self.keepalived_generate_config(daemon_spec)
 
         return daemon_spec
+
+    @staticmethod
+    def get_keepalived_dependencies(mgr: "CephadmOrchestrator", spec: Optional[ServiceSpec]) -> List[str]:
+        # because cephadm creates new daemon instances whenever
+        # port or ip changes, identifying daemons by name is
+        # sufficient to detect changes.
+        if not spec:
+            return []
+        daemons = mgr.cache.get_daemons_by_service(spec.service_name())
+        return sorted([d.name() for d in daemons if d.daemon_type == 'haproxy'])
 
     def keepalived_generate_config(
             self,
@@ -241,13 +342,16 @@ class IngressService(CephService):
         if spec.keepalived_password:
             password = spec.keepalived_password
 
-        daemons = self.mgr.cache.get_daemons_by_service(spec.service_name())
+        if spec.keepalive_only:
+            # when keepalive_only instead of haproxy, we have to monitor the backend service daemons
+            if spec.backend_service is not None:
+                daemons = self.mgr.cache.get_daemons_by_service(spec.backend_service)
+        else:
+            daemons = self.mgr.cache.get_daemons_by_service(spec.service_name())
 
         if not daemons and not spec.keepalive_only:
             raise OrchestratorError(
                 f'Failed to generate keepalived.conf: No daemons deployed for {spec.service_name()}')
-
-        deps = sorted([d.name() for d in daemons if d.daemon_type == 'haproxy'])
 
         host = daemon_spec.host
         hosts = sorted(list(set([host] + [str(d.hostname) for d in daemons])))
@@ -297,6 +401,10 @@ class IngressService(CephService):
                     port = d.ports[1]   # monitoring port
                     host_ip = d.ip or self.mgr.inventory.get_addr(d.hostname)
                     script = f'/usr/bin/curl {build_url(scheme="http", host=host_ip, port=port)}/health'
+                elif d.daemon_type == 'mgmt-gateway':
+                    mgmt_gw_port = d.ports[0] if d.ports else None
+                    host_ip = d.ip or self.mgr.inventory.get_addr(d.hostname)
+                    script = f'/usr/bin/curl -k {build_url(scheme="https", host=host_ip, port=mgmt_gw_port)}/health'
         assert script
 
         states = []
@@ -351,10 +459,10 @@ class IngressService(CephService):
         else:
             for subnet, ifaces in self.mgr.cache.networks.get(host, {}).items():
                 if subnet == spec.vrrp_interface_network:
-                    vrrp_interface = [list(ifaces.keys())[0]] * len(interfaces)
+                    vrrp_interfaces = [list(ifaces.keys())[0]] * len(interfaces)
                     logger.info(
                         f'vrrp will be configured on {host} interface '
-                        f'{vrrp_interface} (which is in subnet {subnet})'
+                        f'{vrrp_interfaces} (which is in subnet {subnet})'
                     )
                     break
             else:
@@ -385,4 +493,19 @@ class IngressService(CephService):
             }
         }
 
-        return config_file, deps
+        return config_file, self.get_keepalived_dependencies(self.mgr, spec)
+
+    def get_monitoring_details(self, service_name: str, host: str) -> Tuple[Optional[str], Optional[int]]:
+        spec = cast(IngressSpec, self.mgr.spec_store[service_name].spec)
+        monitor_port = spec.monitor_port
+
+        # check if monitor needs to be bind on specific ip
+        monitor_addr = spec.monitor_ip_addrs.get(host) if spec.monitor_ip_addrs else None
+        if monitor_addr and monitor_addr not in self.mgr.cache.get_host_network_ips(host):
+            logger.debug(f"Monitoring IP {monitor_addr} is not configured on host {host}.")
+            monitor_addr = None
+        if not monitor_addr and spec.monitor_networks:
+            monitor_addr = self.mgr.get_first_matching_network_ip(host, spec, spec.monitor_networks)
+            if not monitor_addr:
+                logger.debug(f"No IP address found in the network {spec.monitor_networks} on host {host}.")
+        return monitor_addr, monitor_port

@@ -1,6 +1,6 @@
 #include "gtest/gtest.h"
 
-#include "common/Formatter.h"
+#include "common/XMLFormatter.h"
 #include <sstream>
 #include <string>
 
@@ -162,4 +162,26 @@ TEST(xmlformatter, pretty_lowercased_underscored)
     "<float_item>10</float_item>\n"
     "<string_item>String</string_item>\n\n";
   EXPECT_EQ(cmp, sout.str());
+}
+
+TEST(xmlformatter, dump_format_large_item)
+{
+  std::stringstream sout;
+  XMLFormatter formatter(
+      true,  // pretty
+      false, // lowercased
+      false); // underscored
+
+  std::string base_url("http://example.com");
+  std::string bucket_name("bucket");
+  std::string object_key(1024, 'a');
+
+  formatter.dump_format("Location", "%s/%s/%s", base_url.c_str(), bucket_name.c_str(), object_key.c_str());
+
+  formatter.flush(sout);
+
+  std::string uri = base_url + "/" + bucket_name + "/" + object_key;
+  std::string expected_output = "<Location>" + uri + "</Location>\n\n";
+
+  EXPECT_EQ(expected_output, sout.str());
 }

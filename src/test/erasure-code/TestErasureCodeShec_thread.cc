@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -86,6 +87,7 @@ TEST(ErasureCodeShec, thread)
   pthread_join(tid5, NULL);
 }
 
+IGNORE_DEPRECATED
 void* thread1(void* pParam)
 {
   TestParam* param = static_cast<TestParam*>(pParam);
@@ -217,3 +219,4 @@ void* thread1(void* pParam)
 
   return NULL;
 }
+END_IGNORE_DEPRECATED

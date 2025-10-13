@@ -1,8 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
-
-#include <vector>
-#include <boost/algorithm/string/trim.hpp>
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "CrushLocation.h"
 #include "CrushWrapper.h"
@@ -10,9 +7,14 @@
 #include "common/config.h"
 #include "common/debug.h"
 #include "common/errno.h"
+#include "common/SubProcess.h"
 #include "include/common_fwd.h"
 #include "include/compat.h"
 #include "include/str_list.h"
+
+#include <boost/algorithm/string/trim.hpp>
+
+#include <vector>
 
 namespace ceph::crush {
 

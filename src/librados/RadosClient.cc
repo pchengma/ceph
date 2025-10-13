@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -32,6 +33,7 @@
 #include "include/buffer.h"
 #include "include/stringify.h"
 #include "include/util.h"
+#include "log/Log.h"
 
 #include "msg/Messenger.h"
 
@@ -54,6 +56,7 @@ using std::ostringstream;
 using std::string;
 using std::map;
 using std::vector;
+using namespace std::literals;
 
 namespace bc = boost::container;
 namespace bs = boost::system;
@@ -1168,14 +1171,13 @@ int librados::RadosClient::get_inconsistent_pgs(int64_t pool_id,
   return 0;
 }
 
-const char** librados::RadosClient::get_tracked_conf_keys() const
+std::vector<std::string> librados::RadosClient::get_tracked_keys()
+    const noexcept
 {
-  static const char *config_keys[] = {
-    "librados_thread_count",
-    "rados_mon_op_timeout",
-    nullptr
+  return {
+    "librados_thread_count"s,
+    "rados_mon_op_timeout"s
   };
-  return config_keys;
 }
 
 void librados::RadosClient::handle_conf_change(const ConfigProxy& conf,

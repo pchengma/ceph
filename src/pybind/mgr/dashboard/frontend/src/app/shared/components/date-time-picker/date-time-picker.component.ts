@@ -1,7 +1,7 @@
 import { Component, Input, OnInit } from '@angular/core';
 import { UntypedFormControl } from '@angular/forms';
 
-import { NgbCalendar, NgbDateStruct, NgbTimeStruct } from '@ng-bootstrap/ng-bootstrap';
+import { NgbCalendar, NgbDateStruct } from '@ng-bootstrap/ng-bootstrap';
 import moment from 'moment';
 import { Subscription } from 'rxjs';
 
@@ -20,13 +20,28 @@ export class DateTimePickerComponent implements OnInit {
   @Input()
   hasTime = true;
 
+  @Input()
+  name = '';
+
+  @Input()
+  helperText = '';
+  @Input()
+  placeHolder = '';
+  @Input()
+  disabled = false;
+
   format: string;
   minDate: NgbDateStruct;
-  date: NgbDateStruct;
-  time: NgbTimeStruct;
-
+  datetime: {
+    date: any;
+    time: string;
+    ampm: string;
+  };
+  date: { [key: number]: string }[] = [];
+  time: string;
+  ampm: string;
   sub: Subscription;
-
+  @Input() defaultDate: boolean = false;
   constructor(private calendar: NgbCalendar) {}
 
   ngOnInit() {
@@ -44,19 +59,51 @@ export class DateTimePickerComponent implements OnInit {
     if (!mom.isValid() || mom.isBefore(moment())) {
       mom = moment();
     }
+    if (this.defaultDate) {
+      this.date.push([]);
+    } else {
+      this.date.push(mom.format('YYYY-MM-DD'));
+    }
 
-    this.date = { year: mom.year(), month: mom.month() + 1, day: mom.date() };
-    this.time = { hour: mom.hour(), minute: mom.minute(), second: mom.second() };
+    const time = mom.format('HH:mm:ss');
+    this.time = mom.format('hh:mm');
+    this.ampm = mom.hour() >= 12 ? 'PM' : 'AM';
+
+    this.datetime = {
+      date: this.date[0],
+      time: time,
+      ampm: this.ampm
+    };
 
     this.onModelChange();
   }
 
-  onModelChange() {
-    if (this.date) {
-      const datetime = Object.assign({}, this.date, this.time);
-      datetime.month--;
+  onModelChange(event?: any) {
+    if (event) {
+      if (event.length === 0) {
+        this.datetime.date = { date: null, time: null, ampm: null };
+      } else if (Array.isArray(event)) {
+        this.datetime.date = moment(event[0]).format('YYYY-MM-DD');
+      } else if (event && ['AM', 'PM'].includes(event)) {
+        const initialMoment = moment(this.datetime.time, 'hh:mm:ss A');
+        const updatedMoment = initialMoment.set(
+          'hour',
+          (initialMoment.hour() % 12) + (event === 'PM' ? 12 : 0)
+        );
+        this.datetime.time = moment(updatedMoment).format('HH:mm:ss');
+        this.datetime.ampm = event;
+      } else {
+        const time = event;
+        this.datetime.time = moment(`${this.datetime.date} ${time} ${this.datetime.ampm}`).format(
+          'HH:mm:ss'
+        );
+      }
+    }
+    if (this.datetime) {
+      const datetime = moment(`${this.datetime.date} ${this.datetime.time}`).format(this.format);
+
       setTimeout(() => {
-        this.control.setValue(moment(datetime).format(this.format));
+        this.control.setValue(datetime);
       });
     } else {
       setTimeout(() => {

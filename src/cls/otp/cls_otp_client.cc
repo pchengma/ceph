@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -68,7 +69,9 @@ namespace rados {
         bufferlist in;
         bufferlist out;
         encode(op, in);
-        int r = ioctx.exec(oid, "otp", "otp_check", in, out);
+        librados::ObjectWriteOperation wop;
+        wop.exec("otp", "otp_check", in);
+        int r = ioctx.operate(oid, &wop);
         if (r < 0) {
           return r;
         }

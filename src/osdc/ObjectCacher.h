@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_OBJECTCACHER_H
 #define CEPH_OBJECTCACHER_H
 
@@ -11,11 +12,13 @@
 
 #include "common/Cond.h"
 #include "common/Finisher.h"
+#include "common/snap_types.h" // for class SnapContext
 #include "common/Thread.h"
 #include "common/zipkin_trace.h"
 
-#include "Objecter.h"
 #include "Striper.h"
+
+#include <unordered_map>
 
 class WritebackHandler;
 
@@ -418,7 +421,7 @@ class ObjectCacher {
   void *flush_set_callback_arg;
 
   // indexed by pool_id
-  std::vector<ceph::unordered_map<sobject_t, Object*> > objects;
+  std::vector<std::unordered_map<sobject_t, Object*>> objects;
 
   std::list<Context*> waitfor_read;
 
@@ -541,7 +544,7 @@ class ObjectCacher {
 			    int64_t *amount, int *max_count);
 
   void trim();
-  void flush(ZTracer::Trace *trace, loff_t amount=0);
+  void flush(ZTracer::Trace *trace, loff_t amount=0, int max_bhs=0);
 
   /**
    * flush a range of buffers

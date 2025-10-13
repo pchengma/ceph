@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -34,6 +35,11 @@
 
 #define LARGEST_VECTOR_WORDSIZE 16
 #define talloc(type, num) (type *) malloc(sizeof(type)*(num))
+
+/* The new EC API work for Clay requires significant testing. We ignore all
+ * deprecated function use in this file until that refactor is done.
+ */
+IGNORE_DEPRECATED
 
 using namespace std;
 using namespace ceph;
@@ -95,6 +101,12 @@ unsigned int ErasureCodeClay::get_chunk_size(unsigned int stripe_width) const
   return round_up_to(stripe_width, alignment) / k;
 }
 
+size_t ErasureCodeClay::get_minimum_granularity()
+{
+  return mds.erasure_code->get_minimum_granularity();
+}
+
+[[deprecated]]
 int ErasureCodeClay::minimum_to_decode(const set<int> &want_to_read,
 				       const set<int> &available,
 				       map<int, vector<pair<int, int>>> *minimum)
@@ -106,6 +118,7 @@ int ErasureCodeClay::minimum_to_decode(const set<int> &want_to_read,
   }
 }
 
+[[deprecated]]
 int ErasureCodeClay::decode(const set<int> &want_to_read,
 			    const map<int, bufferlist> &chunks,
 			    map<int, bufferlist> *decoded, int chunk_size)
@@ -155,6 +168,46 @@ int ErasureCodeClay::encode_chunks(const set<int> &want_to_encode,
   }
   return res;
 }
+
+#if 0 \
+/* This code was partially tested, so keeping code, but we need more
+ * refactoring and testing before it is ready for production.
+ */
+int ErasureCodeClay::encode_chunks(const std::map<int, bufferptr> &in, 
+                                   std::map<int, bufferptr> &out)
+{
+  map<int, bufferlist> chunks;
+  set<int> parity_chunks;
+  unsigned int size = 0;
+  auto& nonconst_in = const_cast<std::map<int, bufferptr>&>(in);
+
+  for (auto &&[shard, ptr] : nonconst_in) {
+    if (size == 0) size = ptr.length();
+    else ceph_assert(size == ptr.length());
+    chunks[shard].append(nonconst_in[shard]);
+  }
+
+  for (auto &&[shard, ptr] : out) {
+    if (size == 0) size = ptr.length();
+    else ceph_assert(size == ptr.length());
+    chunks[shard+nu].append(out[shard]);
+    parity_chunks.insert(shard+nu);
+  }
+
+  for (int i = k; i < k + nu; i++) {
+    bufferptr buf(buffer::create_aligned(size, SIMD_ALIGN));
+    buf.zero();
+    chunks[i].push_back(std::move(buf));
+  }
+
+  int res = decode_layered(parity_chunks, &chunks);
+  for (int i = k ; i < k + nu; i++) {
+    // need to clean some of the intermediate chunks here!!
+    chunks[i].clear();
+  }
+  return res;
+}
+#endif
 
 int ErasureCodeClay::decode_chunks(const set<int> &want_to_read,
 				   const map<int, bufferlist> &chunks,
@@ -261,9 +314,9 @@ int ErasureCodeClay::parse(ErasureCodeProfile &profile,
       }
     }
   }
-  if ((d < k) || (d > k + m - 1)) {
+  if ((d < k + 1) || (d > k + m - 1)) {
     *ss << "value of d " << d
-        << " must be within [ " << k << "," << k+m-1 << "]" << std::endl;
+        << " must be within [" << k + 1 << "," << k + m - 1 << "]" << std::endl;
     err = -EINVAL;
     return err;
   }
@@ -306,7 +359,14 @@ int ErasureCodeClay::is_repair(const set<int> &want_to_read,
 
   if (includes(available_chunks.begin(), available_chunks.end(),
                want_to_read.begin(), want_to_read.end())) return 0;
+  // Oops, before the attempt to EC partial reads the fellowing
+  // condition was always true as `get_want_to_read_shards()` yields
+  // entire stripe. Unfortunately, we built upon this assumption and
+  // even `ECUtil::decode()` asserts on chunks being multiply of
+  // `chunk_size`.
+  // XXX: for now returning 0 and knocking the optimization out.
   if (want_to_read.size() > 1) return 0;
+  else return 0;
 
   int i = *want_to_read.begin();
   int lost_node_id = (i < k) ? i: i+nu;
@@ -471,7 +531,6 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
   int z_vec[t];
   map<int, set<int> > ordered_planes;
   map<int, int> repair_plane_to_ind;
-  int count_retrieved_sub_chunks = 0;
   int plane_ind = 0;
 
   bufferptr buf(buffer::create_aligned(sub_chunksize, SIMD_ALIGN));
@@ -615,7 +674,6 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
 	    memcpy(&coupled_chunk[z*sub_chunksize],
 		   &uncoupled_chunk[z*sub_chunksize],
 		   sub_chunksize);
-	    count_retrieved_sub_chunks++;
 	  } else {
 	    ceph_assert(y == lost_chunk / q);
 	    ceph_assert(node_sw == lost_chunk);
@@ -890,3 +948,5 @@ void ErasureCodeClay::get_plane_vector(int z, int* z_vec)
     z = (z - z_vec[t-1-i]) / q;
   }
 }
+
+END_IGNORE_DEPRECATED

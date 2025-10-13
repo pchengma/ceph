@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -43,6 +43,7 @@ class LRUSet {
   // lru
   boost::intrusive::list<
     Node,
+    boost::intrusive::constant_time_size<false>,
     boost::intrusive::member_hook<Node,
 				  boost::intrusive::list_member_hook<>,
 				  &Node::lru_item>

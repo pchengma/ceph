@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 &smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -57,21 +58,13 @@ TEST(MutexDebug, Lock) {
   test_lock<ceph::mutex_debug>();
 }
 
-TEST(MutexDebug, NotRecursive) {
+TEST(MutexDebugDeathTest, NotRecursive) {
   ceph::mutex_debug m("foo");
-  auto ttl = &test_try_lock<mutex_debug>;
-
-  ASSERT_NO_THROW(m.lock());
+  // avoid assert during test cleanup where the mutex is locked and cannot be
+  // pthread_mutex_destroy'd
+  std::unique_lock locker{m};
   ASSERT_TRUE(m.is_locked());
-  ASSERT_FALSE(std::async(std::launch::async, ttl, &m).get());
-
-  ASSERT_THROW(m.lock(), std::system_error);
-  ASSERT_TRUE(m.is_locked());
-  ASSERT_FALSE(std::async(std::launch::async, ttl, &m).get());
-
-  ASSERT_NO_THROW(m.unlock());
-  ASSERT_FALSE(m.is_locked());
-  ASSERT_TRUE(std::async(std::launch::async, ttl, &m).get());
+  ASSERT_DEATH(m.lock(), "FAILED ceph_assert(recursive || !is_locked_by_me())");
 }
 
 TEST(MutexRecursiveDebug, Lock) {

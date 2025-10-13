@@ -201,10 +201,10 @@ namespace fmt {
 template <>
 struct formatter<test_hobject_fmt_t> {
 
-  auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 
   template <typename FormatContext>
-  auto format(const test_hobject_fmt_t& ho, FormatContext& ctx)
+  auto format(const test_hobject_fmt_t& ho, FormatContext& ctx) const
   {
     if (ho == hobject_t{}) {
       return fmt::format_to(ctx.out(), "MIN");
@@ -285,7 +285,7 @@ TEST(HObject, fmt_random)
 
     auto name_length = (i * 17) % 51;
     std::string name;
-    for (int j = 0; j < name_length; j++) {
+    for (int j = 0; std::cmp_less(j, name_length); j++) {
       name.push_back((i * name_length + j) % 256);
     }
 

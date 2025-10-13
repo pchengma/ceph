@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/crimson/gtest_seastar.h"
 #include "test/crimson/seastore/transaction_manager_test_state.h"
@@ -23,10 +23,9 @@ namespace {
 
 class TestOnode final : public Onode {
   onode_layout_t layout;
-  bool dirty = false;
 
 public:
-  TestOnode(uint32_t ddr, uint32_t dmr) : Onode(ddr, dmr) {}
+  TestOnode(uint32_t ddr, uint32_t dmr) : Onode(ddr, dmr, hobject_t()) {}
   const onode_layout_t &get_layout() const final {
     return layout;
   }
@@ -34,12 +33,33 @@ public:
   void with_mutable_layout(Transaction &t, Func&& f) {
     f(layout);
   }
-  bool is_alive() const {
+  bool is_alive() const final {
     return true;
   }
-  bool is_dirty() const { return dirty; }
+  void swap_layout(Transaction &t, Onode& other) final {
+    static_cast<TestOnode&>(other).with_mutable_layout(
+      t,
+      [this](auto &o_mlayout) {
+      std::swap(layout.object_data, o_mlayout.object_data);
+      std::swap(layout.omap_root, o_mlayout.omap_root);
+      std::swap(layout.log_root, o_mlayout.log_root);
+      std::swap(layout.xattr_root, o_mlayout.xattr_root);
+    });
+  }
   laddr_t get_hint() const final {return L_ADDR_MIN; }
   ~TestOnode() final = default;
+
+  void set_need_cow(Transaction &t) final {
+    with_mutable_layout(t, [](onode_layout_t &mlayout) {
+      mlayout.need_cow = true;
+    });
+  }
+
+  void unset_need_cow(Transaction &t) final {
+    with_mutable_layout(t, [](onode_layout_t &mlayout) {
+      mlayout.need_cow = false;
+    });
+  }
 
   void update_onode_size(Transaction &t, uint32_t size) final {
     with_mutable_layout(t, [size](onode_layout_t &mlayout) {
@@ -50,6 +70,12 @@ public:
   void update_omap_root(Transaction &t, omap_root_t &oroot) final {
     with_mutable_layout(t, [&oroot](onode_layout_t &mlayout) {
       mlayout.omap_root.update(oroot);
+    });
+  }
+
+  void update_log_root(Transaction &t, omap_root_t &lroot) final {
+    with_mutable_layout(t, [&lroot](onode_layout_t &mlayout) {
+      mlayout.log_root.update(lroot);
     });
   }
 
@@ -145,7 +171,7 @@ struct object_data_handler_test_t:
 	    offset,
 	    bl);
 	});
-    }).unsafe_get0();
+    }).unsafe_get();
   }
   void write(objaddr_t offset, extent_len_t len, char fill) {
     auto t = create_mutate_transaction();
@@ -171,7 +197,7 @@ struct object_data_handler_test_t:
 	    },
 	    offset);
 	});
-      }).unsafe_get0();
+      }).unsafe_get();
     }
     size = offset;
   }
@@ -191,7 +217,7 @@ struct object_data_handler_test_t:
         },
         offset,
         len);
-    }).unsafe_get0();
+    }).unsafe_get();
     bufferlist known;
     known.append(
       bufferptr(
@@ -213,52 +239,66 @@ struct object_data_handler_test_t:
       }
     }
   }
-  std::list<LBAMappingRef> get_mappings(
+  std::list<LBAMapping> get_mappings(
     Transaction &t,
     objaddr_t offset,
     extent_len_t length) {
     auto ret = with_trans_intr(t, [&](auto &t) {
-      return tm->get_pins(t, offset, length);
-    }).unsafe_get0();
+      auto &layout = onode->get_layout();
+      auto odata = layout.object_data.get();
+      auto obase = odata.get_reserved_data_base();
+      return tm->get_pins(t, (obase + offset).checked_to_laddr(), length);
+    }).unsafe_get();
     return ret;
   }
-  std::list<LBAMappingRef> get_mappings(objaddr_t offset, extent_len_t length) {
+  std::list<LBAMapping> get_mappings(objaddr_t offset, extent_len_t length) {
     auto t = create_mutate_transaction();
     auto ret = with_trans_intr(*t, [&](auto &t) {
-      return tm->get_pins(t, offset, length);
-    }).unsafe_get0();
+      auto &layout = onode->get_layout();
+      auto odata = layout.object_data.get();
+      auto obase = odata.get_reserved_data_base();
+      return tm->get_pins(t, (obase + offset).checked_to_laddr(), length);
+    }).unsafe_get();
     return ret;
   }
 
-  using remap_entry = TransactionManager::remap_entry;
-  LBAMappingRef remap_pin(
+  using remap_entry_t = TransactionManager::remap_entry_t;
+  std::optional<LBAMapping> remap_pin(
     Transaction &t,
-    LBAMappingRef &&opin,
+    LBAMapping &&opin,
     extent_len_t new_offset,
     extent_len_t new_len) {
     auto pin = with_trans_intr(t, [&](auto& trans) {
       return tm->remap_pin<ObjectDataBlock>(
         trans, std::move(opin), std::array{
-          remap_entry(new_offset, new_len)}
+          remap_entry_t(new_offset, new_len)}
       ).si_then([](auto ret) {
-        return std::move(ret[0]);
+        return base_iertr::make_ready_future<
+	  std::optional<LBAMapping>>(std::move(ret[0]));
       });
     }).handle_error(crimson::ct_error::eagain::handle([] {
-      LBAMappingRef t = nullptr;
-      return t;
-    }), crimson::ct_error::pass_further_all{}).unsafe_get0();
+      return base_iertr::make_ready_future<
+	std::optional<LBAMapping>>();
+    }), crimson::ct_error::pass_further_all{}).unsafe_get();
     EXPECT_TRUE(pin);
     return pin;
   }
 
   ObjectDataBlockRef get_extent(
     Transaction &t,
-    laddr_t addr,
+    loffset_t addr,
     extent_len_t len) {
-    auto ext = with_trans_intr(t, [&](auto& trans) {
-	return tm->read_extent<ObjectDataBlock>(trans, addr, len);
-	}).unsafe_get0();
-    EXPECT_EQ(addr, ext->get_laddr());
+    auto &layout = onode->get_layout();
+    auto odata = layout.object_data.get();
+    auto obase = odata.get_reserved_data_base();
+    auto maybe_indirect_ext = with_trans_intr(t, [&](auto& trans) {
+      return tm->read_extent<ObjectDataBlock>(
+	trans, (obase + addr).checked_to_laddr(), len);
+    }).unsafe_get();
+    EXPECT_FALSE(maybe_indirect_ext.is_clone);
+    EXPECT_FALSE(maybe_indirect_ext.is_indirect());
+    auto ext = maybe_indirect_ext.extent;
+    EXPECT_EQ((obase + addr).checked_to_laddr(), ext->get_laddr());
     return ext;
   }
 
@@ -297,7 +337,7 @@ struct object_data_handler_test_t:
       "seastore_max_data_allocation_size", "8192").get();
   }
 
-  laddr_t get_random_laddr(size_t block_size, laddr_t limit) {
+  objaddr_t get_random_write_offset(size_t block_size, objaddr_t limit) {
     return block_size *
       std::uniform_int_distribution<>(0, (limit / block_size) - 1)(gen);
   }
@@ -434,12 +474,12 @@ struct object_data_handler_test_t:
 
   void write_right() {
     write(0, 128<<10, 'x');
-    write(64<<10, 60<<10, 'a');
+    write(64<<10, 64<<10, 'a');
   }
 
   void write_left() {
     write(0, 128<<10, 'x');
-    write(4<<10, 60<<10, 'a');
+    write(0, 64<<10, 'a');
   }
 
   void write_right_left() {
@@ -451,17 +491,11 @@ struct object_data_handler_test_t:
     write(0, 128<<10, 'x');
 
     auto t = create_mutate_transaction();
-    // normal split
     write(*t, 120<<10, 4<<10, 'a');
-    // not aligned right
     write(*t, 4<<10, 5<<10, 'b');
-    // split right extent of last split result
     write(*t, 32<<10, 4<<10, 'c');
-    // non aligned overwrite
     write(*t, 13<<10, 4<<10, 'd');
-
     write(*t, 64<<10, 32<<10, 'e');
-    // not split right
     write(*t, 60<<10, 8<<10, 'f');
 
     submit_transaction(std::move(t));
@@ -629,10 +663,10 @@ TEST_P(object_data_handler_test_t, remap_left) {
     EXPECT_EQ(pins.size(), 2);
 
     size_t res[2] = {0, 64<<10};
-    auto base = pins.front()->get_key();
+    auto base = pins.front().get_key();
     int i = 0;
     for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
+      EXPECT_EQ(pin.get_key().get_byte_distance<size_t>(base), res[i]);
       i++;
     }
     read(0, 128<<10);
@@ -663,10 +697,10 @@ TEST_P(object_data_handler_test_t, remap_right) {
     EXPECT_EQ(pins.size(), 2);
 
     size_t res[2] = {0, 64<<10};
-    auto base = pins.front()->get_key();
+    auto base = pins.front().get_key();
     int i = 0;
     for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
+      EXPECT_EQ(pin.get_key().get_byte_distance<size_t>(base), res[i]);
       i++;
     }
     read(0, 128<<10);
@@ -696,10 +730,10 @@ TEST_P(object_data_handler_test_t, remap_right_left) {
     EXPECT_EQ(pins.size(), 3);
 
     size_t res[3] = {0, 48<<10, 80<<10};
-    auto base = pins.front()->get_key();
+    auto base = pins.front().get_key();
     int i = 0;
     for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
+      EXPECT_EQ(pin.get_key().get_byte_distance<size_t>(base), res[i]);
       i++;
     }
     enable_max_extent_size();
@@ -724,13 +758,13 @@ TEST_P(object_data_handler_test_t, multiple_remap) {
     disable_max_extent_size();
     multiple_write();
     auto pins = get_mappings(0, 128<<10);
-    EXPECT_EQ(pins.size(), 3);
+    EXPECT_EQ(pins.size(), 11);
 
-    size_t res[3] = {0, 120<<10, 124<<10};
-    auto base = pins.front()->get_key();
+    size_t res[11] = {0, 4<<10, 12<<10, 20<<10, 32<<10, 36<<10, 60<<10, 64<<10, 96<<10, 120<<10, 124<<10};
+    auto base = pins.front().get_key();
     int i = 0;
     for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
+      assert(pin.get_key().get_byte_distance<size_t>(base) == res[i]);
       i++;
     }
     read(0, 128<<10);
@@ -769,7 +803,7 @@ TEST_P(object_data_handler_test_t, random_overwrite) {
       for (unsigned j = 0; j < 100; ++j) {
 	auto t = create_mutate_transaction();
 	for (unsigned k = 0; k < 2; ++k) {
-	  write(*t, get_random_laddr(BSIZE, TOTAL), wsize,
+	  write(*t, get_random_write_offset(BSIZE, TOTAL), wsize,
 	    (char)((j*k) % std::numeric_limits<char>::max()));
 	}
 	submit_transaction(std::move(t));
@@ -844,7 +878,7 @@ TEST_P(object_data_handler_test_t, overwrite_then_read_within_transaction) {
         },
         base + 4096,
         4096);
-    }).unsafe_get0();
+    }).unsafe_get();
     bufferlist pending;
     pending.append(
       bufferptr(
@@ -853,6 +887,31 @@ TEST_P(object_data_handler_test_t, overwrite_then_read_within_transaction) {
 	4096));
     EXPECT_EQ(committed.length(), pending.length());
     EXPECT_NE(committed, pending);
+    disable_delta_based_overwrite();
+    enable_max_extent_size();
+  });
+}
+
+TEST_P(object_data_handler_test_t, parallel_partial_read) {
+  run_async([this] {
+    disable_max_extent_size();
+    enable_delta_based_overwrite();
+    auto t = create_mutate_transaction();
+    auto base = 0;
+    auto len = 4096 * 10;
+    write(*t, base, len, 'a');
+    submit_transaction(std::move(t));
+
+    restart();
+    epm->check_usage();
+    seastar::parallel_for_each(
+      boost::make_counting_iterator(0lu),
+      boost::make_counting_iterator(8lu),
+      [&](auto i) {
+        return seastar::async([&] {
+          read(i * 4096, 8192);
+        });
+      }).get();
     disable_delta_based_overwrite();
     enable_max_extent_size();
   });

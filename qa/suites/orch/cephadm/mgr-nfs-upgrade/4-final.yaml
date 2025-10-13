@@ -1,5 +1,9 @@
+overrides:
+  ceph:
+    log-ignorelist:
+      - CEPHADM_REFRESH_FAILED
 tasks:
-- vip.exec:
+- exec:
     host.a:
       - umount /mnt/foo
 - cephadm.shell:

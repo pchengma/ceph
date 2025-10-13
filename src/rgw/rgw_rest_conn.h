@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -130,21 +130,28 @@ public:
   virtual void populate_params(param_vec_t& params, const rgw_owner* uid, const std::string& zonegroup);
 
   /* sync request */
-  int forward(const DoutPrefixProvider *dpp, const rgw_owner& uid, const req_info& info, obj_version *objv, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y);
+  auto forward(const DoutPrefixProvider *dpp, const rgw_owner& uid,
+               const req_info& info, size_t max_response,
+               bufferlist *inbl, bufferlist *outbl, optional_yield y)
+    -> tl::expected<int, int>;
 
   /* sync request */
-  int forward_iam_request(const DoutPrefixProvider *dpp, const req_info& info, obj_version *objv, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y);
-
+  auto forward_iam(const DoutPrefixProvider *dpp, const req_info& info,
+                   size_t max_response, bufferlist *inbl,
+                   bufferlist *outbl, optional_yield y)
+    -> tl::expected<int, int>;
 
   /* async requests */
   int put_obj_send_init(const rgw_obj& obj, const rgw_http_param_pair *extra_params, RGWRESTStreamS3PutObj **req);
   int put_obj_async_init(const DoutPrefixProvider *dpp, const rgw_owner& uid, const rgw_obj& obj,
                          std::map<std::string, bufferlist>& attrs, RGWRESTStreamS3PutObj **req);
-  int complete_request(RGWRESTStreamS3PutObj *req, std::string& etag,
+  int complete_request(const DoutPrefixProvider* dpp,
+                       RGWRESTStreamS3PutObj *req, std::string& etag,
                        ceph::real_time *mtime, optional_yield y);
 
   struct get_obj_params {
-    rgw_owner uid;
+    const rgw_owner *uid{nullptr};
+    const rgw_user *perm_check_uid{nullptr};
     req_info *info{nullptr};
     const ceph::real_time *mod_ptr{nullptr};
     const ceph::real_time *unmod_ptr{nullptr};
@@ -172,13 +179,16 @@ public:
 
   int get_obj(const DoutPrefixProvider *dpp, const rgw_obj& obj, const get_obj_params& params, bool send, RGWRESTStreamRWRequest **req);
 
-  int get_obj(const DoutPrefixProvider *dpp, const rgw_owner& uid, req_info *info /* optional */, const rgw_obj& obj,
+  int get_obj(const DoutPrefixProvider *dpp, const rgw_owner* uid,
+              const rgw_user* perm_check_uid,
+              req_info *info /* optional */, const rgw_obj& obj,
               const ceph::real_time *mod_ptr, const ceph::real_time *unmod_ptr,
               uint32_t mod_zone_id, uint64_t mod_pg_ver,
               bool prepend_metadata, bool get_op, bool rgwx_stat, bool sync_manifest,
               bool skip_decrypt, rgw_zone_set_entry *dst_zone_trace, bool sync_cloudtiered,
               bool send, RGWHTTPStreamRWRequest::ReceiveCB *cb, RGWRESTStreamRWRequest **req);
-  int complete_request(RGWRESTStreamRWRequest *req,
+  int complete_request(const DoutPrefixProvider* dpp,
+                       RGWRESTStreamRWRequest *req,
                        std::string *etag,
                        ceph::real_time *mtime,
                        uint64_t *psize,
@@ -344,10 +354,10 @@ public:
     return req.get_http_status();
   }
 
-  int wait(bufferlist *pbl, optional_yield y) {
-    int ret = req.wait(y);
+  int wait(const DoutPrefixProvider* dpp, bufferlist *pbl, optional_yield y) {
+    int ret = req.wait(dpp, y);
     if (ret < 0) {
-      if (ret == -EIO) {
+      if (ret == -ERR_INTERNAL_ERROR) {
         conn->set_url_unconnectable(req.get_url_orig());
       }
       return ret;
@@ -361,7 +371,7 @@ public:
   }
 
   template <class T>
-  int wait(T *dest, optional_yield y);
+  int wait(const DoutPrefixProvider* dpp, T *dest, optional_yield y);
 
   template <class T>
   int fetch(const DoutPrefixProvider *dpp, T *dest, optional_yield y);
@@ -398,11 +408,12 @@ int RGWRESTReadResource::fetch(const DoutPrefixProvider *dpp, T *dest, optional_
 }
 
 template <class T>
-int RGWRESTReadResource::wait(T *dest, optional_yield y)
+int RGWRESTReadResource::wait(const DoutPrefixProvider* dpp, T *dest,
+                              optional_yield y)
 {
-  int ret = req.wait(y);
+  int ret = req.wait(dpp, y);
   if (ret < 0) {
-    if (ret == -EIO) {
+    if (ret == -ERR_INTERNAL_ERROR) {
       conn->set_url_unconnectable(req.get_url_orig());
     }
     return ret;
@@ -472,11 +483,12 @@ public:
   }
 
   template <class E = int>
-  int wait(bufferlist *pbl, optional_yield y, E *err_result = nullptr) {
-    int ret = req.wait(y);
+  int wait(const DoutPrefixProvider* dpp, bufferlist *pbl,
+           optional_yield y, E *err_result = nullptr) {
+    int ret = req.wait(dpp, y);
     *pbl = bl;
 
-    if (ret == -EIO) {
+    if (ret == -ERR_INTERNAL_ERROR) {
       conn->set_url_unconnectable(req.get_url_orig());
     }
 
@@ -488,14 +500,16 @@ public:
   }
 
   template <class T, class E = int>
-  int wait(T *dest, optional_yield y, E *err_result = nullptr);
+  int wait(const DoutPrefixProvider* dpp, T *dest,
+           optional_yield y, E *err_result = nullptr);
 };
 
 template <class T, class E>
-int RGWRESTSendResource::wait(T *dest, optional_yield y, E *err_result)
+int RGWRESTSendResource::wait(const DoutPrefixProvider* dpp, T *dest,
+                              optional_yield y, E *err_result)
 {
-  int ret = req.wait(y);
-  if (ret == -EIO) {
+  int ret = req.wait(dpp, y);
+  if (ret == -ERR_INTERNAL_ERROR) {
     conn->set_url_unconnectable(req.get_url_orig());
   }
 

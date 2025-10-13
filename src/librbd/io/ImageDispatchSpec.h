@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_IO_IMAGE_DISPATCH_SPEC_H
 #define CEPH_LIBRBD_IO_IMAGE_DISPATCH_SPEC_H
@@ -11,8 +11,8 @@
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/Types.h"
 #include "librbd/io/ReadResult.h"
-#include <boost/variant/variant.hpp>
 #include <atomic>
+#include <variant>
 
 namespace librbd {
 
@@ -99,13 +99,13 @@ public:
     }
   };
 
-  typedef boost::variant<Read,
-                         Discard,
-                         Write,
-                         WriteSame,
-                         CompareAndWrite,
-                         Flush,
-                         ListSnaps> Request;
+  typedef std::variant<Read,
+                       Discard,
+                       Write,
+                       WriteSame,
+                       CompareAndWrite,
+                       Flush,
+                       ListSnaps> Request;
 
   C_Dispatcher dispatcher_ctx;
 

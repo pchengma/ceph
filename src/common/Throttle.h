@@ -1,12 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_THROTTLE_H
 #define CEPH_THROTTLE_H
 
 #include <atomic>
 #include <chrono>
-#include <iostream>
+#include <condition_variable>
+#include <iosfwd>
 #include <list>
 #include <map>
 
@@ -14,8 +15,7 @@
 #include "include/Context.h"
 #include "common/ThrottleInterface.h"
 #include "common/Timer.h"
-#include "common/convenience.h"
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include "crimson/common/perf_counters_collection.h"
 #else
 #include "common/perf_counters_collection.h"

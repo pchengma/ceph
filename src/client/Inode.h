@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CLIENT_INODE_H
 #define CEPH_CLIENT_INODE_H
@@ -14,6 +14,8 @@
 #include "mds/flock.h"
 #include "mds/mdstypes.h" // hrm
 #include "include/cephfs/types.h"
+
+#include "messages/MClientReply.h"
 
 #include "osdc/ObjectCacher.h"
 
@@ -164,6 +166,10 @@ struct Inode : RefCountedObject {
 
   std::vector<uint8_t> fscrypt_auth;
   std::vector<uint8_t> fscrypt_file;
+
+  decltype(InodeStat::optmetadata) optmetadata;
+  using optkind_t = decltype(InodeStat::optmetadata)::optkind_t;
+
   bool is_fscrypt_enabled() {
     return !!fscrypt_auth.size();
   }
@@ -238,9 +244,9 @@ struct Inode : RefCountedObject {
   std::map<frag_t,int> fragmap;  // known frag -> mds mappings
   std::map<frag_t, std::vector<mds_rank_t>> frag_repmap; // non-auth mds mappings
 
-  std::list<Context*> waitfor_caps;
-  std::list<Context*> waitfor_caps_pending;
-  std::list<Context*> waitfor_commit;
+  std::vector<Context*> waitfor_caps;
+  std::vector<Context*> waitfor_caps_pending;
+  std::vector<Context*> waitfor_commit;
   std::list<ceph::condition_variable*> waitfor_deleg;
 
   Dentry *get_first_parent() {
@@ -329,11 +335,21 @@ struct Inode : RefCountedObject {
   void rm_fh(Fh *f) {fhs.erase(f);}
   void set_async_err(int r);
   void dump(Formatter *f) const;
+  void print(std::ostream&) const;
+
+  bool has_charmap() const {
+    return optmetadata.has_opt(optkind_t::CHARMAP);
+  }
+  auto& get_charmap() const {
+    auto& opt = optmetadata.get_opt(optkind_t::CHARMAP);
+    return opt.template get_meta< charmap_md_t >();
+  }
 
   void break_all_delegs() { break_deleg(false); };
 
   void recall_deleg(bool skip_read);
   bool has_recalled_deleg();
+  bool is_write_delegated();
   int set_deleg(Fh *fh, unsigned type, ceph_deleg_cb_t cb, void *priv);
   void unset_deleg(Fh *fh);
 
@@ -359,7 +375,5 @@ private:
   bool delegations_broken(bool skip_read);
 
 };
-
-std::ostream& operator<<(std::ostream &out, const Inode &in);
 
 #endif

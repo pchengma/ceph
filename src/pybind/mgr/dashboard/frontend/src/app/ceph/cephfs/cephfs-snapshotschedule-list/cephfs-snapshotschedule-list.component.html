@@ -4,19 +4,15 @@
   spacingClass="mb-3"
   i18n
   class="align-items-center"
+  actionName="Enable"
+  (action)="enableSnapshotSchedule()"
 >
   In order to access the snapshot scheduler feature, the snap_scheduler module must be enabled
-  <button
-    class="btn btn-light mx-2"
-    type="button"
-    (click)="enableSnapshotSchedule()">
-    Enable
-  </button>
 </cd-alert-panel>
 
 <ng-template
   #pathTpl
-  let-row="row">
+  let-row="data.row">
   <span
     class="fw-bold"
     [ngbTooltip]="fullpathTpl"
@@ -42,25 +38,20 @@
   </ng-template>
 
   <ng-template #fullpathForSelectionTpl>
-    <span
-      data-toggle="tooltip"
-      [title]="row.pathForSelection"
-      class="font-monospace"
-      >{{ row.pathForSelection?.split?.("@")?.[0] }}
-      <cd-copy-2-clipboard-button
-        *ngIf="row.pathForSelection"
-        [source]="row.pathForSelection?.split?.('@')?.[0]"
-        [byId]="false"
-        [showIconOnly]="true"
-      >
-      </cd-copy-2-clipboard-button>
-    </span>
+    <cd-copy-2-clipboard-button
+      *ngIf="row.pathForSelection"
+      [source]="row.pathForSelection?.split?.('@')?.[0]"
+      [byId]="false"
+      [size]="lg"
+      [text]="row.pathForSelection?.split?.('@')?.[0]"
+    >
+    </cd-copy-2-clipboard-button>
   </ng-template>
 </ng-template>
 
 <ng-template
   #retentionTpl
-  let-row="row">
+  let-row="data.row">
   <ul *ngIf="row.retentionCopy.length; else noDataTpl">
     <li *ngFor="let ret of row.retentionCopy">{{ ret }}</li>
   </ul>
@@ -68,7 +59,7 @@
 
 <ng-template
   #subvolTpl
-  let-row="row">
+  let-row="data.row">
   <span *ngIf="row.subvol; else noDataTpl">
     {{row.subvol}}
   </span>
@@ -88,7 +79,7 @@
   (fetchData)="fetchData()"
   (updateSelection)="updateSelection($event)"
 >
-  <div class="table-actions btn-toolbar">
+  <div class="table-actions">
     <cd-table-actions
       [permission]="permissions.cephfs"
       [selection]="selection"

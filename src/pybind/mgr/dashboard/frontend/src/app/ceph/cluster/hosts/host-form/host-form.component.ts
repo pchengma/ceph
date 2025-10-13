@@ -1,27 +1,27 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, Inject, OnInit, Optional } from '@angular/core';
 import { UntypedFormControl, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
-
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import { ActivatedRoute, Router } from '@angular/router';
 import expand from 'brace-expansion';
 
 import { HostService } from '~/app/shared/api/host.service';
 import { SelectMessages } from '~/app/shared/components/select/select-messages.model';
-import { SelectOption } from '~/app/shared/components/select/select-option.model';
 import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
 import { CdForm } from '~/app/shared/forms/cd-form';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
 import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
+import { ComboBoxItem } from '~/app/shared/models/combo-box.model';
 import { FinishedTask } from '~/app/shared/models/finished-task';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 
+const HOSTS = 'hosts';
 @Component({
   selector: 'cd-host-form',
   templateUrl: './host-form.component.html',
   styleUrls: ['./host-form.component.scss']
 })
 export class HostFormComponent extends CdForm implements OnInit {
+  open: boolean = false;
   hostForm: CdFormGroup;
   action: string;
   resource: string;
@@ -32,8 +32,7 @@ export class HostFormComponent extends CdForm implements OnInit {
   allLabels: string[];
   pageURL: string;
   hostPattern = false;
-  labelsOption: Array<SelectOption> = [];
-  hideMaintenance: boolean;
+  labelsOption: ComboBoxItem[] = [];
 
   messages = new SelectMessages({
     empty: $localize`There are no labels.`,
@@ -46,7 +45,9 @@ export class HostFormComponent extends CdForm implements OnInit {
     private actionLabels: ActionLabelsI18n,
     private hostService: HostService,
     private taskWrapper: TaskWrapperService,
-    public activeModal: NgbActiveModal
+    private route: ActivatedRoute,
+
+    @Inject('hideMaintenance') @Optional() public hideMaintenance?: boolean
   ) {
     super();
     this.resource = $localize`host`;
@@ -54,9 +55,10 @@ export class HostFormComponent extends CdForm implements OnInit {
   }
 
   ngOnInit() {
-    if (this.router.url.includes('hosts')) {
-      this.pageURL = 'hosts';
+    if (this.router.url.includes(HOSTS)) {
+      this.pageURL = HOSTS;
     }
+    this.open = this.route.outlet === 'modal';
     this.createForm();
     const hostContext = new CdTableFetchDataContext(() => undefined);
     this.hostService.list(hostContext.toParams(), 'false').subscribe((resp: any[]) => {
@@ -69,7 +71,7 @@ export class HostFormComponent extends CdForm implements OnInit {
     this.hostService.getLabels().subscribe((resp: string[]) => {
       const uniqueLabels = new Set(resp.concat(this.hostService.predefinedLabels));
       this.labelsOption = Array.from(uniqueLabels).map((label) => {
-        return { enabled: true, name: label, selected: false, description: null };
+        return { name: label, content: label };
       });
     });
   }
@@ -94,7 +96,7 @@ export class HostFormComponent extends CdForm implements OnInit {
         validators: [CdValidators.ip()]
       }),
       labels: new UntypedFormControl([]),
-      maintenance: new UntypedFormControl(false)
+      maintenance: new UntypedFormControl()
     });
   }
 
@@ -148,7 +150,7 @@ export class HostFormComponent extends CdForm implements OnInit {
     this.addr = this.hostForm.get('addr').value;
     this.status = this.hostForm.get('maintenance').value ? 'maintenance' : '';
     this.allLabels = this.hostForm.get('labels').value;
-    if (this.pageURL !== 'hosts' && !this.allLabels.includes('_no_schedule')) {
+    if (this.pageURL !== HOSTS && !this.allLabels.includes('_no_schedule')) {
       this.allLabels.push('_no_schedule');
     }
     this.hostnameArray.forEach((hostName: string) => {
@@ -164,11 +166,15 @@ export class HostFormComponent extends CdForm implements OnInit {
             this.hostForm.setErrors({ cdSubmitButton: true });
           },
           complete: () => {
-            this.pageURL === 'hosts'
-              ? this.router.navigate([this.pageURL, { outlets: { modal: null } }])
-              : this.activeModal.close();
+            this.closeModal();
           }
         });
     });
+  }
+
+  closeModal(): void {
+    this.pageURL === HOSTS
+      ? this.router.navigate([this.pageURL, { outlets: { modal: null } }])
+      : (this.open = false);
   }
 }

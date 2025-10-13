@@ -32,9 +32,23 @@
   "editable": false,
   "gnetId": null,
   "graphTooltip": 0,
+  "hideControls": false,
   "id": null,
   "iteration": 1525415495309,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Browse Dashboards",
+      "tooltip": "",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
   "panels": [
     {
       "cacheTimeout": null,
@@ -928,14 +942,14 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(irate(ceph_osd_op_w_in_bytes{cluster=~'$cluster'}[1m]))",
+          "expr": "sum(rate(ceph_osd_op_w_in_bytes{cluster=~'$cluster'}[$__rate_interval]))",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Writes",
           "refId": "A"
         },
         {
-          "expr": "sum(irate(ceph_osd_op_r_out_bytes{cluster=~'$cluster'}[1m]))",
+          "expr": "sum(rate(ceph_osd_op_r_out_bytes{cluster=~'$cluster'}[$__rate_interval]))",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Reads",
@@ -1024,7 +1038,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(deriv(ceph_pool_stored{cluster=~'$cluster'}[1m]))",
+          "expr": "sum(deriv(ceph_pool_stored{cluster=~'$cluster'}[$__rate_interval]))",
           "format": "time_series",
           "intervalFactor": 1,
           "refId": "A"
@@ -1235,7 +1249,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(irate(ceph_osd_recovery_ops{cluster=~'$cluster'}[1m]))",
+          "expr": "sum(rate(ceph_osd_recovery_ops{cluster=~'$cluster'}[$__rate_interval]))",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Op/s",
@@ -1322,7 +1336,7 @@
       },
       {
         "auto": true,
-        "auto_count": 10,
+        "auto_count": 300,
         "auto_min": "1m",
         "current": {
           "text": "auto",
@@ -1428,5 +1442,6 @@
   },
   "timezone": "",
   "title": "Ceph - Cluster",
-  "version": 13
+  "uid": "edtb0oxdq",
+  "version": 1
 }

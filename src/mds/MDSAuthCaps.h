@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,17 +15,16 @@
 #ifndef MDS_AUTH_CAPS_H
 #define MDS_AUTH_CAPS_H
 
-#include <ostream>
+#include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "include/encoding.h"
-#include "include/common_fwd.h"
-#include "include/types.h"
-#include "common/debug.h"
+#include "msg/msg_types.h" // for struct entity_addr_t
 
-#include "mdstypes.h"
+#include <boost/optional.hpp>
 
 // unix-style capabilities
 enum {
@@ -144,7 +144,8 @@ struct MDSCapMatch {
   }
 
   // check whether this grant matches against a given file and caller uid:gid
-  bool match(std::string_view target_path,
+  bool match(std::string_view fs_name,
+             std::string_view target_path,
 	     const int caller_uid,
 	     const int caller_gid,
 	     const std::vector<uint64_t> *caller_gid_list) const;
@@ -267,11 +268,12 @@ public:
   bool merge(MDSAuthCaps newcaps);
 
   bool allow_all() const;
-  bool is_capable(std::string_view inode_path,
+  bool is_capable(std::string_view fs_name,
+                  std::string_view inode_path,
 		  uid_t inode_uid, gid_t inode_gid, unsigned inode_mode,
 		  uid_t uid, gid_t gid, const std::vector<uint64_t> *caller_gid_list,
 		  unsigned mask, uid_t new_uid, gid_t new_gid,
-		  const entity_addr_t& addr) const;
+		  const entity_addr_t& addr, std::string_view trimmed_inode_path) const;
   bool path_capable(std::string_view inode_path) const;
 
   bool fs_name_capable(std::string_view fs_name, unsigned mask) const {

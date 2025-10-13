@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -68,7 +68,7 @@ class Btree {
         // we don't actually store end cursor because it will hold a reference
         // to an end leaf node and is not kept updated.
         assert(p_cursor->is_end());
-        ceph_abort("impossible");
+        ceph_abort_msg("impossible");
       }
     }
 
@@ -92,7 +92,7 @@ class Btree {
     ValueImpl value() {
       assert(!is_end());
       return p_tree->value_builder.build_value(
-          *p_tree->nm, p_tree->value_builder, p_cursor);
+        get_ghobj().hobj, *p_tree->nm, p_tree->value_builder, p_cursor);
     }
 
     bool operator==(const Cursor& o) const { return operator<=>(o) == 0; }
@@ -130,7 +130,7 @@ class Btree {
     Cursor(Btree* p_tree, Ref<tree_cursor_t> _p_cursor) : p_tree(p_tree) {
       if (_p_cursor->is_invalid()) {
         // we don't create Cursor from an invalid tree_cursor_t.
-        ceph_abort("impossible");
+        ceph_abort_msg("impossible");
       } else if (_p_cursor->is_end()) {
         // we don't actually store end cursor because it will hold a reference
         // to an end leaf node and is not kept updated.

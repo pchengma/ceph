@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -137,7 +138,6 @@ extern "C" {
 
 __s32 wsae_to_errno(__s32 r);
 __u32 errno_to_ntstatus(__s32 r);
-__u32 cephfs_errno_to_ntstatus_map(int cephfs_errno);
 
 #ifdef __cplusplus
 }

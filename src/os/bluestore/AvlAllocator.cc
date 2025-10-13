@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "AvlAllocator.h"
 
@@ -177,6 +177,11 @@ void AvlAllocator::_remove_from_tree(uint64_t start, uint64_t size)
   ceph_assert(size != 0);
   ceph_assert(size <= num_free);
 
+  //FIXME minor: techically this is wrong since find should return end()
+  // if exact matching offset isn't found. Which might be the case when we're
+  // trying to remove a subchunk from the middle of existing chunk.
+  // But it looks like avl containers tolerate this thing and return the chunk
+  // before the 'start' offset.
   auto rs = range_tree.find(range_t{start, end}, range_tree.key_comp());
   /* Make sure we completely overlap with someone */
   if (rs == range_tree.end() ||
@@ -234,14 +239,14 @@ int64_t AvlAllocator::_allocate(
   uint64_t want,
   uint64_t unit,
   uint64_t max_alloc_size,
-  int64_t  hint, // unused, for now!
+  int64_t  hint,
   PExtentVector* extents)
 {
   uint64_t allocated = 0;
   while (allocated < want) {
     uint64_t offset, length;
     int r = _allocate(std::min(max_alloc_size, want - allocated),
-      unit, &offset, &length);
+      unit, hint, &offset, &length);
     if (r < 0) {
       // Allocation failed.
       break;
@@ -255,6 +260,7 @@ int64_t AvlAllocator::_allocate(
 int AvlAllocator::_allocate(
   uint64_t size,
   uint64_t unit,
+  int64_t  hint,
   uint64_t *offset,
   uint64_t *length)
 {
@@ -291,7 +297,9 @@ int AvlAllocator::_allocate(
      */
     uint64_t align = size & -size;
     ceph_assert(align != 0);
-    uint64_t* cursor = &lbas[cbits(align) - 1];
+    uint64_t dummy_cursor = (uint64_t)hint;
+    uint64_t* cursor =
+      hint == -1 ? &lbas[cbits(align) - 1] : &dummy_cursor;
     start = _pick_block_after(cursor, size, unit);
     dout(20) << __func__
              << std::hex << " first fit params: 0x" << start << "~" << size
@@ -324,7 +332,7 @@ int AvlAllocator::_allocate(
   return 0;
 }
 
-void AvlAllocator::_release(const interval_set<uint64_t>& release_set)
+void AvlAllocator::_release(const release_set_t& release_set)
 {
   for (auto p = release_set.begin(); p != release_set.end(); ++p) {
     const auto offset = p.get_start();
@@ -359,7 +367,8 @@ AvlAllocator::AvlAllocator(CephContext* cct,
                            int64_t block_size,
                            uint64_t max_mem,
                            std::string_view name) :
-  Allocator(name, device_size, block_size),
+  AllocatorBase(name, device_size, block_size),
+  cct(cct),
   range_size_alloc_threshold(
     cct->_conf.get_val<uint64_t>("bluestore_avl_alloc_bf_threshold")),
   range_size_alloc_free_pct(
@@ -368,8 +377,7 @@ AvlAllocator::AvlAllocator(CephContext* cct,
     cct->_conf.get_val<uint64_t>("bluestore_avl_alloc_ff_max_search_count")),
   max_search_bytes(
     cct->_conf.get_val<Option::size_t>("bluestore_avl_alloc_ff_max_search_bytes")),
-  range_count_cap(max_mem / sizeof(range_seg_t)),
-  cct(cct)
+  range_count_cap(max_mem / sizeof(range_seg_t))
 {
   ldout(cct, 10) << __func__ << " 0x" << std::hex << get_capacity() << "/"
                  << get_block_size() << std::dec << dendl;
@@ -394,7 +402,7 @@ int64_t AvlAllocator::allocate(
   uint64_t want,
   uint64_t unit,
   uint64_t max_alloc_size,
-  int64_t  hint, // unused, for now!
+  int64_t  hint,
   PExtentVector* extents)
 {
   ldout(cct, 10) << __func__ << std::hex
@@ -417,7 +425,7 @@ int64_t AvlAllocator::allocate(
   return _allocate(want, unit, max_alloc_size, hint, extents);
 }
 
-void AvlAllocator::release(const interval_set<uint64_t>& release_set) {
+void AvlAllocator::release(const release_set_t& release_set) {
   std::lock_guard l(lock);
   _release(release_set);
 }

@@ -67,6 +67,7 @@ class Options(object):
     RGW_API_SECRET_KEY = Setting('', [dict, str])
     RGW_API_ADMIN_RESOURCE = Setting('admin', [str])
     RGW_API_SSL_VERIFY = Setting(True, [bool])
+    RGW_HOSTNAME_PER_DAEMON = Setting('', [dict, str])
 
     # Ceph Issue Tracker API Access Key
     ISSUE_TRACKER_API_KEY = Setting('', [str])
@@ -87,6 +88,7 @@ class Options(object):
     PROMETHEUS_API_SSL_VERIFY = Setting(True, [bool])
     ALERTMANAGER_API_HOST = Setting('', [str])
     ALERTMANAGER_API_SSL_VERIFY = Setting(True, [bool])
+    PROM_ALERT_CREDENTIAL_CACHE_TTL = Setting(60, [int])
 
     # iSCSI management settings
     ISCSI_API_SSL_VERIFICATION = Setting(True, [bool])

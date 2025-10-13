@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -77,6 +77,7 @@ enum class TokenID {
   s3x_amz_grant_permission,
   s3x_amz_copy_source,
   s3x_amz_server_side_encryption,
+  s3x_amz_server_side_encryption_customer_algorithm,
   s3x_amz_server_side_encryption_aws_kms_key_id,
   s3x_amz_metadata_directive,
   s3x_amz_storage_class,

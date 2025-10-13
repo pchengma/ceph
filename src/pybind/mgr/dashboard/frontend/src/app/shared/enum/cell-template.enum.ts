@@ -72,5 +72,32 @@ export enum CellTemplate {
   //     }
   //  }
   */
-  tooltip = 'tooltip'
+  tooltip = 'tooltip',
+  /*
+  This template is used to attach copy to clipboard functionality to the given column value
+  // {
+  //   ...
+  //   cellTransformation: CellTemplate.copy,
+  */
+  copy = 'copy',
+  /*
+  This template will let you edit the cell value inline. You can pass the validators in the
+  customTemplateConfig.
+  // {
+  //    ...
+  //    cellTransformation: CellTemplate.editing,
+  //    customTemplateConfig: {
+  //          validators: [Validators.required, Validators.pattern(/^[A-Za-z ]+$/)],
+  //          asyncValidators: [AsyncValidator]
+  //          errorMessages: {
+  //            required:  $localize`This field is required.`,
+  //            pattern: $localize`The field format is invalid.`
+  //          }
+  //    }
+  //    ...
+  // }
+  Also need to pass forceIdentifer=true and also a unique identifier prop like
+  identifier="uid" to the table in some cases to avoid issues.
+  */
+  editing = 'editing'
 }

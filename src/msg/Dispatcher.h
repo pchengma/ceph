@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,6 +22,8 @@
 #include "include/ceph_assert.h"
 #include "include/common_fwd.h"
 #include "msg/MessageRef.h"
+
+#include <variant>
 
 class Messenger;
 class Connection;
@@ -124,7 +127,24 @@ public:
   }
 
   /* ms_dispatch2 because otherwise the child must define both */
-  virtual bool ms_dispatch2(const MessageRef &m) {
+  struct HANDLED {};
+  struct UNHANDLED {};
+  struct ACKNOWLEDGED {};
+  typedef std::variant<bool, HANDLED, UNHANDLED, ACKNOWLEDGED> dispatch_result_t;
+
+  static inline dispatch_result_t fold_dispatch_result(dispatch_result_t r) {
+    if (std::holds_alternative<bool>(r)) {
+      if (std::get<bool>(r)) {
+        return HANDLED();
+      } else {
+        return UNHANDLED();
+      }
+    } else {
+      return r;
+    }
+  }
+
+  virtual dispatch_result_t ms_dispatch2(const MessageRef &m) {
     /* allow old style dispatch handling that expects a Message * with a floating ref */
     MessageRef mr(m);
     if (ms_dispatch(mr.get())) {
@@ -215,12 +235,14 @@ public:
    *
    * Do not acquire locks in this method! It is considered "fast" delivery.
    *
-   * return 1 for success
-   * return 0 for no action (let another Dispatcher handle it)
-   * return <0 for failure (failure to parse caps, for instance)
+   * Note: MonClient is the only caller of this method and it is configured
+   *       to only call a single dispatcher.
+   *
+   * return true for success (auth succeeds for this stage of session construction)
+   * return false for failure (failure to parse caps, for instance)
    */
-  virtual int ms_handle_fast_authentication(Connection *con) {
-    return 0;
+  [[nodiscard]] virtual bool ms_handle_fast_authentication(Connection *con) {
+    return false;
   }
 
   /**

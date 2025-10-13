@@ -1,13 +1,12 @@
 import { Component, Inject } from '@angular/core';
 
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
-import { SortDirection, SortPropDir } from '@swimlane/ngx-datatable';
 import { Observable, Subscriber } from 'rxjs';
 
 import { PrometheusListHelper } from '~/app/shared/helpers/prometheus-list-helper';
 import { SilenceFormComponent } from '~/app/ceph/cluster/prometheus/silence-form/silence-form.component';
 import { PrometheusService } from '~/app/shared/api/prometheus.service';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { ActionLabelsI18n, SucceededActionLabelsI18n } from '~/app/shared/constants/app.constants';
 import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
 import { Icons } from '~/app/shared/enum/icons.enum';
@@ -20,10 +19,12 @@ import { Permission } from '~/app/shared/models/permissions';
 import { PrometheusRule } from '~/app/shared/models/prometheus-alerts';
 import { CdDatePipe } from '~/app/shared/pipes/cd-date.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { PrometheusSilenceMatcherService } from '~/app/shared/services/prometheus-silence-matcher.service';
 import { URLBuilderService } from '~/app/shared/services/url-builder.service';
+import { CdSortDirection } from '~/app/shared/enum/cd-sort-direction';
+import { CdSortPropDir } from '~/app/shared/models/cd-sort-prop-dir';
 
 const BASE_URL = 'monitoring/silences';
 
@@ -48,14 +49,14 @@ export class SilenceListComponent extends PrometheusListHelper {
     'badge badge-warning': 'pending',
     'badge badge-default': 'expired'
   };
-  sorts: SortPropDir[] = [{ prop: 'endsAt', dir: SortDirection.desc }];
+  sorts: CdSortPropDir[] = [{ prop: 'endsAt', dir: CdSortDirection.desc }];
   rules: PrometheusRule[];
   visited: boolean;
 
   constructor(
     private authStorageService: AuthStorageService,
     private cdDatePipe: CdDatePipe,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private notificationService: NotificationService,
     private urlBuilder: URLBuilderService,
     private actionLabels: ActionLabelsI18n,
@@ -194,7 +195,7 @@ export class SilenceListComponent extends PrometheusListHelper {
     const id = this.selection.first().id;
     const i18nSilence = $localize`Silence`;
     const applicationName = 'Prometheus';
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: i18nSilence,
       itemNames: [id],
       actionDescription: this.actionLabels.EXPIRE,

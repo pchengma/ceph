@@ -5,10 +5,17 @@ import errno
 import tempfile
 import unittest
 
+import pytest
+
+from ..controllers.saml2 import check_python_saml
 from ..services.sso import load_sso_db
 from ..tests import CLICommandTestMixin, CmdException
 
 
+@pytest.mark.skipif(
+    pytest.raises(Exception, check_python_saml),
+    reason="SAML dependency is missing"
+)
 class AccessControlTest(unittest.TestCase, CLICommandTestMixin):
     IDP_METADATA = '''<?xml version="1.0"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
@@ -166,7 +173,7 @@ class AccessControlTest(unittest.TestCase, CLICommandTestMixin):
                       idp_metadata=self.IDP_METADATA)
 
         result = self.exec_cmd('sso enable saml2')
-        self.assertEqual(result, 'SSO is "enabled" with "SAML2" protocol.')
+        self.assertEqual(result, 'SSO is "enabled" with "saml2" protocol.')
 
     def test_sso_disable(self):
         result = self.exec_cmd('sso disable')
@@ -181,7 +188,7 @@ class AccessControlTest(unittest.TestCase, CLICommandTestMixin):
                       idp_metadata=self.IDP_METADATA)
 
         result = self.exec_cmd('sso status')
-        self.assertEqual(result, 'SSO is "enabled" with "SAML2" protocol.')
+        self.assertEqual(result, 'SSO is "enabled" with "saml2" protocol.')
 
     def test_sso_show_saml2(self):
         result = self.exec_cmd('sso show saml2')

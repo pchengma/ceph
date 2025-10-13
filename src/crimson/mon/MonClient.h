@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -119,8 +119,9 @@ public:
   void print(std::ostream&) const;
 private:
   // AuthServer methods
-  std::pair<std::vector<uint32_t>, std::vector<uint32_t>>
-  get_supported_auth_methods(int peer_type) final;
+  std::vector<uint32_t> get_supported_auth_methods(int peer_type) final;
+  std::vector<uint32_t> get_supported_con_modes(int peer_type,
+						uint32_t auth_method) final;
   uint32_t pick_con_mode(int peer_type,
 			 uint32_t auth_method,
 			 const std::vector<uint32_t>& preferred_modes) final;
@@ -194,7 +195,7 @@ private:
   std::vector<unsigned> get_random_mons(unsigned n) const;
   seastar::future<> _add_conn(unsigned rank, uint64_t global_id);
   void _finish_auth(const entity_addr_t& peer);
-  crimson::common::Gated gate;
+  crimson::common::gate_per_shard gates;
 
   // messages that are waiting for the active_con to be available
   struct pending_msg_t {

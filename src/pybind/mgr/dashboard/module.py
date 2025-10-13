@@ -12,8 +12,10 @@ import sys
 import tempfile
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+from .controllers.multi_cluster import MultiCluster
 
 if TYPE_CHECKING:
     if sys.version_info >= (3, 8):
@@ -21,18 +23,20 @@ if TYPE_CHECKING:
     else:
         from typing_extensions import Literal
 
+from ceph.cryptotools.select import choose_crypto_caller
 from mgr_module import CLIReadCommand, CLIWriteCommand, HandleCommandResult, \
     MgrModule, MgrStandbyModule, NotifyType, Option, _get_localized_key
 from mgr_util import ServerConfigException, build_url, \
     create_self_signed_cert, get_default_addr, verify_tls_files
 
 from . import mgr
+from .controllers import nvmeof  # noqa # pylint: disable=unused-import
 from .controllers import Router, json_error_page
 from .grafana import push_local_dashboards
 from .services import nvmeof_cli  # noqa # pylint: disable=unused-import
 from .services.auth import AuthManager, AuthManagerTool, JwtManager
 from .services.exception import dashboard_exception_handler
-from .services.rgw_client import configure_rgw_credentials
+from .services.service import RgwServiceManager
 from .services.sso import SSO_COMMANDS, handle_sso_command
 from .settings import handle_option_command, options_command_list, options_schema_list
 from .tools import NotificationQueue, RequestLoggingTool, TaskManager, \
@@ -46,10 +50,6 @@ except ImportError:
     cherrypy = None
 
 from .services.sso import load_sso_db
-
-if cherrypy is not None:
-    from .cherrypy_backports import patch_cherrypy
-    patch_cherrypy(cherrypy.__version__)
 
 # pylint: disable=wrong-import-position
 from .plugins import PLUGIN_MANAGER, debug, feature_toggles, motd  # isort:skip # noqa E501 # pylint: disable=unused-import
@@ -147,6 +147,7 @@ class CherryPyConfig(object):
                 'application/json',
                 'application/*+json',
                 'application/javascript',
+                'text/css',
             ],
             'tools.json_in.on': True,
             'tools.json_in.force': True,
@@ -275,6 +276,8 @@ class Module(MgrModule, CherryPyConfig):
                min=400, max=599),
         Option(name='redirect_resolve_ip_addr', type='bool', default=False),
         Option(name='cross_origin_url', type='str', default=''),
+        Option(name='sso_oauth2', type='bool', default=False),
+        Option(name='crypto_caller', type='str', default=''),
     ]
     MODULE_OPTIONS.extend(options_schema_list())
     for options in PLUGIN_MANAGER.hook.get_options() or []:
@@ -288,6 +291,9 @@ class Module(MgrModule, CherryPyConfig):
     def __init__(self, *args, **kwargs):
         super(Module, self).__init__(*args, **kwargs)
         CherryPyConfig.__init__(self)
+        # configure the dashboard's crypto caller. by default it will
+        # use the remote caller to avoid pyo3 conflicts
+        choose_crypto_caller(str(self.get_module_option('crypto_caller', '')))
 
         mgr.init(self)
 
@@ -394,6 +400,11 @@ class Module(MgrModule, CherryPyConfig):
             self.set_store(item_key, inbuf)
         return 0, f'SSL {item_label} updated', ''
 
+    def get_cluster_credentials_files(self, targets: List[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:  # noqa E501 #pylint: disable=line-too-long
+        multi_cluster_instance = MultiCluster()
+        cluster_credentials_files, clusters_credentials = multi_cluster_instance.get_cluster_credentials_files(targets)  # noqa E501 #pylint: disable=line-too-long
+        return cluster_credentials_files, clusters_credentials
+
     @CLIWriteCommand("dashboard set-ssl-certificate")
     def set_ssl_certificate(self, mgr_id: Optional[str] = None, inbuf: Optional[str] = None):
         return self._set_ssl_item('certificate', 'crt', mgr_id, inbuf)
@@ -417,11 +428,30 @@ class Module(MgrModule, CherryPyConfig):
     @CLIWriteCommand("dashboard set-rgw-credentials")
     def set_rgw_credentials(self):
         try:
-            configure_rgw_credentials()
+            rgw_service_manager = RgwServiceManager()
+            rgw_service_manager.configure_rgw_credentials()
         except Exception as error:
             return -errno.EINVAL, '', str(error)
 
         return 0, 'RGW credentials configured', ''
+
+    @CLIWriteCommand("dashboard set-rgw-hostname")
+    def set_rgw_hostname(self, daemon_name: str, hostname: str):
+        try:
+            rgw_service_manager = RgwServiceManager()
+            rgw_service_manager.set_rgw_hostname(daemon_name, hostname)
+            return 0, f'RGW hostname for daemon {daemon_name} configured', ''
+        except Exception as error:
+            return -errno.EINVAL, '', str(error)
+
+    @CLIWriteCommand("dashboard unset-rgw-hostname")
+    def unset_rgw_hostname(self, daemon_name: str):
+        try:
+            rgw_service_manager = RgwServiceManager()
+            rgw_service_manager.unset_rgw_hostname(daemon_name)
+            return 0, f'RGW hostname for daemon {daemon_name} resetted', ''
+        except Exception as error:
+            return -errno.EINVAL, '', str(error)
 
     @CLIWriteCommand("dashboard set-login-banner")
     def set_login_banner(self, inbuf: str):
@@ -539,6 +569,9 @@ class StandbyModule(MgrStandbyModule, CherryPyConfig):
         super(StandbyModule, self).__init__(*args, **kwargs)
         CherryPyConfig.__init__(self)
         self.shutdown_event = threading.Event()
+        # configure the dashboard's crypto caller. by default it will
+        # use the remote caller to avoid pyo3 conflicts
+        choose_crypto_caller(str(self.get_module_option('crypto_caller', '')))
 
         # We can set the global mgr instance to ourselves even though
         # we're just a standby, because it's enough for logging.

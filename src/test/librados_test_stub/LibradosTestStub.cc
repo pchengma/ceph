@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librados_test_stub/LibradosTestStub.h"
 #include "include/rados/librados.hpp"
@@ -601,6 +601,13 @@ int IoCtx::omap_get_vals(const std::string& oid,
   return ctx->execute_operation(
     oid, std::bind(&TestIoCtxImpl::omap_get_vals, _1, _2, start_after, "",
                      max_return, out_vals));
+}
+
+int IoCtx::omap_rm_keys(const std::string& oid,
+                        const std::set<std::string>& keys) {
+  TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
+  return ctx->execute_operation(
+    oid, std::bind(&TestIoCtxImpl::omap_rm_keys, _1, _2, keys));
 }
 
 int IoCtx::operate(const std::string& oid, ObjectWriteOperation *op) {

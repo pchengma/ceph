@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 #include <string_view>
@@ -77,72 +77,43 @@ class OsdScrub {
   void clear_pg_scrub_blocked(spg_t blocked_pg);
 
   /**
-   * modify a scrub-job's scheduled time and deadline
-   *
-   * There are 3 argument combinations to consider:
-   * - 'must' is asserted, and the suggested time is 'scrub_must_stamp':
-   *   the registration will be with "beginning of time" target, making the
-   *   scrub-job eligible to immediate scrub (given that external conditions
-   *   do not prevent scrubbing)
-   * - 'must' is asserted, and the suggested time is 'now':
-   *   This happens if our stats are unknown. The results are similar to the
-   *   previous scenario.
-   * - not a 'must': we take the suggested time as a basis, and add to it some
-   *   configuration / random delays.
-   *  ('must' is Scrub::sched_params_t.is_must)
-   *
-   *  'reset_notbefore' is used to reset the 'not_before' time to the updated
-   *  'scheduled_at' time. This is used whenever the scrub-job schedule is
-   *  updated not as a result of a scrub attempt failure.
-   *
-   *  locking: not using the jobs_lock
-   */
-  void update_job(
-      Scrub::ScrubJobRef sjob,
-      const Scrub::sched_params_t& suggested,
-      bool reset_notbefore);
-
-  /**
    * Add the scrub job to the list of jobs (i.e. list of PGs) to be periodically
    * scrubbed by the OSD.
-   * The registration is active as long as the PG exists and the OSD is its
-   * primary.
-   *
-   * See update_job() for the handling of the 'suggested' parameter.
-   *
-   * locking: might lock jobs_lock
    */
-  void register_with_osd(
-      Scrub::ScrubJobRef sjob,
-      const Scrub::sched_params_t& suggested);
+  void enqueue_scrub_job(const Scrub::ScrubJob& sjob);
+
+  /**
+   * copy the scheduling element (the SchedEntry sub-object) part of
+   * the SchedTarget to the queue.
+   */
+  void enqueue_target(const Scrub::SchedTarget& trgt);
+
+  /**
+   * remove the specified scheduling target from the OSD scrub queue
+   */
+  void dequeue_target(spg_t pgid, scrub_level_t s_or_d);
 
   /**
    * remove the pg from set of PGs to be scanned for scrubbing.
    * To be used if we are no longer the PG's primary, or if the PG is removed.
    */
-  void remove_from_osd_queue(Scrub::ScrubJobRef sjob);
+  void remove_from_osd_queue(spg_t pgid);
 
   /**
    * \returns std::chrono::milliseconds indicating how long to wait between
    * chunks.
    *
    * Implementation Note: Returned value is either osd_scrub_sleep or
-   * osd_scrub_extended_sleep, depending on must_scrub_param and time
-   * of day (see configs osd_scrub_begin*)
+   * osd_scrub_extended_sleep:
+   * - if scrubs are allowed at this point in time - osd_scrub_sleep; otherwise
+   *   (i.e. - the current time is outside of the allowed scrubbing hours/days,
+   *   but the scrub started earlier):
+   * - if the scrub observes "extended sleep" (i.e. - it's a low urgency
+   *   scrub) - osd_scrub_extended_sleep.
    */
   std::chrono::milliseconds scrub_sleep_time(
-      utime_t t,
-      bool high_priority_scrub) const;
-
-  /**
-   * push the 'not_before' time out by 'delay' seconds, so that this scrub target
-   * would not be retried before 'delay' seconds have passed.
-   */
-  void delay_on_failure(
-      Scrub::ScrubJobRef sjob,
-      std::chrono::seconds delay,
-      Scrub::delay_cause_t delay_cause,
-      utime_t now_is);
+      utime_t t_now,
+      bool scrub_respects_ext_sleep) const;
 
 
   /**
@@ -151,13 +122,13 @@ class OsdScrub {
   [[nodiscard]] bool scrub_time_permit(utime_t t) const;
 
   /**
-   * An external interface into the LoadTracker object. Used by
-   * the OSD tick to update the load data in the logger.
+   * Fetch the 1-minute load average. Used by
+   * the OSD heartbeat handler to update a performance counter.
+   * Also updates the number of CPUs, required internally by the
+   * scrub queue.
    *
-   * \returns 100*(the decaying (running) average of the CPU load
-   *          over the last 24 hours) or nullopt if the load is not
-   *          available.
-   * Note that the multiplication by 100 is required by the logger interface
+   * \returns the 1-minute element of getloadavg() or nullopt
+   *          if the load is not available.
    */
   std::optional<double> update_load_average();
 
@@ -173,18 +144,26 @@ class OsdScrub {
   /**
    * check the OSD-wide environment conditions (scrub resources, time, etc.).
    * These may restrict the type of scrubs we are allowed to start, maybe
-   * down to allowing only high-priority scrubs
+   * down to allowing only high-priority scrubs. See comments in scrub_job.h
+   * detailing which condiitions may prevent what types of scrubs.
    *
-   * Specifically:
-   * 'only high priority' flag is set for either of
-   * the following reasons: no local resources (too many scrubs on this OSD);
-   * a dice roll says we will not scrub in this tick;
-   * a recovery is in progress, and we are not allowed to scrub while recovery;
-   * a PG is trying to acquire replica resources.
+   * The following possible limiting conditions are checked:
+   * - high local OSD concurrency (i.e. too many scrubs on this OSD);
+   * - a "dice roll" says we will not scrub in this tick (note: this
+   *   specific condition is only checked if the "high concurrency" condition
+   *   above is not detected);
+   * - the CPU load is high (i.e. above osd_scrub_cpu_load_threshold);
+   * - the OSD is performing a recovery & osd_scrub_during_recovery is 'false';
+   * - the current time is outside of the allowed scrubbing hours/days
    */
   Scrub::OSDRestrictions restrictions_on_scrubbing(
       bool is_recovery_active,
       utime_t scrub_clock_now) const;
+
+  static bool is_sched_target_eligible(
+      const Scrub::SchedEntry& e,
+      const Scrub::OSDRestrictions& r,
+      utime_t time_now);
 
   /**
    * initiate a scrub on a specific PG
@@ -196,7 +175,7 @@ class OsdScrub {
    *          initiated, and if not - why.
    */
   Scrub::schedule_result_t initiate_a_scrub(
-      spg_t pgid,
+      const Scrub::SchedEntry& candidate,
       Scrub::OSDRestrictions restrictions);
 
   /// resource reservation management
@@ -206,6 +185,9 @@ class OsdScrub {
   ScrubQueue m_queue;
 
   const std::string m_log_prefix{};
+
+  /// list all scrub queue entries
+  void debug_log_all_jobs() const;
 
   /// number of PGs stuck while scrubbing, waiting for objects
   int get_blocked_pgs_count() const;
@@ -217,30 +199,22 @@ class OsdScrub {
    */
   bool scrub_random_backoff() const;
 
-  /**
-   * tracking the average load on the CPU. Used both by the
-   * OSD logger, and by the scrub queue (as no scrubbing is allowed if
-   * the load is too high).
+  // tracking the CPU load
+  // ---------------------------------------------------------------
+
+  /*
+   * tracking the average load on the CPU. Used both by the OSD performance
+   * counters logger, and by the scrub queue (as no periodic scrubbing is
+   * allowed if the load is too high).
    */
-  class LoadTracker {
-    CephContext* cct;
-    const ceph::common::ConfigProxy& conf;
-    const std::string log_prefix;
-    double daily_loadavg{0.0};
 
-   public:
-    explicit LoadTracker(
-	CephContext* cct,
-	const ceph::common::ConfigProxy& config,
-	int node_id);
+  /// the number of CPUs
+  long loadavg_cpu_count{1};
 
-    std::optional<double> update_load_average();
+  /// true if the load average (the 1-minute system average divided by
+  /// the number of CPUs) is below the configured threshold
+  bool scrub_load_below_threshold() const;
 
-    [[nodiscard]] bool scrub_load_below_threshold() const;
-
-    std::ostream& gen_prefix(std::ostream& out, std::string_view fn) const;
-  };
-  LoadTracker m_load_tracker;
 
   // the scrub performance counters collections
   // ---------------------------------------------------------------

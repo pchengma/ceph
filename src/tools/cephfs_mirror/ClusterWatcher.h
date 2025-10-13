@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_CLUSTER_WATCHER_H
 #define CEPHFS_MIRROR_CLUSTER_WATCHER_H
@@ -38,12 +38,7 @@ public:
                  Listener &listener);
   ~ClusterWatcher();
 
-  bool ms_can_fast_dispatch_any() const override {
-    return true;
-  }
-  bool ms_can_fast_dispatch2(const cref_t<Message> &m) const override;
-  void ms_fast_dispatch2(const ref_t<Message> &m) override;
-  bool ms_dispatch2(const ref_t<Message> &m) override;
+  Dispatcher::dispatch_result_t ms_dispatch2(const ref_t<Message> &m) override;
 
   void ms_handle_connect(Connection *c) override {
   }

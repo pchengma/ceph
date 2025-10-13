@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -23,3 +23,27 @@ enum {
 PerfCountersRef build(CephContext *cct, const std::string& name);
 
 } // namespace sync_counters
+
+const std::string rgw_sync_delta_counters_key = "rgw_sync_delta";
+
+namespace sync_deltas {
+
+enum {
+  l_rgw_sync_delta_first = 806000,
+  l_rgw_datalog_sync_delta,
+  l_rgw_sync_delta_last,
+};
+
+class SyncDeltaCountersManager {
+  std::unique_ptr<PerfCounters> sync_delta_counters;
+  CephContext *cct;
+
+public:
+  SyncDeltaCountersManager(const std::string& name, CephContext *cct);
+
+  void tset(int idx, ceph::timespan v);
+
+  ~SyncDeltaCountersManager();
+};
+
+} // namespace sync_deltas

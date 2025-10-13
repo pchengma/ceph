@@ -22,29 +22,29 @@
                     [selection]="selection"
                     [tableActions]="tableActions">
   </cd-table-actions>
-  <cd-rbd-details cdTableDetail
+  <cd-rbd-details *cdTableDetail
                   [selection]="expandedRow">
   </cd-rbd-details>
 </cd-table>
 
 <ng-template #parentTpl
-             let-value="value">
+             let-value="data.value">
   <span *ngIf="value">{{ value.pool_name }}<span
-          *ngIf="value.pool_namespace">/{{ value.pool_namespace }}</span>/{{ value.image_name }}@{{ value.snap_name }}</span>
+          *ngIf="value.pool_namespace">/{{ value.pool_namespace }}</span>/{{ value.image_name }}&#64;{{ value.snap_name }}</span>
   <span *ngIf="!value">-</span>
 </ng-template>
 
 <ng-template #mirroringTpl
-             let-value="value"
-             let-row="row">
-  <span *ngIf="value.length === 3; else probb"
+             let-value="data.value"
+             let-row="data.row">
+  <span *ngIf="value?.length === 3; else probb"
         class="badge badge-info">{{ value[0] }}</span>&nbsp;
-  <span *ngIf="value.length === 3"
+  <span *ngIf="value?.length === 3"
         class="badge badge-info">{{ value[1] }}</span>&nbsp;
-  <span *ngIf="row.primary === true"
+  <span *ngIf="row?.primary === true"
         class="badge badge-info"
         i18n>primary</span>
-  <span *ngIf="row.primary === false"
+  <span *ngIf="row?.primary === false"
         class="badge badge-info"
         i18n>secondary</span>
   <ng-template #probb>
@@ -53,9 +53,9 @@
 </ng-template>
 
 <ng-template #ScheduleTpl
-             let-value="value"
-             let-row="row">
-  <span *ngIf="value.length === 3"
+             let-value="data.value"
+             let-row="data.row">
+  <span *ngIf="value?.length === 3"
         class="badge badge-info">{{ value[2] | cdDate  }}</span>
 </ng-template>
 
@@ -87,13 +87,12 @@
 </ng-template>
 
 <ng-template #removingStatTpl
-             let-column="column"
-             let-value="value"
-             let-row="row">
-
+             let-column="data.column"
+             let-value="data.value"
+             let-row="data.row">
   <i [ngClass]="[icons.spinner, icons.spin]"
      *ngIf="row.cdExecuting"></i>
-  <span [ngClass]="column?.customTemplateConfig?.valueClass">
+    <span [ngClass]="column?.customTemplateConfig?.valueClass">
     {{ value }}
   </span>
   <span *ngIf="row.cdExecuting"
@@ -102,10 +101,12 @@
         'text-muted italic'">
     ({{ row.cdExecuting }})
   </span>
-  <i *ngIf="row.source && row.source === 'REMOVING'"
-     i18n-title
-     title="RBD in status 'Removing'"
-     class="{{ icons.warning }} warn"></i>
+  <svg  *ngIf="row.source && row.source === 'REMOVING'"
+        i18n-title
+        title="RBD in status 'Removing'"
+        [cdsIcon]="icons.warning"
+        [size]="icons.size16"
+        class="cds-warning-color"></svg>
 </ng-template>
 
 <ng-template #forcePromoteConfirmation>
@@ -119,8 +120,8 @@
 </ng-template>
 
 <ng-template #imageUsageTpl
-             let-row="row">
-  <span *ngIf="row.features_name && (!row.features_name.includes('fast-diff') || row.mirror_mode === 'snapshot') ; else usageBar"
+             let-row="data.row">
+  <span *ngIf="row.features_name && !row.features_name.includes('fast-diff') ; else usageBar"
         [ngbTooltip]="usageTooltip">
     <span>-</span>
   </span>
@@ -132,7 +133,6 @@
                   decimals="2">
   </cd-usage-bar>
   </ng-template>
-
 </ng-template>
 
 <ng-template #usageTooltip>

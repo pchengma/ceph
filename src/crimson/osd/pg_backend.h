@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -29,10 +29,9 @@ namespace ceph::os {
 }
 
 namespace crimson::osd {
-  class ShardServices;
-  class PG;
-  class ObjectContextLoader;
-}
+class ShardServices;
+class PG;
+class ObjectContextLoader;
 
 class PGBackend
 {
@@ -60,9 +59,10 @@ public:
   using interruptible_future =
     ::crimson::interruptible::interruptible_future<
       ::crimson::osd::IOInterruptCondition, T>;
-  using rep_op_fut_t =
+  using rep_op_ret_t = 
     std::tuple<interruptible_future<>,
-	       interruptible_future<crimson::osd::acked_peers_t>>;
+	       interruptible_future<>>;
+  using rep_op_fut_t = interruptible_future<rep_op_ret_t>;
   PGBackend(shard_id_t shard, CollectionRef coll,
             crimson::osd::ShardServices &shard_services,
             DoutPrefixProvider &dpp);
@@ -220,14 +220,6 @@ public:
     ceph::os::Transaction& trans,
     osd_op_params_t& osd_op_params,
     object_stat_sum_t& delta_stats);
-  rep_op_fut_t mutate_object(
-    std::set<pg_shard_t> pg_shards,
-    crimson::osd::ObjectContextRef &&obc,
-    ceph::os::Transaction&& txn,
-    osd_op_params_t&& osd_op_p,
-    epoch_t min_epoch,
-    epoch_t map_epoch,
-    std::vector<pg_log_entry_t>&& log_entries);
 
   /**
    * list_objects
@@ -315,11 +307,6 @@ public:
     ObjectState& os,
     const OSDOp& osd_op,
     ceph::os::Transaction& trans);
-  void clone(
-    /* const */object_info_t& snap_oi,
-    const ObjectState& os,
-    const ObjectState& d_os,
-    ceph::os::Transaction& trans);
   interruptible_future<struct stat> stat(
     CollectionRef c,
     const ghobject_t& oid) const;
@@ -327,7 +314,8 @@ public:
     CollectionRef c,
     const ghobject_t& oid,
     uint64_t off,
-    uint64_t len);
+    uint64_t len,
+    uint32_t op_flags = 0);
 
   write_iertr::future<> tmapput(
     ObjectState& os,
@@ -387,11 +375,13 @@ public:
     object_stat_sum_t& delta_stats);
   ll_read_ierrorator::future<ceph::bufferlist> omap_get_header(
     const crimson::os::CollectionRef& c,
-    const ghobject_t& oid) const;
+    const ghobject_t& oid,
+    uint32_t op_flags = 0) const;
   ll_read_ierrorator::future<> omap_get_header(
     const ObjectState& os,
     OSDOp& osd_op,
-    object_stat_sum_t& delta_stats) const;
+    object_stat_sum_t& delta_stats,
+    uint32_t op_flags = 0) const;
   interruptible_future<> omap_set_header(
     ObjectState& os,
     const OSDOp& osd_op,
@@ -418,6 +408,28 @@ public:
     ceph::os::Transaction& trans,
     osd_op_params_t& osd_op_params,
     object_stat_sum_t& delta_stats);
+
+  /// sets oi and (for head) ss attrs
+  void set_metadata(
+    const hobject_t &obj,
+    object_info_t &oi,
+    const SnapSet *ss /* non-null iff head */,
+    ceph::os::Transaction& trans);
+
+  /// clone from->to and clear ss attribute on to
+  void clone_for_write(
+    const hobject_t &from,
+    const hobject_t &to,
+    ceph::os::Transaction& trans);
+
+  virtual rep_op_fut_t
+  submit_transaction(const std::set<pg_shard_t> &pg_shards,
+		     const hobject_t& hoid,
+		     crimson::osd::ObjectContextRef&& new_clone,
+		     ceph::os::Transaction&& txn,
+		     osd_op_params_t&& osd_op_p,
+		     epoch_t min_epoch, epoch_t max_epoch,
+		     std::vector<pg_log_entry_t>&& log_entries) = 0;
 
   virtual void got_rep_op_reply(const MOSDRepOpReply&) {}
   virtual seastar::future<> stop() = 0;
@@ -475,19 +487,10 @@ private:
     object_stat_sum_t& delta_stats,
     object_info_t& oi,
     uint64_t truncate_size);
-  virtual rep_op_fut_t
-  _submit_transaction(std::set<pg_shard_t>&& pg_shards,
-		      const hobject_t& hoid,
-		      ceph::os::Transaction&& txn,
-		      osd_op_params_t&& osd_op_p,
-		      epoch_t min_epoch, epoch_t max_epoch,
-		      std::vector<pg_log_entry_t>&& log_entries) = 0;
   friend class ReplicatedRecoveryBackend;
   friend class ::crimson::osd::PG;
 
 protected:
-  boost::container::flat_set<hobject_t> temp_contents;
-
   template <class... Args>
   void add_temp_obj(Args&&... args) {
     temp_contents.insert(std::forward<Args>(args)...);
@@ -501,5 +504,17 @@ protected:
       clear_temp_obj(oid);
     }
   }
+  template <typename Func>
+  void for_each_temp_obj(Func &&f) {
+    std::for_each(temp_contents.begin(), temp_contents.end(), f);
+  }
+  void clear_temp_objs() {
+    temp_contents.clear();
+  }
+private:
+  boost::container::flat_set<hobject_t> temp_contents;
+
   friend class RecoveryBackend;
 };
+
+}

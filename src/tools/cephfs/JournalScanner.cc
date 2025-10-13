@@ -1,5 +1,6 @@
-// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * ceph - scalable distributed file system
  *
@@ -11,14 +12,14 @@
  * foundation.  see file copying.
  */
 
+#include "JournalScanner.h"
 
+#include "common/debug.h"
 #include "include/rados/librados.hpp"
 #include "mds/JournalPointer.h"
 
 #include "mds/events/ESubtreeMap.h"
 #include "mds/PurgeQueue.h"
-
-#include "JournalScanner.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds

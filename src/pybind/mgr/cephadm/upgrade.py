@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 from typing import TYPE_CHECKING, Optional, Dict, List, Tuple, Any, cast
+from cephadm.services.service_registry import service_registry
 
 import orchestrator
 from cephadm.registry import Registry
@@ -29,17 +30,17 @@ CEPH_MDSMAP_NOT_JOINABLE = (1 << 0)
 def normalize_image_digest(digest: str, default_registry: str) -> str:
     """
     Normal case:
-    >>> normalize_image_digest('ceph/ceph', 'docker.io')
-    'docker.io/ceph/ceph'
+    >>> normalize_image_digest('ceph/ceph', 'quay.io')
+    'quay.io/ceph/ceph'
 
     No change:
-    >>> normalize_image_digest('quay.ceph.io/ceph/ceph', 'docker.io')
+    >>> normalize_image_digest('quay.ceph.io/ceph/ceph', 'quay.io')
     'quay.ceph.io/ceph/ceph'
 
-    >>> normalize_image_digest('docker.io/ubuntu', 'docker.io')
-    'docker.io/ubuntu'
+    >>> normalize_image_digest('quay.io/centos', 'quay.io')
+    'quay.io/centos'
 
-    >>> normalize_image_digest('localhost/ceph', 'docker.io')
+    >>> normalize_image_digest('localhost/ceph', 'quay.io')
     'localhost/ceph'
     """
     known_shortnames = [
@@ -494,6 +495,21 @@ class CephadmUpgrade:
         self.mgr.event.set()
         return 'Stopped upgrade to %s' % target_image
 
+    def update_service(self, service_type: str, service_image: str, image: str) -> List[str]:
+        out = []
+        self.mgr.set_module_option(f"container_image_{service_image}", image)
+        # Redeploy all the service daemons of provided service type
+        for service_name, spec in self.mgr.spec_store.get_specs_by_type(service_type).items():
+            out.append(f'Processing "{service_name}" service\n')
+            try:
+                res = self.mgr.perform_service_action('redeploy', service_name)
+            except Exception as exp:
+                self.mgr.log.exception(f"Failed to redeploy service {service_name}")
+                out.append(f'{exp}\n')
+            else:
+                out.extend(res)
+        return out
+
     def continue_upgrade(self) -> bool:
         """
         Returns false, if nothing was done.
@@ -535,7 +551,7 @@ class CephadmUpgrade:
 
             # setting force flag to retain old functionality.
             # note that known is an output argument for ok_to_stop()
-            r = self.mgr.cephadm_services[daemon_type_to_service(s.daemon_type)].ok_to_stop([
+            r = service_registry.get_service(daemon_type_to_service(s.daemon_type)).ok_to_stop([
                 s.daemon_id], known=known, force=True)
 
             if not r.retval:

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef _MSG_ASYNC_PROTOCOL_
 #define _MSG_ASYNC_PROTOCOL_
@@ -131,6 +131,8 @@ public:
   virtual void read_event() = 0;
   virtual void write_event() = 0;
   virtual bool is_queued() = 0;
+
+  virtual void dump(Formatter *f) = 0;
 
   int get_con_mode() const {
     return auth_meta->con_mode;

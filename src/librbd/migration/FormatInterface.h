@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_MIGRATION_FORMAT_INTERFACE_H
 #define CEPH_LIBRBD_MIGRATION_FORMAT_INTERFACE_H
@@ -35,7 +35,7 @@ struct FormatInterface {
   virtual void get_image_size(uint64_t snap_id, uint64_t* size,
                               Context* on_finish) = 0;
 
-  virtual bool read(io::AioCompletion* aio_comp, uint64_t snap_id,
+  virtual void read(io::AioCompletion* aio_comp, uint64_t snap_id,
                     io::Extents&& image_extents, io::ReadResult&& read_result,
                     int op_flags, int read_flags,
                     const ZTracer::Trace &parent_trace) = 0;

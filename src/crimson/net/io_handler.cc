@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "io_handler.h"
 
@@ -12,6 +12,7 @@
 #include "crimson/net/SocketMessenger.h"
 #include "msg/Message.h"
 #include "msg/msg_fmt.h"
+#include "include/utime_fmt.h"
 
 using namespace ceph::msgr::v2;
 using crimson::common::local_conf;
@@ -48,7 +49,7 @@ namespace crimson::net {
 IOHandler::IOHandler(ChainedDispatchers &dispatchers,
                      SocketConnection &conn)
   : shard_states(shard_states_t::create(
-        seastar::this_shard_id(), io_state_t::none)),
+        seastar::this_shard_id(), io_state_t::delay)),
     dispatchers(dispatchers),
     conn(conn),
     conn_ref(conn.get_local_shared_foreign_from_this())
@@ -166,12 +167,12 @@ seastar::future<> IOHandler::send(MessageURef _msg)
   MessageFRef msg = seastar::make_foreign(std::move(_msg));
   auto cc_seq = io_crosscore.prepare_submit();
   auto source_core = seastar::this_shard_id();
+  logger().debug("{} send {} send() to core {} -- {}",
+                 conn, cc_seq, get_shard_id(), *msg);
   // sid may be changed on-the-fly during the submission
   if (source_core == get_shard_id()) {
     return do_send(cc_seq, source_core, std::move(msg));
   } else {
-    logger().trace("{} send() {} is directed to core {} -- {}",
-                   conn, cc_seq, get_shard_id(), *msg);
     return seastar::smp::submit_to(
         get_shard_id(),
         [this, cc_seq, source_core, msg=std::move(msg)]() mutable {
@@ -189,8 +190,8 @@ seastar::future<> IOHandler::send_recheck_shard(
   if (seastar::this_shard_id() == get_shard_id()) {
     return do_send(cc_seq, source_core, std::move(msg));
   } else {
-    logger().debug("{} send_recheck_shard() {} "
-                   "is redirected from core {} to {} -- {}",
+    logger().debug("{} send {} send_recheck_shard() "
+                   "redirected from core {} to {} -- {}",
                    conn, cc_seq, source_core, get_shard_id(), *msg);
     return seastar::smp::submit_to(
         get_shard_id(),
@@ -207,7 +208,7 @@ seastar::future<> IOHandler::do_send(
 {
   assert(seastar::this_shard_id() == get_shard_id());
   if (io_crosscore.proceed_or_wait(cc_seq, source_core)) {
-    logger().trace("{} do_send() got {} from core {}: send message -- {}",
+    logger().debug("{} got {} do_send() from core {} -- {}",
                    conn, cc_seq, source_core, *msg);
     if (get_io_state() != io_state_t::drop) {
       out_pending_msgs.push_back(std::move(msg));
@@ -215,7 +216,7 @@ seastar::future<> IOHandler::do_send(
     }
     return seastar::now();
   } else {
-    logger().debug("{} do_send() got {} from core {}, wait at {} -- {}",
+    logger().debug("{} got {} do_send() from core {}, wait at {} -- {}",
                    conn, cc_seq, source_core,
                    io_crosscore.get_in_seq(source_core),
                    *msg);
@@ -231,12 +232,12 @@ seastar::future<> IOHandler::send_keepalive()
   // may be invoked from any core
   auto cc_seq = io_crosscore.prepare_submit();
   auto source_core = seastar::this_shard_id();
+  logger().debug("{} send {} send_keepalive() to core {}",
+                 conn, cc_seq, get_shard_id());
   // sid may be changed on-the-fly during the submission
   if (source_core == get_shard_id()) {
     return do_send_keepalive(cc_seq, source_core);
   } else {
-    logger().trace("{} send_keepalive() {} is directed to core {}",
-                   conn, cc_seq, get_shard_id());
     return seastar::smp::submit_to(
         get_shard_id(),
         [this, cc_seq, source_core] {
@@ -253,8 +254,8 @@ seastar::future<> IOHandler::send_keepalive_recheck_shard(
   if (seastar::this_shard_id() == get_shard_id()) {
     return do_send_keepalive(cc_seq, source_core);
   } else {
-    logger().debug("{} send_keepalive_recheck_shard() {} "
-                   "is redirected from core {} to {}",
+    logger().debug("{} send {} send_keepalive_recheck_shard() "
+                   "redirected from core {} to {}",
                    conn, cc_seq, source_core, get_shard_id());
     return seastar::smp::submit_to(
         get_shard_id(),
@@ -270,7 +271,7 @@ seastar::future<> IOHandler::do_send_keepalive(
 {
   assert(seastar::this_shard_id() == get_shard_id());
   if (io_crosscore.proceed_or_wait(cc_seq, source_core)) {
-    logger().trace("{} do_send_keeplive() got {} from core {}: need_keepalive={}",
+    logger().debug("{} got {} do_send_keeplive() from core {}: need_keepalive={}",
                    conn, cc_seq, source_core, need_keepalive);
     if (!need_keepalive) {
       need_keepalive = true;
@@ -278,7 +279,7 @@ seastar::future<> IOHandler::do_send_keepalive(
     }
     return seastar::now();
   } else {
-    logger().debug("{} do_send_keepalive() got {} from core {}, wait at {}",
+    logger().debug("{} got {} do_send_keepalive() from core {}, wait at {}",
                    conn, cc_seq, source_core,
                    io_crosscore.get_in_seq(source_core));
     return io_crosscore.wait(cc_seq, source_core
@@ -291,7 +292,6 @@ seastar::future<> IOHandler::do_send_keepalive(
 void IOHandler::mark_down()
 {
   ceph_assert_always(seastar::this_shard_id() == get_shard_id());
-  ceph_assert_always(get_io_state() != io_state_t::none);
   need_dispatch_reset = false;
   if (get_io_state() == io_state_t::drop) {
     return;
@@ -346,7 +346,7 @@ void IOHandler::do_set_io_state(
 {
   ceph_assert_always(seastar::this_shard_id() == get_shard_id());
   auto prv_state = get_io_state();
-  logger().debug("{} got {}do_set_io_state(): prv_state={}, new_state={}, "
+  logger().debug("{} got {} do_set_io_state(): prv_state={}, new_state={}, "
                  "fa={}, set_notify_out={}, at {}",
                  conn,
                  cc_seq.has_value() ? fmt::format("{} ", *cc_seq) : "",
@@ -354,8 +354,7 @@ void IOHandler::do_set_io_state(
                  fa ? "present" : "N/A", set_notify_out,
                  io_stat_printer{*this});
   ceph_assert_always(!(
-    (new_state == io_state_t::none && prv_state != io_state_t::none) ||
-    (new_state == io_state_t::open && prv_state == io_state_t::open)
+    new_state == io_state_t::open && prv_state == io_state_t::open
   ));
 
   if (prv_state == io_state_t::drop) {
@@ -790,12 +789,13 @@ seastar::future<> IOHandler::set_accepted_sid(
     ConnectionFRef conn_fref)
 {
   assert(seastar::this_shard_id() == get_shard_id());
-  assert(get_io_state() == io_state_t::none);
+  assert(get_io_state() == io_state_t::delay);
   ceph_assert_always(conn_ref);
   conn_ref.reset();
   assert(maybe_prv_shard_states == nullptr);
   shard_states.reset();
-  shard_states = shard_states_t::create(sid, io_state_t::none);
+  shard_states = shard_states_t::create(sid, io_state_t::delay);
+  logger().debug("{} send {} set_accepted_sid() to core {}", conn, cc_seq, sid);
   return seastar::smp::submit_to(sid,
       [this, cc_seq, conn_fref=std::move(conn_fref)]() mutable {
     // must be the first to proceed
@@ -803,7 +803,7 @@ seastar::future<> IOHandler::set_accepted_sid(
 
     logger().debug("{} set accepted sid", conn);
     ceph_assert_always(seastar::this_shard_id() == get_shard_id());
-    ceph_assert_always(get_io_state() == io_state_t::none);
+    ceph_assert_always(get_io_state() == io_state_t::delay);
     assert(maybe_prv_shard_states == nullptr);
     ceph_assert_always(!conn_ref);
     conn_ref = make_local_shared_foreign(std::move(conn_fref));
@@ -912,7 +912,7 @@ IOHandler::do_out_dispatch(shard_states_t &ctx)
       ctx.exit_out_dispatching("switched", conn);
       return seastar::make_ready_future<stop_t>(stop_t::yes);
      default:
-      ceph_abort("impossible");
+      ceph_abort_msg("impossible");
     }
   }).handle_exception_type([this, &ctx](const std::system_error& e) {
     auto io_state = ctx.get_io_state();
@@ -983,7 +983,7 @@ void IOHandler::notify_out_dispatch()
       });
     });
   }
-  if (shard_states->try_enter_out_dispatching()) {
+  if (shard_states->try_enter_out_dispatching(conn)) {
     shard_states->dispatch_in_background(
         "do_out_dispatch", conn, [this] {
       return do_out_dispatch(*shard_states);
@@ -1018,10 +1018,10 @@ IOHandler::read_message(
                    msg_frame.front_len(),
                    msg_frame.middle_len(),
                    msg_frame.data_len(),
-                   current_header.type,
+                   (uint16_t)current_header.type,
                    conn.get_peer_name(),
-                   current_header.data_off,
-                   current_header.seq);
+                   (uint16_t)current_header.data_off,
+                   (uint32_t)current_header.seq);
 
     ceph_msg_header header{current_header.seq,
                            current_header.tid,
@@ -1088,7 +1088,7 @@ IOHandler::read_message(
       logger().debug("{} <== #{},{} === {} ({})",
                      conn,
                      message->get_seq(),
-                     current_header.ack_seq,
+                     (uint32_t)current_header.ack_seq,
                      *message,
                      message->get_type());
     }
@@ -1130,7 +1130,7 @@ void IOHandler::do_in_dispatch()
                 return seastar::now();
               }
               // TODO: message throttler
-              ceph_abort("TODO");
+              ceph_abort_msg("TODO");
               return seastar::now();
             }).then([this, msg_size] {
               // throttle_bytes() logic

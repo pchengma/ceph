@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -15,6 +16,7 @@
  * 
  */
 
+#include <cassert>
 #include <errno.h>
 
 #include "ceph_ver.h"
@@ -39,15 +41,14 @@ ErasureCodePluginRegistry::ErasureCodePluginRegistry() = default;
 
 ErasureCodePluginRegistry::~ErasureCodePluginRegistry()
 {
-  if (disable_dlclose)
-    return;
-
-  for (std::map<std::string,ErasureCodePlugin*>::iterator i = plugins.begin();
-       i != plugins.end();
-       ++i) {
-    void *library = i->second->library;
-    delete i->second;
-    dlclose(library);
+  for (auto& name_plugin : plugins) {
+    auto *plugin = name_plugin.second;
+    assert(plugin);
+    void *library = plugin->library;
+    delete plugin;
+    if (!disable_dlclose) {
+      dlclose(library);
+    }
   }
 }
 

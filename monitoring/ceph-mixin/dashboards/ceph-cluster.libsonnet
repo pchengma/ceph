@@ -59,7 +59,20 @@ local g = import 'grafonnet/grafana.libsonnet';
       ],
       auto=true,
     )
-  ).addPanels(
+  ).addLinks([
+    $.addLinkSchema(
+      asDropdown=true,
+      icon='external link',
+      includeVars=true,
+      keepTime=true,
+      tags=[],
+      targetBlank=false,
+      title='Browse Dashboards',
+      tooltip='',
+      type='dashboards',
+      url=''
+    ),
+  ]).addPanels(
     [
       $.addRowSchema(collapse=false, showTitle=true, title='CLUSTER STATE') + { gridPos: { x: 0, y: 0, w: 24, h: 1 } },
       $.addStatPanel(
@@ -123,7 +136,7 @@ local g = import 'grafonnet/grafana.libsonnet';
 
       $.addStatPanel(
         title='Cluster Capacity',
-        unit='decbytes',
+        unit='bytes',
         datasource='$datasource',
         gridPosition={ x: 6, y: 1, w: 3, h: 3 },
         graphMode='area',
@@ -162,7 +175,7 @@ local g = import 'grafonnet/grafana.libsonnet';
         { color: 'green' },
       ])
       .addTarget($.addTargetSchema(
-        expr='sum(irate(ceph_osd_op_w_in_bytes{%(matchers)s}[5m]))' % $.matchers(),
+        expr='sum(rate(ceph_osd_op_w_in_bytes{%(matchers)s}[$__rate_interval]))' % $.matchers(),
         instant=true,
         interval='$interval',
         datasource='$datasource',
@@ -185,7 +198,7 @@ local g = import 'grafonnet/grafana.libsonnet';
         { color: '#9ac48a', value: 0 },
       ])
       .addTarget($.addTargetSchema(
-        expr='sum(irate(ceph_osd_op_r_out_bytes{%(matchers)s}[5m]))' % $.matchers(),
+        expr='sum(rate(ceph_osd_op_r_out_bytes{%(matchers)s}[$__rate_interval]))' % $.matchers(),
         instant=true,
         interval='$interval',
         datasource='$datasource',
@@ -220,7 +233,6 @@ local g = import 'grafonnet/grafana.libsonnet';
       )
       .addThresholds([
         { color: 'green', value: null },
-        { color: 'red', value: 80 },
       ])
       .addTargets([
         $.addTargetSchema(
@@ -246,7 +258,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           displayValueWithAlias='When Alias Displayed',
           units='none',
           valueHandler='Number Threshold',
-          expr='count(ceph_osd_in{%(matchers)s})' % $.matchers(),
+          expr='sum(ceph_osd_in{%(matchers)s})' % $.matchers(),
           legendFormat='In',
           interval='$interval',
           datasource='$datasource',
@@ -295,6 +307,29 @@ local g = import 'grafonnet/grafana.libsonnet';
           warn=1,
           datasource='$datasource',
         ),
+      ])
+      .addOverrides([
+        { matcher: { id: 'byName', options: 'All' }, properties: [
+          { id: 'color', value: { mode: 'fixed' } },
+        ] },
+        { matcher: { id: 'byName', options: 'Out' }, properties: [
+          {
+            id: 'thresholds',
+            value: { mode: 'absolute', steps: [
+              { color: 'green', value: null },
+              { color: 'red', value: 1 },
+            ] },
+          },
+        ] },
+        { matcher: { id: 'byName', options: 'Down' }, properties: [
+          {
+            id: 'thresholds',
+            value: { mode: 'absolute', steps: [
+              { color: 'green', value: null },
+              { color: 'red', value: 1 },
+            ] },
+          },
+        ] },
       ]),
 
       $.addStatPanel(
@@ -440,7 +475,7 @@ local g = import 'grafonnet/grafana.libsonnet';
         displayName='',
         maxDataPoints=100,
         colorMode='none',
-        unit='decbytes',
+        unit='bytes',
         pluginVersion='9.4.7',
       )
       .addMappings([
@@ -482,7 +517,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ])
       .addTargets([
         $.addTargetSchema(
-          expr='sum(irate(ceph_osd_op_w{%(matchers)s}[1m]))' % $.matchers(),
+          expr='sum(rate(ceph_osd_op_w{%(matchers)s}[$__rate_interval]))' % $.matchers(),
           legendFormat='',
           datasource='$datasource',
           instant=true,
@@ -513,7 +548,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ])
       .addTargets([
         $.addTargetSchema(
-          expr='sum(irate(ceph_osd_op_r{%(matchers)s}[1m]))' % $.matchers(),
+          expr='sum(rate(ceph_osd_op_r{%(matchers)s}[$__rate_interval]))' % $.matchers(),
           legendFormat='',
           datasource='$datasource',
           instant=true,
@@ -700,7 +735,7 @@ local g = import 'grafonnet/grafana.libsonnet';
         pointSize=5,
         lineWidth=1,
         showPoints='never',
-        unit='decbytes',
+        unit='bytes',
         displayMode='table',
         tooltip={ mode: 'multi', sort: 'desc' },
         interval='$interval',
@@ -716,7 +751,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       .addTargets(
         [
           $.addTargetSchema(
-            expr='sum(irate(ceph_osd_op_w_in_bytes{%(matchers)s}[5m]))' % $.matchers(),
+            expr='sum(rate(ceph_osd_op_w_in_bytes{%(matchers)s}[$__rate_interval]))' % $.matchers(),
             datasource='$datasource',
             interval='$interval',
             legendFormat='Write',
@@ -724,7 +759,7 @@ local g = import 'grafonnet/grafana.libsonnet';
             range=true,
           ),
           $.addTargetSchema(
-            expr='sum(irate(ceph_osd_op_r_out_bytes{%(matchers)s}[5m]))' % $.matchers(),
+            expr='sum(rate(ceph_osd_op_r_out_bytes{%(matchers)s}[$__rate_interval]))' % $.matchers(),
             datasource='$datasource',
             interval='$interval',
             legendFormat='Read',
@@ -742,7 +777,7 @@ local g = import 'grafonnet/grafana.libsonnet';
         pointSize=5,
         lineWidth=1,
         showPoints='never',
-        unit='decbytes',
+        unit='bytes',
         displayMode='table',
         tooltip={ mode: 'multi', sort: 'desc' },
         interval='$interval',
@@ -759,7 +794,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       .addTargets(
         [
           $.addTargetSchema(
-            expr='sum(irate(ceph_osd_op_w{%(matchers)s}[1m]))' % $.matchers(),
+            expr='sum(rate(ceph_osd_op_w{%(matchers)s}[$__rate_interval]))' % $.matchers(),
             datasource='$datasource',
             interval='$interval',
             legendFormat='Write',
@@ -767,7 +802,7 @@ local g = import 'grafonnet/grafana.libsonnet';
             range=true,
           ),
           $.addTargetSchema(
-            expr='sum(irate(ceph_osd_op_r{%(matchers)s}[1m]))' % $.matchers(),
+            expr='sum(rate(ceph_osd_op_r{%(matchers)s}[$__rate_interval]))' % $.matchers(),
             datasource='$datasource',
             interval='$interval',
             legendFormat='Read',
@@ -961,7 +996,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       $.addRowSchema(collapse=false, showTitle=true, title='OBJECTS') + { gridPos: { x: 0, y: 31, w: 24, h: 1 } },
 
       $.timeSeriesPanel(
-        title='OSD Type Count',
+        title='RADOS Object Count',
         datasource='$datasource',
         gridPosition={ h: 12, w: 6, x: 0, y: 32 },
         fillOpacity=10,
@@ -1285,7 +1320,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ])
       .addTargets([
         $.addTargetSchema(
-          expr='sum(irate(ceph_osd_recovery_ops{%(matchers)s}[$interval]))' % $.matchers(),
+          expr='sum(rate(ceph_osd_recovery_ops{%(matchers)s}[$__rate_interval]))' % $.matchers(),
           datasource='$datasource',
           interval='$interval',
           legendFormat='OPS',
@@ -1430,7 +1465,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           yBucketSize=null,
           pluginVersion='9.4.7',
         ).addTarget($.addTargetSchema(
-          expr='rate(ceph_osd_op_r_latency_sum{%(matchers)s}[5m]) / rate(ceph_osd_op_r_latency_count{%(matchers)s}[5m]) >= 0' % $.matchers(),
+          expr='rate(ceph_osd_op_r_latency_sum{%(matchers)s}[$__rate_interval]) / rate(ceph_osd_op_r_latency_count{%(matchers)s}[$__rate_interval]) >= 0' % $.matchers(),
           datasource='$datasource',
           interval='$interval',
           instant=false,
@@ -1481,7 +1516,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           yBucketSize=null,
           pluginVersion='9.4.7',
         ).addTarget($.addTargetSchema(
-          expr='rate(ceph_osd_op_w_latency_sum{%(matchers)s}[5m]) / rate(ceph_osd_op_w_latency_count{%(matchers)s}[5m]) >= 0' % $.matchers(),
+          expr='rate(ceph_osd_op_w_latency_sum{%(matchers)s}[$__rate_interval]) / rate(ceph_osd_op_w_latency_count{%(matchers)s}[$__rate_interval]) >= 0' % $.matchers(),
           datasource='$datasource',
           interval='$interval',
           legendFormat='',
@@ -1512,12 +1547,12 @@ local g = import 'grafonnet/grafana.libsonnet';
         ])
         .addTargets([
           $.addTargetSchema(
-            expr='avg(rate(ceph_osd_op_r_latency_sum{%(matchers)s}[5m]) / rate(ceph_osd_op_r_latency_count{%(matchers)s}[5m]) >= 0)' % $.matchers(),
+            expr='avg(rate(ceph_osd_op_r_latency_sum{%(matchers)s}[$__rate_interval]) / rate(ceph_osd_op_r_latency_count{%(matchers)s}[$__rate_interval]) >= 0)' % $.matchers(),
             datasource='$datasource',
             legendFormat='Read',
           ),
           $.addTargetSchema(
-            expr='avg(rate(ceph_osd_op_w_latency_sum{%(matchers)s}[5m]) / rate(ceph_osd_op_w_latency_count{%(matchers)s}[5m]) >= 0)' % $.matchers(),
+            expr='avg(rate(ceph_osd_op_w_latency_sum{%(matchers)s}[$__rate_interval]) / rate(ceph_osd_op_w_latency_count{%(matchers)s}[$__rate_interval]) >= 0)' % $.matchers(),
             datasource='$datasource',
             legendFormat='Write',
           ),

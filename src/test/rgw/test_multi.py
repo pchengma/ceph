@@ -248,10 +248,16 @@ def init(parse_args):
     user_creds = gen_credentials()
     user = multisite.User('tester', tenant=args.tenant, account='RGW11111111111111111')
 
+    non_account_user_creds = gen_credentials()
+    non_account_user = multisite.User('nonaccounttester', tenant=args.tenant)
+
+    non_account_alt_user_creds = gen_credentials()
+    non_account_alt_user = multisite.User('nonaccountalttester', tenant=args.tenant)
+
     realm = multisite.Realm('r')
     if bootstrap:
         # create the realm on c1
-        realm.create(c1)
+        realm.create(c1, ['--default'])
     else:
         realm.get(c1)
     period = multisite.Period(realm=realm)
@@ -305,7 +311,7 @@ def init(parse_args):
                     cluster.start()
                     # pull realm configuration from the master's gateway
                     gateway = realm.meta_master_zone().gateways[0]
-                    realm.pull(cluster, gateway, admin_creds)
+                    realm.pull(cluster, gateway, admin_creds, ['--default'])
 
             endpoints = zone_endpoints(zg, z, args.gateways_per_zone)
             if is_master:
@@ -382,17 +388,30 @@ def init(parse_args):
                     arg += admin_creds.credential_args()
                     admin_user.create(zone, arg)
                     # create test account/user
-                    cluster.admin(['account', 'create', '--account-id', user.account])
+                    arg = ['--account-id', user.account]
+                    arg += zone.zone_args()
+                    cluster.admin(['account', 'create'] + arg)
                     arg = ['--display-name', 'TestUser']
                     arg += user_creds.credential_args()
                     user.create(zone, arg)
+                    # create non-account test user
+                    arg = ['--display-name', 'NonAccountTestUser']
+                    arg += non_account_user_creds.credential_args()
+                    non_account_user.create(zone, arg)
+                    # create non-account alt test user
+                    arg = ['--display-name', 'NonAccountAltTestUser']
+                    arg += non_account_alt_user_creds.credential_args()
+                    non_account_alt_user.create(zone, arg)
                 else:
                     # read users and update keys
                     admin_user.info(zone)
                     admin_creds = admin_user.credentials[0]
-                    arg = []
-                    user.info(zone, arg)
+                    user.info(zone)
                     user_creds = user.credentials[0]
+                    non_account_user.info(zone)
+                    non_account_user_creds = non_account_user.credentials[0]
+                    non_account_alt_user.info(zone)
+                    non_account_alt_user_creds = non_account_alt_user.credentials[0]
 
     if not bootstrap:
         period.get(c1)
@@ -401,7 +420,7 @@ def init(parse_args):
                     checkpoint_delay=args.checkpoint_delay,
                     reconfigure_delay=args.reconfigure_delay,
                     tenant=args.tenant)
-    init_multi(realm, user, config)
+    init_multi(realm, user, non_account_user, non_account_alt_user, config)
 
 def setup_module():
     init(False)

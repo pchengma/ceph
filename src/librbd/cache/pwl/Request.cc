@@ -1,10 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Request.h"
 #include "librbd/BlockGuard.h"
 #include "librbd/cache/pwl/LogEntry.h"
 #include "librbd/cache/pwl/AbstractWriteLog.h"
+#include "common/Clock.h" // for ceph_clock_now()
+#include "common/debug.h"
 
 #define dout_subsys ceph_subsys_rbd_pwl
 #undef dout_prefix

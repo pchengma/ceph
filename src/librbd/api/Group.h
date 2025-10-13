@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_API_GROUP_H
 #define CEPH_LIBRBD_API_GROUP_H
@@ -47,7 +47,11 @@ struct Group {
   static int snap_rename(librados::IoCtx& group_ioctx, const char *group_name,
                          const char *old_snap_name, const char *new_snap_name);
   static int snap_list(librados::IoCtx& group_ioctx, const char *group_name,
-                       std::vector<group_snap_info_t> *snaps);
+                       bool try_to_sort, bool fail_if_not_sorted,
+                       std::vector<group_snap_info2_t> *snaps);
+  static int snap_get_info(librados::IoCtx& group_ioctx,
+                           const char *group_name, const char *snap_name,
+                           group_snap_info2_t* group_snap);
   static int snap_rollback(librados::IoCtx& group_ioctx,
                            const char *group_name, const char *snap_name,
                            ProgressContext& pctx);

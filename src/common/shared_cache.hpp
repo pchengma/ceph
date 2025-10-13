@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,7 +18,7 @@
 
 #include <map>
 #include <list>
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
 #include <boost/smart_ptr/local_shared_ptr.hpp>
 #else
 #include <memory>
@@ -25,12 +26,13 @@
 #include "common/ceph_mutex.h"
 #include "common/ceph_context.h"
 #include "common/dout.h"
-#include "include/unordered_map.h"
+
+#include <unordered_map>
 
 template <class K, class V>
 class SharedLRU {
   CephContext *cct;
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
   using VPtr = boost::local_shared_ptr<V>;
   using WeakVPtr = boost::weak_ptr<V>;
 #else
@@ -46,7 +48,7 @@ public:
 private:
   using C = std::less<K>;
   using H = std::hash<K>;
-  ceph::unordered_map<K, typename std::list<std::pair<K, VPtr> >::iterator, H> contents;
+  std::unordered_map<K, typename std::list<std::pair<K, VPtr>>::iterator, H> contents;
   std::list<std::pair<K, VPtr> > lru;
 
   std::map<K, std::pair<WeakVPtr, V*>, C> weak_refs;

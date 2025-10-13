@@ -6,7 +6,7 @@ from ..exceptions import DashboardException
 from ..security import Scope
 from ..services.ceph_service import CephService, SendCommandError
 from . import APIDoc, APIRouter, CRUDCollectionMethod, CRUDEndpoint, \
-    EndpointDoc, RESTController, SecretStr
+    EndpointDoc, Param, RESTController, SecretStr
 from ._crud import ArrayHorizontalContainer, CRUDMeta, Form, FormField, \
     FormTaskInfo, Icon, MethodType, SelectionType, TableAction, Validator, \
     VerticalContainer
@@ -40,7 +40,7 @@ class CephUserEndpoints:
     @staticmethod
     def user_list(_):
         """
-        Get list of ceph users and its respective data
+        Get list of ceph users and its associated data
         """
         return CephUserEndpoints._run_auth_command('auth ls')["auth_dump"]
 
@@ -48,9 +48,7 @@ class CephUserEndpoints:
     def user_create(_, user_entity: str = '', capabilities: Optional[List[Cap]] = None,
                     import_data: str = ''):
         """
-        Add a ceph user with its defined capabilities.
-        :param user_entity: Entity to change
-        :param capabilities: List of capabilities to add to user_entity
+        Add a Ceph user, with its defined capabilities.
         """
         # Caps are represented as a vector in mon auth add commands.
         # Look at AuthMonitor.cc::valid_caps for reference.
@@ -72,14 +70,16 @@ class CephUserEndpoints:
         return f"Successfully created user '{user_entity}'"
 
     @staticmethod
-    def user_delete(_, user_entity: str):
+    def user_delete(_, user_entities: str):
         """
-        Delete a ceph user and it's defined capabilities.
-        :param user_entity: Entity to delete
+        Delete one or more ceph users and their defined capabilities.
+        user_entities: comma-separated string of users to delete
         """
-        logger.debug("Sending command 'auth del' of entity '%s'", user_entity)
-        CephUserEndpoints._run_auth_command('auth del', entity=user_entity)
-        return f"Successfully deleted user '{user_entity}'"
+        users = user_entities.split(',')
+        for user in users:
+            logger.debug("Sending command 'auth del' of entity '%s'", user)
+            CephUserEndpoints._run_auth_command('auth del', entity=user)
+        return f"Successfully deleted user(s) '{user_entities}'"
 
     @staticmethod
     def export(_, entities: List[str]):
@@ -94,8 +94,6 @@ class CephUserEndpoints:
         """
         Change the ceph user capabilities.
         Setting new capabilities will overwrite current ones.
-        :param user_entity: Entity to change
-        :param capabilities: List of updated capabilities to user_entity
         """
         caps = []
         for cap in capabilities:
@@ -188,24 +186,44 @@ edit_form = Form(path='/cluster/user/edit',
     resource='user',
     get_all=CRUDCollectionMethod(
         func=CephUserEndpoints.user_list,
-        doc=EndpointDoc("Get Ceph Users")
+        doc=EndpointDoc("Get list of ceph users")
     ),
     create=CRUDCollectionMethod(
         func=CephUserEndpoints.user_create,
-        doc=EndpointDoc("Create Ceph User")
+        doc=EndpointDoc("Create Ceph User",
+                        parameters={
+                            "user_entity": Param(str, "Entity to add"),
+                            'capabilities': Param([{
+                                "entity": (str, "Entity to add"),
+                                "cap": (str, "Capability to add; eg. allow *")
+                            }], 'List of capabilities to add to user_entity')
+                        })
     ),
     edit=CRUDCollectionMethod(
         func=CephUserEndpoints.user_edit,
-        doc=EndpointDoc("Edit Ceph User")
+        doc=EndpointDoc("Edit Ceph User Capabilities",
+                        parameters={
+                            "user_entity": Param(str, "Entity to edit"),
+                            'capabilities': Param([{
+                                "entity": (str, "Entity to edit"),
+                                "cap": (str, "Capability to edit; eg. allow *")
+                            }], 'List of updated capabilities to user_entity')
+                        })
     ),
     delete=CRUDCollectionMethod(
         func=CephUserEndpoints.user_delete,
-        doc=EndpointDoc("Delete Ceph User")
+        doc=EndpointDoc("Delete one or more Ceph Users",
+                        parameters={
+                            "user_entity": Param(str, "Entity to delete")
+                        })
     ),
     extra_endpoints=[
         ('export', CRUDCollectionMethod(
             func=RESTController.Collection('POST', 'export')(CephUserEndpoints.export),
-            doc=EndpointDoc("Export Ceph Users")
+            doc=EndpointDoc("Export Ceph Users",
+                            parameters={
+                                "entities": Param([str], "List of entities to export")
+                            })
         ))
     ],
     selection_type=SelectionType.MULTI,

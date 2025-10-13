@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -138,7 +138,7 @@ static bool operator==(const SnapContext& rhs, const SnapContext& lhs) {
 #include "librbd/io/CopyupRequest.cc"
 
 MATCHER_P(IsRead, image_extents, "") {
-  auto req = boost::get<librbd::io::ImageDispatchSpec::Read>(&arg->request);
+  auto req = std::get_if<librbd::io::ImageDispatchSpec::Read>(&arg->request);
   return (req != nullptr && image_extents == arg->image_extents);
 }
 
@@ -210,7 +210,7 @@ struct TestMockIoCopyupRequest : public TestMockFixture {
                 send(IsRead(image_extents)))
       .WillOnce(Invoke(
         [&mock_image_ctx, image_extents, data, r](io::ImageDispatchSpec* spec) {
-          auto req = boost::get<librbd::io::ImageDispatchSpec::Read>(
+          auto req = std::get_if<librbd::io::ImageDispatchSpec::Read>(
             &spec->request);
           ASSERT_TRUE(req != nullptr);
 

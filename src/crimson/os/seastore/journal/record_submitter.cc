@@ -1,10 +1,11 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #include "record_submitter.h"
 
 #include <fmt/format.h>
 #include <fmt/os.h>
+#include <fmt/std.h>
 
 #include "crimson/os/seastore/logging.h"
 #include "crimson/os/seastore/async_cleaner.h"
@@ -13,16 +14,17 @@ SET_SUBSYS(seastore_journal);
 
 namespace crimson::os::seastore::journal {
 
-RecordBatch::add_pending_ret
+RecordBatch::add_pending_ret_t
 RecordBatch::add_pending(
   const std::string& name,
   record_t&& record,
-  extent_len_t block_size)
+  extent_len_t block_size,
+  std::optional<journal_seq_t> maybe_write_base)
 {
   LOG_PREFIX(RecordBatch::add_pending);
   auto new_size = get_encoded_length_after(record, block_size);
   auto dlength_offset = pending.size.dlength;
-  TRACE("{} batches={}, write_size={}, dlength_offset={} ...",
+  TRACE("{} batches={}, write_size=0x{:x}, dlength_offset=0x{:x} ...",
         name,
         pending.get_size() + 1,
         new_size.get_encoded_length(),
@@ -36,62 +38,71 @@ RecordBatch::add_pending(
   if (state == state_t::EMPTY) {
     assert(!io_promise.has_value());
     io_promise = seastar::shared_promise<maybe_promise_result_t>();
-  } else {
-    assert(io_promise.has_value());
+    assert(maybe_write_base.has_value());
+    assert(!write_base.has_value());
+    write_base = maybe_write_base;
   }
   state = state_t::PENDING;
+  assert(write_base.has_value());
+  assert(io_promise.has_value());
 
-  return io_promise->get_shared_future(
-  ).then([dlength_offset, FNAME, &name
-         ](auto maybe_promise_result) -> add_pending_ret {
+  auto _write_base = *write_base;
+  auto fut = io_promise->get_shared_future(
+  ).then([dlength_offset, FNAME, &name, _write_base
+         ](auto maybe_promise_result) -> add_pending_fut {
     if (!maybe_promise_result.has_value()) {
       ERROR("{} write failed", name);
       return crimson::ct_error::input_output_error::make();
     }
-    auto write_result = maybe_promise_result->write_result;
     auto submit_result = record_locator_t{
-      write_result.start_seq.offset.add_offset(
+      _write_base.offset.add_offset(
           maybe_promise_result->mdlength + dlength_offset),
-      write_result
+      write_result_t{_write_base, maybe_promise_result->write_length}
     };
     TRACE("{} write finish with {}", name, submit_result);
-    return add_pending_ret(
+    return add_pending_fut(
       add_pending_ertr::ready_future_marker{},
       submit_result);
   });
+  _write_base.offset = _write_base.offset.add_offset(dlength_offset);
+  return {_write_base, std::move(fut)};
 }
 
-ceph::bufferlist RecordBatch::encode_batch(
+RecordBatch::encode_ret_t RecordBatch::encode_batch(
   const journal_seq_t& committed_to,
   segment_nonce_t segment_nonce)
 {
   assert(state == state_t::PENDING);
   assert(pending.get_size() > 0);
   assert(io_promise.has_value());
+  assert(write_base.has_value());
 
   state = state_t::SUBMITTING;
+  auto _write_base = *write_base;
+  write_base.reset();
   submitting_size = pending.get_size();
   submitting_length = pending.size.get_encoded_length();
   submitting_mdlength = pending.size.get_mdlength();
   auto bl = encode_records(pending, committed_to, segment_nonce);
   // Note: pending is cleared here
   assert(bl.length() == submitting_length);
-  return bl;
+  return {_write_base, std::move(bl)};
 }
 
 void RecordBatch::set_result(
-  maybe_result_t maybe_write_result)
+  maybe_result_t maybe_write_length)
 {
   maybe_promise_result_t result;
-  if (maybe_write_result.has_value()) {
-    assert(maybe_write_result->length == submitting_length);
+  if (maybe_write_length.has_value()) {
+    assert(*maybe_write_length == submitting_length);
     result = promise_result_t{
-      *maybe_write_result,
+      *maybe_write_length,
       submitting_mdlength
     };
   }
   assert(state == state_t::SUBMITTING);
   assert(io_promise.has_value());
+  assert(!write_base.has_value());
 
   state = state_t::EMPTY;
   submitting_size = 0;
@@ -133,7 +144,7 @@ RecordSubmitter::RecordSubmitter(
     batches(new RecordBatch[io_depth + 1])
 {
   LOG_PREFIX(RecordSubmitter);
-  INFO("{} io_depth_limit={}, batch_capacity={}, batch_flush_size={}, "
+  INFO("{} io_depth_limit={}, batch_capacity={}, batch_flush_size=0x{:x}, "
        "preferred_fullness={}",
        get_name(), io_depth, batch_capacity,
        batch_flush_size, preferred_fullness);
@@ -311,21 +322,34 @@ RecordSubmitter::submit(
       journal_allocator.get_nonce());
     DEBUG("{} fast submit {}, committed_to={}, outstanding_io={} ...",
           get_name(), sizes, get_committed_to(), num_outstanding_io);
-    return journal_allocator.write(std::move(to_write)
-    ).safe_then([mdlength = sizes.get_mdlength()](auto write_result) {
+    write_result_t result{
+        journal_allocator.get_written_to(),
+        to_write.length()};
+    auto write_fut = journal_allocator.write(std::move(to_write)
+    ).safe_then([mdlength=sizes.get_mdlength(), result] {
       return record_locator_t{
-        write_result.start_seq.offset.add_offset(mdlength),
-        write_result
+        result.start_seq.offset.add_offset(mdlength),
+        result
       };
     }).finally([this] {
       decrement_io_with_flush();
     });
+    return {result.start_seq, std::move(write_fut)};
   }
   // indirect batched write
-  auto write_fut = p_current_batch->add_pending(
+  std::optional<journal_seq_t> maybe_write_base;
+  if (p_current_batch->is_empty()) {
+    maybe_write_base = journal_allocator.get_written_to();
+  } else {
+    assert(p_current_batch->get_write_base().has_value());
+    assert(*p_current_batch->get_write_base() ==
+           journal_allocator.get_written_to());
+  }
+  auto ret = p_current_batch->add_pending(
     get_name(),
     std::move(record),
-    journal_allocator.get_block_size());
+    journal_allocator.get_block_size(),
+    maybe_write_base);
   if (needs_flush) {
     if (state == state_t::FULL) {
       // #2 block concurrent submissions due to lack of resource
@@ -361,7 +385,7 @@ RecordSubmitter::submit(
           num_outstanding_io);
     assert(!p_current_batch->needs_flush());
   }
-  return write_fut;
+  return ret;
 }
 
 RecordSubmitter::open_ret
@@ -445,7 +469,7 @@ void RecordSubmitter::update_state()
   } else if (num_outstanding_io == io_depth_limit) {
     state = state_t::FULL;
   } else {
-    ceph_abort("fatal error: io-depth overflow");
+    ceph_abort_msg("fatal error: io-depth overflow");
   }
 }
 
@@ -493,7 +517,7 @@ void RecordSubmitter::account_submission(
   stats.record_batch_stats.increment(rg.get_size());
 
   for (const record_t& r : rg.records) {
-    auto src = r.type;
+    auto src = r.trans_type;
     assert(is_modify_transaction(src));
     auto& trans_stats = get_by_src(stats.stats_by_src, src);
     ++(trans_stats.num_records);
@@ -528,16 +552,21 @@ void RecordSubmitter::flush_current_batch()
   account_submission(rg);
   assert(stats.record_batch_stats.num_io ==
          stats.io_depth_stats.num_io);
-  auto to_write = p_batch->encode_batch(
+  auto encode_ret = p_batch->encode_batch(
     get_committed_to(), journal_allocator.get_nonce());
   // Note: rg is cleared
-  DEBUG("{} {} records, {}, committed_to={}, outstanding_io={} ...",
-        get_name(), num, sizes, get_committed_to(), num_outstanding_io);
-  std::ignore = journal_allocator.write(std::move(to_write)
-  ).safe_then([this, p_batch, FNAME, num, sizes](auto write_result) {
-    TRACE("{} {} records, {}, write done with {}",
-          get_name(), num, sizes, write_result);
-    finish_submit_batch(p_batch, write_result);
+  auto write_base = encode_ret.write_base;
+  auto write_len = encode_ret.bl.length();
+  DEBUG("{} {} records, {}, write_to={}, committed_to={}, outstanding_io={} ...",
+        get_name(), num, sizes,
+        write_result_t{write_base, write_len},
+        get_committed_to(), num_outstanding_io);
+  assert(write_base == journal_allocator.get_written_to());
+  std::ignore = journal_allocator.write(std::move(encode_ret.bl)
+  ).safe_then([this, p_batch, FNAME, num, sizes, write_len] {
+    TRACE("{} {} records, {}, write done",
+          get_name(), num, sizes);
+    finish_submit_batch(p_batch, write_len);
   }).handle_error(
     crimson::ct_error::all_same_way([this, p_batch, FNAME, num, sizes](auto e) {
       ERROR("{} {} records, {}, got error {}",

@@ -34,16 +34,21 @@
                     [columns]="columns"
                     columnMode="flex"
                     selectionType="single"
+                    (fetchData)="refresh()"
+                    [hasDetails]="true"
+                    (setExpandedRow)="setExpandedRow($event)"
                     [maxLimit]="25"
                     (updateSelection)="updateSelection($event)">
-            <div class="table-actions btn-toolbar">
-              <cd-table-actions [permission]="permissions.user"
-                                [selection]="selection"
-                                class="btn-group"
-                                id="cluster-actions"
-                                [tableActions]="tableActions">
-              </cd-table-actions>
-            </div>
+            <cd-table-actions [permission]="permissions.user"
+                              [selection]="selection"
+                              class="table-actions"
+                              id="cluster-actions"
+                              [tableActions]="tableActions">
+            </cd-table-actions>
+            <cd-multi-cluster-details *cdTableDetail
+                                      [permissions]="permissions"
+                                      [selection]="expandedRow">
+            </cd-multi-cluster-details>
           </cd-table>
         </ng-template>
       </ng-container>
@@ -53,7 +58,7 @@
 </ng-container>
 
 <ng-template #urlTpl
-             let-row="row">
+             let-row="data.row">
   <a target="_blank"
      [href]="row.url">
       {{ row?.url?.endsWith('/') ? row?.url?.slice(0, -1) : row.url }}
@@ -62,9 +67,9 @@
 </ng-template>
 
 <ng-template #durationTpl
-             let-column="column"
-             let-value="value"
-             let-row="row">
+             let-column="data.column"
+             let-value="data.value"
+             let-row="data.row">
   <span *ngIf="row.remainingTimeWithoutSeconds > 0 && row.cluster_alias !== 'local-cluster'">
     <i *ngIf="row.remainingDays < 8"
        i18n-title
@@ -72,7 +77,7 @@
        [class.icon-danger-color]="row.remainingDays < 2"
        [class.icon-warning-color]="row.remainingDays < 8"
        class="{{ icons.warning }}"></i>
-    <span title="{{ value | cdDate }}">{{ row.remainingTimeWithoutSeconds / 1000 | duration }}</span>
+    <span title="{{ row.expiryDate }}">{{ row.remainingTimeWithoutSeconds / 1000 | duration }}</span>
   </span>
   <span *ngIf="row.remainingTimeWithoutSeconds <= 0 && row.remainingDays <=0 && row.cluster_alias !== 'local-cluster'">
     <i i18n-title

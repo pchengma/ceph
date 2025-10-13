@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,9 +15,15 @@
  *
  */
 
+#include <fmt/core.h>
 #include <unistd.h>
 
+#include "common/ceph_strings.h"
+#include "common/ceph_time.h"
+#include "common/iso_8601.h"
+#include "common/tcp_info.h"
 #include "include/Context.h"
+#include "include/msgr.h"
 #include "include/random.h"
 #include "common/errno.h"
 #include "AsyncMessenger.h"
@@ -310,7 +317,7 @@ ssize_t AsyncConnection::write(ceph::buffer::list &bl,
     outgoing_bl.claim_append(bl);
     ssize_t r = _try_send(more);
     if (r > 0) {
-      writeCallback = callback;
+      writeCallback = std::move(callback);
     }
     return r;
 }
@@ -621,7 +628,7 @@ void AsyncConnection::fault()
 }
 
 void AsyncConnection::_stop() {
-  writeCallback.reset();
+  writeCallback = {};
   dispatch_queue->discard_queue(conn_id);
   async_msgr->unregister_conn(this);
   worker->release_worker();
@@ -737,8 +744,7 @@ void AsyncConnection::handle_write_callback() {
   recv_start_time = ceph::mono_clock::now();
   write_lock.lock();
   if (writeCallback) {
-    auto callback = *writeCallback;
-    writeCallback.reset();
+    auto callback = std::move(writeCallback);
     write_lock.unlock();
     callback(0);
     return;
@@ -810,4 +816,62 @@ void AsyncConnection::tick(uint64_t id)
       last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
     }
   }
+}
+
+void AsyncConnection::dump(Formatter *f, bool tcp_info) {
+  std::lock_guard<std::mutex> l(lock);
+
+  f->open_object_section("async_connection");
+  f->dump_string("state", get_state_name(state));
+  f->dump_unsigned("messenger_nonce", async_msgr->get_nonce());
+
+  f->open_object_section("status");
+  f->dump_bool("connected", is_connected());
+  f->dump_bool("loopback", is_loopback);
+  f->close_section();  // status
+
+  if (cs) {
+    f->dump_int("socket_fd", cs.fd());
+    if (!tcp_info || !dump_tcp_info(cs.fd(), f)) {
+      f->dump_null("tcp_info");
+    }
+  } else {
+    f->dump_null("socket_fd");
+    f->dump_null("tcp_info");
+  }
+  f->dump_int("conn_id", conn_id);
+
+  f->open_object_section("peer");
+  f->dump_object("entity_name", get_peer_entity_name());
+  f->dump_string("type", ceph_entity_type_name(get_peer_type()));
+  f->dump_int("id", get_peer_id());
+  f->dump_int("global_id", get_peer_global_id());
+  f->open_object_section("addr");
+  peer_addrs->dump(f);
+  f->close_section();  // addr
+  f->close_section();  // peer
+
+  f->dump_string("last_connect_started_ago",
+                 ceph::timespan_str(ceph::coarse_mono_clock::now() -
+                                    last_connect_started));
+  f->dump_string(
+      "last_active_ago",
+      fmt::format("{}", ceph::timespan_str(ceph::coarse_mono_clock::now() -
+                                           last_active)));
+  f->dump_string("recv_start_time_ago",
+                 fmt::format("{}", ceph::timespan_str(ceph::mono_clock::now() -
+                                                      recv_start_time)));
+  f->dump_unsigned("last_tick_id", last_tick_id);
+  f->dump_object("socket_addr", socket_addr);
+  f->dump_object("target_addr", target_addr);
+  f->dump_int("port", port);
+  f->open_object_section("protocol");
+  if (protocol) {
+    protocol->dump(f);
+  } else {
+    f->dump_null("null");
+  }
+  f->close_section();  // protocol
+  f->dump_int("worker_id", worker ? worker->id : -1);
+  f->close_section();  // async_connection
 }

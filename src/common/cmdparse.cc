@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,11 +14,17 @@
  */
 
 #include "include/common_fwd.h"
+#include "common/BackTrace.h"
 #include "common/cmdparse.h"
 #include "common/Formatter.h"
 #include "common/debug.h"
 #include "common/strtol.h"
+#include "include/ceph_assert.h"	// boost clobbers this
+#include "include/types.h" // for operator<<(std::vector)
 #include "json_spirit/json_spirit.h"
+
+#include <ostream>
+#include <sstream>
 
 using std::is_same_v;
 using std::ostringstream;

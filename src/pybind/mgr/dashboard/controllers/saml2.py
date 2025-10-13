@@ -32,33 +32,24 @@ class Saml2(BaseController, ControllerAuthMixin):
             'post_data': post_data
         }
 
-    @staticmethod
-    def _check_python_saml():
-        if not python_saml_imported:
-            raise cherrypy.HTTPError(400, 'Required library not found: `python3-saml`')
-        try:
-            OneLogin_Saml2_Settings(mgr.SSO_DB.saml2.onelogin_settings)
-        except OneLogin_Saml2_Error:
-            raise cherrypy.HTTPError(400, 'Single Sign-On is not configured.')
-
     @Endpoint('POST', path="", version=None)
     @allow_empty_body
     def auth_response(self, **kwargs):
-        Saml2._check_python_saml()
+        check_python_saml()
         req = Saml2._build_req(self._request, kwargs)
-        auth = OneLogin_Saml2_Auth(req, mgr.SSO_DB.saml2.onelogin_settings)
+        auth = OneLogin_Saml2_Auth(req, mgr.SSO_DB.config.onelogin_settings)
         auth.process_response()
         errors = auth.get_errors()
 
         if auth.is_authenticated():
             JwtManager.reset_user()
-            username_attribute = auth.get_attribute(mgr.SSO_DB.saml2.get_username_attribute())
+            username_attribute = auth.get_attribute(mgr.SSO_DB.config.get_username_attribute())
             if username_attribute is None:
                 raise cherrypy.HTTPError(400,
                                          'SSO error - `{}` not found in auth attributes. '
                                          'Received attributes: {}'
                                          .format(
-                                             mgr.SSO_DB.saml2.get_username_attribute(),
+                                             mgr.SSO_DB.config.get_username_attribute(),
                                              auth.get_attributes()))
             username = username_attribute[0]
             url_prefix = prepare_url_prefix(mgr.get_module_option('url_prefix', default=''))
@@ -84,30 +75,39 @@ class Saml2(BaseController, ControllerAuthMixin):
 
     @Endpoint(xml=True, version=None)
     def metadata(self):
-        Saml2._check_python_saml()
-        saml_settings = OneLogin_Saml2_Settings(mgr.SSO_DB.saml2.onelogin_settings)
+        check_python_saml()
+        saml_settings = OneLogin_Saml2_Settings(mgr.SSO_DB.config.onelogin_settings)
         return saml_settings.get_sp_metadata()
 
     @Endpoint(json_response=False, version=None)
     def login(self):
-        Saml2._check_python_saml()
+        check_python_saml()
         req = Saml2._build_req(self._request, {})
-        auth = OneLogin_Saml2_Auth(req, mgr.SSO_DB.saml2.onelogin_settings)
+        auth = OneLogin_Saml2_Auth(req, mgr.SSO_DB.config.onelogin_settings)
         raise cherrypy.HTTPRedirect(auth.login())
 
     @Endpoint(json_response=False, version=None)
     def slo(self):
-        Saml2._check_python_saml()
+        check_python_saml()
         req = Saml2._build_req(self._request, {})
-        auth = OneLogin_Saml2_Auth(req, mgr.SSO_DB.saml2.onelogin_settings)
+        auth = OneLogin_Saml2_Auth(req, mgr.SSO_DB.config.onelogin_settings)
         raise cherrypy.HTTPRedirect(auth.logout())
 
     @Endpoint(json_response=False, version=None)
     def logout(self, **kwargs):
         # pylint: disable=unused-argument
-        Saml2._check_python_saml()
+        check_python_saml()
         JwtManager.reset_user()
-        token = JwtManager.get_token_from_header()
+        token = JwtManager.get_token(cherrypy.request)
         self._delete_token_cookie(token)
         url_prefix = prepare_url_prefix(mgr.get_module_option('url_prefix', default=''))
         raise cherrypy.HTTPRedirect("{}/#/login".format(url_prefix))
+
+
+def check_python_saml():
+    if not python_saml_imported:
+        raise cherrypy.HTTPError(400, 'Required library not found: `python3-saml`')
+    try:
+        OneLogin_Saml2_Settings(mgr.SSO_DB.config.onelogin_settings)
+    except OneLogin_Saml2_Error:
+        raise cherrypy.HTTPError(400, 'Single Sign-On is not configured.')

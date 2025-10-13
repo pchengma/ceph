@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,11 +16,15 @@
  * try and bench on a pool you don't have permission to access
  * it will just loop forever.
  */
+
+#include "obj_bencher.h"
 #include "include/compat.h"
-#include <pthread.h>
 #include "common/ceph_mutex.h"
 #include "common/Clock.h"
-#include "obj_bencher.h"
+
+#include <iomanip>
+
+#include <pthread.h>
 
 using std::ostream;
 using std::cerr;
@@ -99,6 +104,7 @@ ostream& ObjBencher::out(ostream& os)
 }
 
 void *ObjBencher::status_printer(void *_bencher) {
+  ceph_pthread_setname("OB::stat_print");
   ObjBencher *bencher = static_cast<ObjBencher *>(_bencher);
   bench_data& data = bencher->data;
   Formatter *formatter = bencher->formatter;
@@ -453,7 +459,6 @@ int ObjBencher::write_bench(int secondsToRun,
   pthread_t print_thread;
 
   pthread_create(&print_thread, NULL, ObjBencher::status_printer, (void *)this);
-  ceph_pthread_setname(print_thread, "write_stat");
   std::unique_lock locker{lock};
   data.finished = 0;
   data.start_time = mono_clock::now();
@@ -691,7 +696,6 @@ int ObjBencher::seq_read_bench(
 
   pthread_t print_thread;
   pthread_create(&print_thread, NULL, status_printer, (void *)this);
-  ceph_pthread_setname(print_thread, "seq_read_stat");
 
   mono_time finish_time = data.start_time + time_to_run;
   //start initial reads
@@ -903,7 +907,6 @@ int ObjBencher::rand_read_bench(
 
   pthread_t print_thread;
   pthread_create(&print_thread, NULL, status_printer, (void *)this);
-  ceph_pthread_setname(print_thread, "rand_read_stat");
 
   mono_time finish_time = data.start_time + time_to_run;
   //start initial reads

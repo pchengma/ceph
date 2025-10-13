@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Allocator replay tool.
  * Author: Igor Fedotov, ifedotov@suse.com
@@ -16,6 +17,7 @@
 #include "include/denc.h"
 #include "global/global_init.h"
 #include "os/bluestore/Allocator.h"
+#include "os/bluestore/AllocatorBase.h"
 
 using namespace std;
 
@@ -184,7 +186,7 @@ int replay_and_check_for_duplicate(char* fname)
 	return -1;
       }
       tmp.clear();
-      auto allocated = alloc->allocate(want, alloc_unit, 0, 0, &tmp);
+      auto allocated = alloc->allocate(want, alloc_unit, 0, -1, &tmp);
       std::cout << "allocated TOTAL: " << allocated << std::endl;
       for (auto& ee : tmp) {
         std::cerr << "dump extent: " << std::hex
@@ -622,14 +624,25 @@ int main(int argc, char **argv)
         std::cout << "Free: 0x" << std::hex << a->get_free() << std::dec
                   << std::endl;
         {
+          auto t00 = ceph::mono_clock::now();
           PExtentVector extents;
           for(size_t i = 0; i < count; i++) {
             extents.clear();
-            auto r = a->allocate(want, alloc_unit, 0, &extents);
+	    auto t0 = ceph::mono_clock::now();
+            auto r = a->allocate(want, alloc_unit, -1, &extents);
+            std::cout << "Duration (ns): " << (ceph::mono_clock::now() - t0).count() << std::endl;
             if (r < 0) {
               std::cerr << "Error: allocation failure at step:" << i + 1
-                        << ", ret = " << r << std::endl;
-              return -1;
+                        << ", ret = " << r
+			<< " elapsed (ns): " << (ceph::mono_clock::now() - t00).count()
+                        << std::endl;
+	      return -1;
+            } else if ((size_t)r < want) {
+              std::cerr << "Error: allocation failure at step:" << i + 1
+                        << ", allocated " << r << " of " << want
+			<< " elapsed (ns): " << (ceph::mono_clock::now() - t00).count()
+                        << std::endl;
+	      return -1;
             }
             std::cout << ">allocated: " << r << std::endl;
 
@@ -639,9 +652,11 @@ int main(int argc, char **argv)
             }
             std::cout << std::dec << std::endl;
 	  }
+          std::cout << "Successfully allocated: " << count << " * " << want
+                    << ", unit:" << alloc_unit
+		    << " elapsed (ns): " << (ceph::mono_clock::now() - t00).count()
+		    << std::endl;
         }
-        std::cout << "Successfully allocated: " << count << " * " << want
-                  << ", unit:" << alloc_unit << std::endl;
         return 0;
       });
   } else if (strcmp(argv[2], "replay_alloc") == 0) {
@@ -681,7 +696,8 @@ int main(int argc, char **argv)
           for (auto i = 0; i < replay_count; ++i) {
             while (fgets(s, sizeof(s), f_alloc_list) != nullptr) {
               /* parse allocation request */
-              uint64_t want = 0, unit = 0, max = 0, hint = 0;
+              uint64_t want = 0, unit = 0, max = 0;
+              int64_t hint = -1;
 
               if (std::sscanf(s, "%ji %ji %ji %ji", &want, &unit, &max, &hint) < 2)
               {
@@ -760,20 +776,23 @@ int main(int argc, char **argv)
         std::cout << "Allocation unit:" << alloc_unit
                   << std::endl;
 
-        Allocator::FreeStateHistogram hist;
-        hist.resize(num_buckets);
-        a->build_free_state_histogram(alloc_unit, hist);
+        AllocatorBase::FreeStateHistogram hist(num_buckets);
+        a->foreach(
+          [&](size_t off, size_t len) {
+            hist.record_extent(uint64_t(alloc_unit), off, len);
+          });
 
         uint64_t s = 0;
-        for(int i = 0; i < num_buckets; i++) {
-          uint64_t e = hist[i].get_max(i, num_buckets);
-	  std::cout << "(" << s << ".." << e << "]"
-                    << " -> " << hist[i].total
-                    << " chunks, " << hist[i].aligned << " aligned with "
-                    << hist[i].alloc_units << " alloc_units."
-		    << std::endl;
-          s = e;
-        }
+        hist.foreach(
+          [&](uint64_t max_len, uint64_t total, uint64_t aligned, uint64_t units) {
+            uint64_t e = max_len;
+            std::cout << "(" << s << ".." << e << "]"
+              << " -> " << total
+              << " chunks, " << aligned << " aligned with "
+              << units << " alloc_units."
+              << std::endl;
+            s = e;
+          });
 	return 0;
     });
   } else if (strcmp(argv[2], "export_binary") == 0) {

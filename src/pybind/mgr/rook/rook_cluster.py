@@ -120,7 +120,7 @@ class DefaultFetcher():
 
     def convert_size(self, size_str: str) -> int:
         units = ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "", "K", "M", "G", "T", "P", "E")
-        coeff_and_unit = re.search('(\d+)(\D+)', size_str)
+        coeff_and_unit = re.search(r'(\d+)(\D+)', size_str)
         assert coeff_and_unit is not None
         coeff = int(coeff_and_unit[1])
         unit = coeff_and_unit[2]
@@ -749,9 +749,13 @@ class RookCluster(object):
             port = None
             secure_port = None
             if spec.ssl:
-                secure_port = spec.get_port()
+                _secure_port = spec.get_port()
+                if len(_secure_port) > 1:
+                    secure_port = _secure_port[1]
+                else:
+                    secure_port = _secure_port[0]
             else:
-                port = spec.get_port()
+                port = spec.get_port()[0]
             object_store = cos.CephObjectStore(
                     apiVersion=self.rook_env.api_name,
                     metadata=dict(

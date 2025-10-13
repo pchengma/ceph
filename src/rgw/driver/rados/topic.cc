@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -195,7 +195,7 @@ int link_bucket(const DoutPrefixProvider* dpp, optional_yield y,
   librados::ObjectWriteOperation op;
   op.omap_set({{bucket_key, bufferlist{}}});
 
-  return rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, &op, y);
+  return rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, std::move(op), y);
 }
 
 int unlink_bucket(const DoutPrefixProvider* dpp, optional_yield y,
@@ -214,7 +214,7 @@ int unlink_bucket(const DoutPrefixProvider* dpp, optional_yield y,
   librados::ObjectWriteOperation op;
   op.omap_rm_keys({{bucket_key}});
 
-  return rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, &op, y);
+  return rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, std::move(op), y);
 }
 
 int list_buckets(const DoutPrefixProvider* dpp, optional_yield y,
@@ -237,7 +237,7 @@ int list_buckets(const DoutPrefixProvider* dpp, optional_yield y,
   bool more = false;
   int rval = 0;
   op.omap_get_keys2(marker, max_items, &keys, &more, &rval);
-  r = rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, &op, nullptr, y);
+  r = rgw_rados_operate(dpp, ref.ioctx, ref.obj.oid, std::move(op), nullptr, y);
   if (r == -ENOENT) {
     return 0;
   }

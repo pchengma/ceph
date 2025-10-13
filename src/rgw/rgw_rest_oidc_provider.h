@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -61,4 +61,40 @@ class RGWListOIDCProviders : public RGWRestOIDCProvider {
   void execute(optional_yield y) override;
   const char* name() const override { return "list_oidc_providers"; }
   RGWOpType get_type() override { return RGW_OP_LIST_OIDC_PROVIDERS; }
+};
+
+class RGWAddClientIdToOIDCProvider : public RGWRestOIDCProvider {
+  std::string url;
+  std::string client_id;
+public:
+  RGWAddClientIdToOIDCProvider();
+
+  int init_processing(optional_yield y);
+  void execute(optional_yield y) override;
+  const char* name() const override { return "add_client_id_to_oidc_provider"; }
+  RGWOpType get_type() override { return RGW_OP_ADD_CLIENTID_TO_OIDC_PROVIDER; }
+};
+
+class RGWRemoveCientIdFromOIDCProvider : public RGWRestOIDCProvider {
+  std::string url;
+  std::string client_id;
+public:
+  RGWRemoveCientIdFromOIDCProvider();
+
+  int init_processing(optional_yield y);
+  void execute(optional_yield y) override;
+  const char* name() const override { return "remove_client_id_from_oidc_provider"; }
+  RGWOpType get_type() override { return RGW_OP_REMOVE_CLIENTID_FROM_OIDC_PROVIDER; }
+};
+
+class RGWUpdateOIDCProviderThumbprint : public RGWRestOIDCProvider {
+  std::string url;
+  std::vector<std::string> thumbprints;
+public:
+  RGWUpdateOIDCProviderThumbprint();
+
+  int init_processing(optional_yield y);
+  void execute(optional_yield y) override;
+  const char* name() const override { return "update_oidc_provider_thumbprint"; }
+  RGWOpType get_type() override { return RGW_OP_UPDATE_OIDC_PROVIDER_THUMBPRINT; }
 };

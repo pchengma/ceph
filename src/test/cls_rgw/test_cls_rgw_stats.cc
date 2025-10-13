@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <vector>
 #include <boost/circular_buffer.hpp>
@@ -10,6 +10,7 @@
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/random_string.h"
+#include "include/random.h" // for ceph::util::generate_random_number()
 #include "global/global_context.h"
 #include "test/librados/test_cxx.h"
 
@@ -87,10 +88,7 @@ int index_prepare(librados::IoCtx& ioctx, const std::string& oid,
 {
   librados::ObjectWriteOperation op;
   const std::string loc; // empty
-  constexpr bool log_op = false;
-  constexpr int flags = 0;
-  rgw_zone_set zones;
-  cls_rgw_bucket_prepare_op(op, type, tag, key, loc, log_op, flags, zones);
+  cls_rgw_bucket_prepare_op(op, type, tag, key, loc);
   return ioctx.operate(oid, &op);
 }
 
@@ -112,11 +110,16 @@ int index_complete(librados::IoCtx& ioctx, const std::string& oid,
 void read_stats(librados::IoCtx& ioctx, const std::string& oid,
                 rgw_bucket_dir_stats& stats)
 {
-  auto oids = std::map<int, std::string>{{0, oid}};
-  std::map<int, rgw_cls_list_ret> results;
-  ASSERT_EQ(0, CLSRGWIssueGetDirHeader(ioctx, oids, results, 8)());
-  ASSERT_EQ(1, results.size());
-  stats = std::move(results.begin()->second.dir.header.stats);
+  bufferlist bl;
+  librados::ObjectReadOperation op;
+  op.omap_get_header(&bl, nullptr);
+  ASSERT_EQ(0, ioctx.operate(oid, &op, nullptr));
+
+  rgw_bucket_dir_header header;
+  auto p = bl.cbegin();
+  decode(header, p);
+
+  stats = std::move(header.stats);
 }
 
 static void account_entry(rgw_bucket_dir_stats& stats,

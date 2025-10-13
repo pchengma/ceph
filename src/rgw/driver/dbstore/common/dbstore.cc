@@ -1,7 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "dbstore.h"
+#include "log/Log.h"
 
 using namespace std;
 
@@ -81,6 +82,13 @@ int DB::Destroy(const DoutPrefixProvider *dpp)
 
   closeDB(dpp);
 
+  {
+    const std::lock_guard lk(mtx);
+    for (auto& bucket_object : DB::objectmap) {
+      delete bucket_object.second;
+    }
+    objectmap.clear();
+  }
 
   ldpp_dout(dpp, 20)<<"DB successfully destroyed - name:" \
     <<db_name << dendl;
@@ -638,11 +646,12 @@ int DB::update_bucket(const DoutPrefixProvider *dpp, const std::string& query_st
   DBOpParams params = {};
   obj_version bucket_version;
   RGWBucketInfo orig_info;
+  map<std::string, bufferlist> attrs;
 
   /* Check if the bucket already exists and return the old info, caller will have a use for it */
   orig_info.bucket.name = info.bucket.name;
   params.op.bucket.info.bucket.name = info.bucket.name;
-  ret = get_bucket_info(dpp, string("name"), "", orig_info, nullptr, nullptr,
+  ret = get_bucket_info(dpp, string("name"), "", orig_info, &attrs, nullptr,
       &bucket_version);
 
   if (ret) {
@@ -668,9 +677,14 @@ int DB::update_bucket(const DoutPrefixProvider *dpp, const std::string& query_st
     pobjv = &info.objv_tracker;
   }
 
+  if (!pattrs) {
+    pattrs = &attrs;
+  }
+
   InitializeParams(dpp, &params);
 
   params.op.bucket.info.bucket.name = info.bucket.name;
+  params.op.bucket.bucket_attrs = *pattrs;
 
   if (powner) {
     params.op.bucket.owner = to_string(*powner);
@@ -689,7 +703,6 @@ int DB::update_bucket(const DoutPrefixProvider *dpp, const std::string& query_st
 
   if (query_str == "attrs") {
     params.op.query_str = "attrs";
-    params.op.bucket.bucket_attrs = *pattrs;
   } else if (query_str == "owner") {
     /* Update only owner i.e, chown. 
      * Update creation_time too */
@@ -1368,14 +1381,22 @@ int DB::Object::Read::prepare(const DoutPrefixProvider *dpp)
 
     if (conds.if_match) {
       string if_match_str = rgw_string_unquote(conds.if_match);
-      ldpp_dout(dpp, 10) << "ETag: " << string(etag.c_str(), etag.length()) << " " << " If-Match: " << if_match_str << dendl;
-      if (if_match_str.compare(0, etag.length(), etag.c_str(), etag.length()) != 0) {
-        return -ERR_PRECONDITION_FAILED;
+      if (if_match_str.compare("*") != 0) {
+        ldpp_dout(dpp, 10) << "ETag: " << string(etag.c_str(), etag.length()) << " " << " If-Match: " << if_match_str << dendl;
+        if (if_match_str.compare(0, etag.length(), etag.c_str(), etag.length()) != 0) {
+          return -ERR_PRECONDITION_FAILED;
+        }
+      } else {
+        ldpp_dout(dpp, 10) << "If-Match: " << if_match_str << dendl;
       }
     }
 
     if (conds.if_nomatch) {
       string if_nomatch_str = rgw_string_unquote(conds.if_nomatch);
+      if (if_nomatch_str.compare("*") == 0) {
+        ldpp_dout(dpp, 10) << "If-NoMatch: " << if_nomatch_str << dendl;
+        return -ERR_NOT_MODIFIED;
+      }
       ldpp_dout(dpp, 10) << "ETag: " << string(etag.c_str(), etag.length()) << " " << " If-NoMatch: " << if_nomatch_str << dendl;
       if (if_nomatch_str.compare(0, etag.length(), etag.c_str(), etag.length()) == 0) {
         return -ERR_NOT_MODIFIED;
@@ -1973,7 +1994,7 @@ int DB::Object::Delete::create_dm(const DoutPrefixProvider *dpp,
 }
 
 int DB::get_entry(const std::string& oid, const std::string& marker,
-			      std::unique_ptr<rgw::sal::Lifecycle::LCEntry>* entry)
+                  rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -1982,7 +2003,7 @@ int DB::get_entry(const std::string& oid, const std::string& marker,
   InitializeParams(dpp, &params);
 
   params.op.lc_entry.index = oid;
-  params.op.lc_entry.entry.set_bucket(marker);
+  params.op.lc_entry.entry.bucket = marker;
 
   params.op.query_str = "get_entry";
   ret = ProcessOp(dpp, "GetLCEntry", &params);
@@ -1992,14 +2013,8 @@ int DB::get_entry(const std::string& oid, const std::string& marker,
     goto out;
   }
 
-  if (!params.op.lc_entry.entry.get_start_time() == 0) { //ensure entry found
-    rgw::sal::Lifecycle::LCEntry* e;
-    e = new rgw::sal::StoreLifecycle::StoreLCEntry(params.op.lc_entry.entry);
-    if (!e) {
-      ret = -ENOMEM;
-      goto out;
-    }
-    entry->reset(e);
+  if (params.op.lc_entry.entry.start_time != 0) { //ensure entry found
+    entry = std::move(params.op.lc_entry.entry);
   }
 
 out:
@@ -2007,7 +2022,7 @@ out:
 }
 
 int DB::get_next_entry(const std::string& oid, const std::string& marker,
-			      std::unique_ptr<rgw::sal::Lifecycle::LCEntry>* entry)
+                       rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2016,7 +2031,7 @@ int DB::get_next_entry(const std::string& oid, const std::string& marker,
   InitializeParams(dpp, &params);
 
   params.op.lc_entry.index = oid;
-  params.op.lc_entry.entry.set_bucket(marker);
+  params.op.lc_entry.entry.bucket = marker;
 
   params.op.query_str = "get_next_entry";
   ret = ProcessOp(dpp, "GetLCEntry", &params);
@@ -2026,21 +2041,15 @@ int DB::get_next_entry(const std::string& oid, const std::string& marker,
     goto out;
   }
 
-  if (!params.op.lc_entry.entry.get_start_time() == 0) { //ensure entry found
-    rgw::sal::Lifecycle::LCEntry* e;
-    e = new rgw::sal::StoreLifecycle::StoreLCEntry(params.op.lc_entry.entry);
-    if (!e) {
-      ret = -ENOMEM;
-      goto out;
-    }
-    entry->reset(e);
+  if (params.op.lc_entry.entry.start_time != 0) { //ensure entry found
+    entry = std::move(params.op.lc_entry.entry);
   }
 
 out:
   return ret;
 }
 
-int DB::set_entry(const std::string& oid, rgw::sal::Lifecycle::LCEntry& entry)
+int DB::set_entry(const std::string& oid, const rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2063,7 +2072,7 @@ out:
 }
 
 int DB::list_entries(const std::string& oid, const std::string& marker,
-  				 uint32_t max_entries, std::vector<std::unique_ptr<rgw::sal::Lifecycle::LCEntry>>& entries)
+                     uint32_t max_entries, std::vector<rgw::sal::LCEntry>& entries)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2085,14 +2094,14 @@ int DB::list_entries(const std::string& oid, const std::string& marker,
   }
 
   for (auto& entry : params.op.lc_entry.list_entries) {
-    entries.push_back(std::make_unique<rgw::sal::StoreLifecycle::StoreLCEntry>(std::move(entry)));
+    entries.push_back(std::move(entry));
   }
 
 out:
   return ret;
 }
 
-int DB::rm_entry(const std::string& oid, rgw::sal::Lifecycle::LCEntry& entry)
+int DB::rm_entry(const std::string& oid, const rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2114,7 +2123,7 @@ out:
   return ret;
 }
 
-int DB::get_head(const std::string& oid, std::unique_ptr<rgw::sal::Lifecycle::LCHead>* head)
+int DB::get_head(const std::string& oid, rgw::sal::LCHead& head)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2131,13 +2140,13 @@ int DB::get_head(const std::string& oid, std::unique_ptr<rgw::sal::Lifecycle::LC
     goto out;
   }
 
-  *head = std::make_unique<rgw::sal::StoreLifecycle::StoreLCHead>(params.op.lc_head.head);
+  head = std::move(params.op.lc_head.head);
 
 out:
   return ret;
 }
 
-int DB::put_head(const std::string& oid, rgw::sal::Lifecycle::LCHead& head)
+int DB::put_head(const std::string& oid, const rgw::sal::LCHead& head)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();

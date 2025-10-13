@@ -1,11 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/types.h"
 #include "ClassHandler.h"
 #include "common/errno.h"
 #include "common/ceph_context.h"
 #include "include/dlfcn_compat.h"
+
+#include <sys/types.h>
+#include <dirent.h>
 
 #include <map>
 
@@ -336,7 +339,7 @@ int ClassHandler::ClassMethod::exec(cls_method_context_t ctx, bufferlist& indata
 
 ClassHandler& ClassHandler::get_instance()
 {
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
   // the context is being used solely for:
   //   1. random number generation (cls_gen_random_bytes)
   //   2. accessing the configuration
@@ -345,6 +348,6 @@ ClassHandler& ClassHandler::get_instance()
   static ClassHandler single(&cct);
 #else
   static ClassHandler single(g_ceph_context);
-#endif // WITH_SEASTAR
+#endif // WITH_CRIMSON
   return single;
 }

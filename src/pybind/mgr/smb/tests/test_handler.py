@@ -1,6 +1,19 @@
 import pytest
 
 import smb
+from smb.handler import _FakeEarmarkResolver
+
+
+def _cluster(**kwargs):
+    if 'clustering' not in kwargs:
+        kwargs['clustering'] = smb.enums.SMBClustering.NEVER
+    return smb.resources.Cluster(**kwargs)
+
+
+def _cephfs(**kwargs):
+    if 'provider' not in kwargs:
+        kwargs['provider'] = smb.enums.CephFSStorageProvider.SAMBA_VFS_NEW
+    return smb.resources.CephFSStorage(**kwargs)
 
 
 @pytest.fixture
@@ -26,7 +39,7 @@ def test_shares_empty(thandler):
 
 
 def test_internal_apply_cluster(thandler):
-    cluster = smb.resources.Cluster(
+    cluster = _cluster(
         cluster_id='foo',
         auth_mode=smb.enums.AuthMode.USER,
         user_group_settings=[
@@ -41,7 +54,7 @@ def test_internal_apply_cluster(thandler):
 
 
 def test_cluster_add(thandler):
-    cluster = smb.resources.Cluster(
+    cluster = _cluster(
         cluster_id='foo',
         auth_mode=smb.enums.AuthMode.USER,
         user_group_settings=[
@@ -59,7 +72,7 @@ def test_cluster_add(thandler):
 
 
 def test_internal_apply_cluster_and_share(thandler):
-    cluster = smb.resources.Cluster(
+    cluster = _cluster(
         cluster_id='foo',
         auth_mode=smb.enums.AuthMode.USER,
         user_group_settings=[
@@ -72,7 +85,9 @@ def test_internal_apply_cluster_and_share(thandler):
         cluster_id='foo',
         share_id='s1',
         name='Ess One',
-        cephfs=smb.resources.CephFSStorage(
+        comment='This is a test share',
+        max_connections=5,
+        cephfs=_cephfs(
             volume='cephfs',
             path='/',
         ),
@@ -86,6 +101,10 @@ def test_internal_apply_cluster_and_share(thandler):
     assert len(shares) == 1
     assert ('foo', 's1') in shares
 
+    share_dict = thandler.internal_store.data[('shares', 'foo.s1')]
+    assert share_dict['comment'] == 'This is a test share'
+    assert share_dict['max_connections'] == 5
+
 
 def test_internal_apply_remove_cluster(thandler):
     thandler.internal_store.overwrite(
@@ -95,6 +114,7 @@ def test_internal_apply_remove_cluster(thandler):
                 'cluster_id': 'foo',
                 'auth_mode': 'user',
                 'intent': 'present',
+                'clustering': 'never',
                 'user_group_settings': [
                     {
                         'source_type': 'empty',
@@ -126,6 +146,7 @@ def test_internal_apply_remove_shares(thandler):
                 'cluster_id': 'foo',
                 'auth_mode': 'user',
                 'intent': 'present',
+                'clustering': 'never',
                 'user_group_settings': [
                     {
                         'source_type': 'empty',
@@ -206,6 +227,7 @@ def test_internal_apply_add_joinauth(thandler):
                 'cluster_id': 'foo',
                 'auth_mode': 'user',
                 'intent': 'present',
+                'clustering': 'never',
                 'user_group_settings': [
                     {
                         'source_type': 'empty',
@@ -237,6 +259,7 @@ def test_internal_apply_add_usergroups(thandler):
                 'cluster_id': 'foo',
                 'auth_mode': 'user',
                 'intent': 'present',
+                'clustering': 'never',
                 'user_group_settings': [
                     {
                         'source_type': 'empty',
@@ -535,7 +558,7 @@ def test_error_result():
         cluster_id='foo',
         share_id='s1',
         name='Ess One',
-        cephfs=smb.resources.CephFSStorage(
+        cephfs=_cephfs(
             volume='cephfs',
             path='/',
         ),
@@ -551,7 +574,7 @@ def test_error_result():
 
 def test_apply_type_error(thandler):
     # a resource component, not valid on its own
-    r = smb.resources.CephFSStorage(
+    r = _cephfs(
         volume='cephfs',
         path='/',
     )
@@ -565,7 +588,7 @@ def test_apply_no_matching_cluster_error(thandler):
         cluster_id='woops',
         share_id='s1',
         name='Ess One',
-        cephfs=smb.resources.CephFSStorage(
+        cephfs=_cephfs(
             volume='cephfs',
             path='/',
         ),
@@ -583,7 +606,7 @@ def test_apply_full_cluster_create(thandler):
                 password='Passw0rd',
             ),
         ),
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster1',
             auth_mode=smb.enums.AuthMode.ACTIVE_DIRECTORY,
             domain_settings=smb.resources.DomainSettings(
@@ -601,7 +624,7 @@ def test_apply_full_cluster_create(thandler):
             cluster_id='mycluster1',
             share_id='homedirs',
             name='Home Directries',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='cephfs',
                 subvolume='homedirs',
                 path='/',
@@ -610,7 +633,7 @@ def test_apply_full_cluster_create(thandler):
         smb.resources.Share(
             cluster_id='mycluster1',
             share_id='archive',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='cephfs',
                 path='/archive',
             ),
@@ -708,7 +731,7 @@ def test_apply_update_password(thandler):
 def test_apply_add_second_cluster(thandler):
     test_apply_full_cluster_create(thandler)
     to_apply = [
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='coolcluster',
             auth_mode=smb.enums.AuthMode.ACTIVE_DIRECTORY,
             domain_settings=smb.resources.DomainSettings(
@@ -732,7 +755,7 @@ def test_apply_add_second_cluster(thandler):
         smb.resources.Share(
             cluster_id='coolcluster',
             share_id='images',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='imgvol',
                 path='/',
             ),
@@ -790,7 +813,7 @@ def test_modify_cluster_only_touches_changed_cluster(thandler):
         smb.resources.Share(
             cluster_id='coolcluster',
             share_id='photos',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='imgvol',
                 path='/photos',
             ),
@@ -870,6 +893,7 @@ def test_apply_remove_all_clusters(thandler):
             self.deployed.remove(service_name)
 
     thandler._orch = FakeOrch()
+    thandler._earmark_resolver = _FakeEarmarkResolver()
     test_apply_full_cluster_create(thandler)
 
     to_apply = [
@@ -880,7 +904,7 @@ def test_apply_remove_all_clusters(thandler):
                 groups=[],
             ),
         ),
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster2',
             auth_mode=smb.enums.AuthMode.USER,
             user_group_settings=[
@@ -890,7 +914,7 @@ def test_apply_remove_all_clusters(thandler):
                 ),
             ],
         ),
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster3',
             auth_mode=smb.enums.AuthMode.USER,
             user_group_settings=[
@@ -903,7 +927,7 @@ def test_apply_remove_all_clusters(thandler):
         smb.resources.Share(
             cluster_id='mycluster2',
             share_id='m2',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='imgvol',
                 path='/',
             ),
@@ -911,7 +935,7 @@ def test_apply_remove_all_clusters(thandler):
         smb.resources.Share(
             cluster_id='mycluster3',
             share_id='m3',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='imgvol',
                 path='/',
             ),
@@ -1166,7 +1190,7 @@ def test_apply_cluster_linked_auth(thandler):
             ),
             linked_to_cluster='mycluster1',
         ),
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster1',
             auth_mode=smb.enums.AuthMode.ACTIVE_DIRECTORY,
             domain_settings=smb.resources.DomainSettings(
@@ -1184,7 +1208,7 @@ def test_apply_cluster_linked_auth(thandler):
             cluster_id='mycluster1',
             share_id='homedirs',
             name='Home Directries',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='cephfs',
                 subvolume='homedirs',
                 path='/',
@@ -1228,7 +1252,7 @@ def test_apply_cluster_bad_linked_auth(thandler):
             ),
             linked_to_cluster='mycluster2',
         ),
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster1',
             auth_mode=smb.enums.AuthMode.ACTIVE_DIRECTORY,
             domain_settings=smb.resources.DomainSettings(
@@ -1261,7 +1285,7 @@ def test_apply_cluster_bad_linked_ug(thandler):
             ),
             linked_to_cluster='mycluster2',
         ),
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster1',
             auth_mode=smb.enums.AuthMode.USER,
             user_group_settings=[
@@ -1287,7 +1311,7 @@ def test_apply_with_create_only(thandler):
     test_apply_full_cluster_create(thandler)
 
     to_apply = [
-        smb.resources.Cluster(
+        _cluster(
             cluster_id='mycluster1',
             auth_mode=smb.enums.AuthMode.ACTIVE_DIRECTORY,
             domain_settings=smb.resources.DomainSettings(
@@ -1305,7 +1329,7 @@ def test_apply_with_create_only(thandler):
             cluster_id='mycluster1',
             share_id='homedirs',
             name='Altered Home Directries',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='cephfs',
                 subvolume='homedirs',
                 path='/',
@@ -1315,7 +1339,7 @@ def test_apply_with_create_only(thandler):
             cluster_id='mycluster1',
             share_id='foodirs',
             name='Foo Directries',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='cephfs',
                 subvolume='homedirs',
                 path='/foo',
@@ -1354,7 +1378,7 @@ def test_apply_with_create_only(thandler):
             cluster_id='mycluster1',
             share_id='foodirs',
             name='Foo Directries',
-            cephfs=smb.resources.CephFSStorage(
+            cephfs=_cephfs(
                 volume='cephfs',
                 subvolume='homedirs',
                 path='/foo',
@@ -1533,3 +1557,216 @@ def test_remove_in_use_ug(thandler):
     rs = results.to_simplified()
     assert not results.success
     assert 'resource in use' in rs['results'][0]['msg']
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        # no conflict
+        {
+            'to_apply': [
+                smb.resources.Share(
+                    cluster_id='c1',
+                    share_id='zeta',
+                    name='Zeta Zoom',
+                    cephfs=_cephfs(
+                        volume='cephfs',
+                        path='/zeta',
+                    ),
+                ),
+            ],
+        },
+        # no conflict, name used only in c1 not c2
+        {
+            'to_apply': [
+                smb.resources.Share(
+                    cluster_id='c2',
+                    share_id='max',
+                    name='Beta Max',
+                    cephfs=_cephfs(
+                        volume='cephfs',
+                        path='/max',
+                    ),
+                ),
+            ],
+        },
+        # conflict with share in store
+        {
+            'to_apply': [
+                smb.resources.Share(
+                    cluster_id='c1',
+                    share_id='zalpha',
+                    name='Alphabet Soup',
+                    cephfs=_cephfs(
+                        volume='cephfs',
+                        path='/zalpha',
+                    ),
+                ),
+            ],
+            'error_msg': 'share name already in use',
+            'conflicts': {'alpha'},
+        },
+        # conflict with new share
+        {
+            'to_apply': [
+                smb.resources.Share(
+                    cluster_id='c1',
+                    share_id='epsilon',
+                    name='Epsilon Eggs',
+                    cephfs=_cephfs(
+                        volume='cephfs',
+                        path='/eggs',
+                    ),
+                ),
+                smb.resources.Share(
+                    cluster_id='c1',
+                    share_id='eggs',
+                    name='Epsilon Eggs',
+                    cephfs=_cephfs(
+                        volume='cephfs',
+                        path='/eggs',
+                    ),
+                ),
+            ],
+            'error_msg': 'share name already in use',
+            'conflicts': {'eggs'},
+        },
+        # remove share, resue old name
+        {
+            'to_apply': [
+                smb.resources.RemovedShare(
+                    cluster_id='c1',
+                    share_id='beta',
+                ),
+                smb.resources.Share(
+                    cluster_id='c1',
+                    share_id='macks',
+                    name='Beta Max',
+                    cephfs=_cephfs(
+                        volume='cephfs',
+                        path='/macks',
+                    ),
+                ),
+            ],
+        },
+    ],
+)
+def test_share_name_in_use(thandler, params):
+    thandler.internal_store.overwrite(
+        {
+            'clusters.c1': {
+                'resource_type': 'ceph.smb.cluster',
+                'cluster_id': 'c1',
+                'auth_mode': 'user',
+                'intent': 'present',
+                'clustering': 'never',
+                'user_group_settings': [
+                    {
+                        'source_type': 'resource',
+                        'ref': 'foo1',
+                    }
+                ],
+            },
+            'clusters.c2': {
+                'resource_type': 'ceph.smb.cluster',
+                'cluster_id': 'c2',
+                'auth_mode': 'user',
+                'intent': 'present',
+                'clustering': 'never',
+                'user_group_settings': [
+                    {
+                        'source_type': 'resource',
+                        'ref': 'foo1',
+                    }
+                ],
+            },
+            'users_and_groups.foo1': {
+                'resource_type': 'ceph.smb.usersgroups',
+                'users_groups_id': 'foo1',
+                'intent': 'present',
+                'values': {
+                    'users': [{"username": "foo"}],
+                    'groups': [],
+                },
+            },
+            'shares.c1.alpha': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'c1',
+                'share_id': 'alpha',
+                'intent': 'present',
+                'name': 'Alphabet Soup',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/alpha',
+                    'provider': 'samba-vfs',
+                },
+            },
+            'shares.c1.beta': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'c1',
+                'share_id': 'beta',
+                'intent': 'present',
+                'name': 'Beta Max',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/beta',
+                    'provider': 'samba-vfs',
+                },
+            },
+            'shares.c1.gamma': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'c1',
+                'share_id': 'gamma',
+                'intent': 'present',
+                'name': 'Gamma Raise',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/gamma',
+                    'provider': 'samba-vfs',
+                },
+            },
+            'shares.c2.soup': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'c2',
+                'share_id': 'soup',
+                'intent': 'present',
+                'name': 'Alphabet Soup',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/soup',
+                    'provider': 'samba-vfs',
+                },
+            },
+            'shares.c2.salad': {
+                'resource_type': 'ceph.smb.share',
+                'cluster_id': 'c2',
+                'share_id': 'salad',
+                'intent': 'present',
+                'name': 'Word Salad',
+                'readonly': False,
+                'browseable': True,
+                'cephfs': {
+                    'volume': 'cephfs',
+                    'path': '/salad',
+                    'provider': 'samba-vfs',
+                },
+            },
+        }
+    )
+
+    results = thandler.apply(params['to_apply'])
+    rs = results.to_simplified()
+    if not params.get('error_msg'):
+        assert results.success
+        return
+    assert not results.success
+    assert params['error_msg'] in rs['results'][0]['msg']
+    assert rs['results'][0]['conflicting_share_id'] in params['conflicts']

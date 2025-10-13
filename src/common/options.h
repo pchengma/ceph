@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include <chrono>
+#include <iostream> // for std::cerr
 #include <string>
 #include <variant>
 #include <vector>
@@ -207,8 +208,8 @@ struct Option {
   typedef std::function<int(std::string *, std::string *)> validator_fn_t;
   validator_fn_t validator;
 
-  Option(std::string const &name, type_t t, level_t l)
-    : name(name), type(t), level(l)
+  Option(std::string &&name, type_t t, level_t l)
+    : name(std::move(name)), type(t), level(l)
   {
     // While value_t is nullable (via std::monostate), we don't ever
     // want it set that way in an Option instance: within an instance,
@@ -411,25 +412,25 @@ struct Option {
   }
 };
 
-constexpr unsigned long long operator"" _min (unsigned long long min) {
+constexpr unsigned long long operator""_min (unsigned long long min) {
   return min * 60;
 }
-constexpr unsigned long long operator"" _hr (unsigned long long hr) {
+constexpr unsigned long long operator""_hr (unsigned long long hr) {
   return hr * 60 * 60;
 }
-constexpr unsigned long long operator"" _day (unsigned long long day) {
+constexpr unsigned long long operator""_day (unsigned long long day) {
   return day * 24 * 60 * 60;
 }
-constexpr unsigned long long operator"" _K (unsigned long long n) {
+constexpr unsigned long long operator""_K (unsigned long long n) {
   return n << 10;
 }
-constexpr unsigned long long operator"" _M (unsigned long long n) {
+constexpr unsigned long long operator""_M (unsigned long long n) {
   return n << 20;
 }
-constexpr unsigned long long operator"" _G (unsigned long long n) {
+constexpr unsigned long long operator""_G (unsigned long long n) {
   return n << 30;
 }
-constexpr unsigned long long operator"" _T (unsigned long long n) {
+constexpr unsigned long long operator""_T (unsigned long long n) {
   return n << 40;
 }
 

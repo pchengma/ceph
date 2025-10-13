@@ -5,6 +5,11 @@ from types cimport timespec
 
 
 cdef:
+    int32_t ceph_to_hostos_errno(int32_t e):
+        pass
+
+
+cdef:
     cdef struct statx "ceph_statx":
         uint32_t    stx_mask
         uint32_t    stx_blksize
@@ -94,6 +99,9 @@ cdef nogil:
     int ceph_setattrx(ceph_mount_info *cmount, const char *relpath, statx *stx, int mask, int flags):
         pass
     int ceph_fsetattrx(ceph_mount_info *cmount, int fd, statx *stx, int mask):
+        pass
+    ctypedef void (*libcephfs_c_completion_t)(int rc, const void* out, size_t outlen, const void* outs, size_t outslen, void* ud) nogil
+    int ceph_mds_command2(ceph_mount_info* cmount, const char* mds_spec, const char** cmd, size_t cmdlen, const char* inbuf, size_t inbuflen, int one_shot, libcephfs_c_completion_t c, void* ud):
         pass
     int ceph_mds_command(ceph_mount_info *cmount, const char *mds_spec, const char **cmd, size_t cmdlen,
                          const char *inbuf, size_t inbuflen, char **outbuf, size_t *outbuflen,

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -11,13 +12,17 @@
  * Foundation.  See file COPYING.
  *
  */
+#include "common/ceph_argparse.h"
+
 #include <stdarg.h>
 
 #include "auth/Auth.h"
-#include "common/ceph_argparse.h"
 #include "common/config.h"
+#include "common/strtol.h" // for strict_strtof()
 #include "common/version.h"
 #include "include/str_list.h"
+
+#include <sstream>
 
 /*
  * Ceph argument parsing library

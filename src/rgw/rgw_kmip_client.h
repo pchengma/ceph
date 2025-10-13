@@ -1,8 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
+class DoutPrefixProvider;
 class RGWKMIPManager;
 
 class RGWKMIPTransceiver {
@@ -35,7 +36,7 @@ public:
   ceph::mutex lock = ceph::make_mutex("rgw_kmip_req::lock");
   ceph::condition_variable cond;
 
-  int wait(optional_yield y);
+  int wait(const DoutPrefixProvider* dpp, optional_yield y);
   RGWKMIPTransceiver(CephContext * const cct,
     kmip_operation operation)
   : cct(cct),
@@ -46,7 +47,7 @@ public:
   ~RGWKMIPTransceiver();
 
   int send();
-  int process(optional_yield y);
+  int process(const DoutPrefixProvider* dpp, optional_yield y);
 };
 
 class RGWKMIPManager {

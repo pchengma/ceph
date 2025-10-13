@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Tests for Ceph delegation handling
  *
@@ -60,7 +61,7 @@ static int dying_client(int argc, char **argv)
 
   ceph_set_session_timeout(cmount, CEPHFS_RECLAIM_TIMEOUT);
 
-  if (ceph_start_reclaim(cmount, argv[1], CEPH_RECLAIM_RESET) != -CEPHFS_ENOENT)
+  if (ceph_start_reclaim(cmount, argv[1], CEPH_RECLAIM_RESET) != -ENOENT)
     return 1;
 
   ceph_set_uuid(cmount, argv[1]);

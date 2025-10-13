@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/types.h"
 
@@ -9,6 +9,8 @@
 #include "cls/queue/cls_queue_ops.h"
 #include "cls/queue/cls_queue_src.h"
 #include "objclass/objclass.h"
+
+#include <numeric> // for std::accumulate()
 
 CLS_VER(1,0)
 CLS_NAME(2pc_queue)
@@ -616,10 +618,10 @@ static int cls_2pc_queue_remove_entries(cls_method_context_t hctx, bufferlist *i
     list_op.end_marker = rem_2pc_op.end_marker;
     ret = cls_2pc_queue_count_entries(hctx, list_op, head, rem_2pc_op.entries_to_remove);
     if (ret < 0) {
-      CLS_LOG(1, "ERROR: cls_2pc_queue_count_entries: returned: %d", ret);
+      CLS_LOG(1, "ERROR: cls_2pc_queue_remove_entries: returned: %d", ret);
       return ret;
     }
-    CLS_LOG(10, "INFO: cls_2pc_queue_count_entries: counted: %u", rem_2pc_op.entries_to_remove);
+    CLS_LOG(10, "INFO: cls_2pc_queue_remove_entries: counted: %u", rem_2pc_op.entries_to_remove);
   }
 
   cls_queue_remove_op rem_op;

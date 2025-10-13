@@ -85,3 +85,5 @@ Table of contents
    Developer notes <erasure_coding/developer_notes>
    Jerasure plugin <erasure_coding/jerasure>
    High level design document <erasure_coding/ecbackend>
+   Erasure coding enhancements design document <erasure_coding/enhancements>
+   Direct reads design document <erasure_coding/direct_reads>

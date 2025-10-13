@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/types.h"
 #include "messages/MClientCapRelease.h"
@@ -56,7 +56,7 @@ void MetaSession::enqueue_cap_release(inodeno_t ino, uint64_t cap_id, ceph_seq_t
   ceph_mds_cap_item i;
   i.ino = ino;
   i.cap_id = cap_id;
-  i.seq = iseq;
+  i.issue_seq = iseq;
   i.migrate_seq = mseq;
   release->caps.push_back(i);
 }

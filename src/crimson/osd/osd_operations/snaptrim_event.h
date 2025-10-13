@@ -1,15 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include <iostream>
 #include <seastar/core/future.hh>
 
+#include "crimson/osd/object_context_loader.h"
 #include "crimson/osd/osdmap_gate.h"
 #include "crimson/osd/osd_operation.h"
 #include "crimson/common/subop_blocker.h"
-#include "crimson/osd/osd_operations/common/pg_pipeline.h"
 #include "crimson/osd/pg.h"
 #include "crimson/osd/pg_activation_blocker.h"
 #include "osd/osd_types.h"
@@ -134,7 +134,7 @@ private:
   remove_or_update_iertr::future<ceph::os::Transaction>
   remove_or_update(ObjectContextRef obc, ObjectContextRef head_obc);
 
-  void add_log_entry(
+  pg_log_entry_t& add_log_entry(
     int _op,
     const hobject_t& _soid,
     const eversion_t& pv,
@@ -151,10 +151,11 @@ private:
       rid,
       mt,
       return_code);
-    osd_op_p.at_version.version++;
+    return log_entries.back();
   }
 
   Ref<PG> pg;
+  std::optional<ObjectContextLoader::Orderer> obc_orderer;
   PipelineHandle handle;
   osd_op_params_t osd_op_p;
   const hobject_t coid;
@@ -166,9 +167,8 @@ public:
 
   std::tuple<
     StartEvent,
-    CommonPGPipeline::GetOBC::BlockingEvent,
-    CommonPGPipeline::Process::BlockingEvent,
-    CommonPGPipeline::WaitRepop::BlockingEvent,
+    CommonOBCPipeline::Process::BlockingEvent,
+    CommonOBCPipeline::WaitRepop::BlockingEvent,
     CompletionEvent
   > tracking_events;
 };

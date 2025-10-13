@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { Component, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import { Observable, Subscription } from 'rxjs';
 import { MultiClusterService } from '~/app/shared/api/multi-cluster.service';
@@ -8,7 +8,6 @@ import { MultiClusterFormComponent } from './multi-cluster-form/multi-cluster-fo
 import { PrometheusService } from '~/app/shared/api/prometheus.service';
 import { CdTableColumn } from '~/app/shared/models/cd-table-column';
 import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
-import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
 import { Router } from '@angular/router';
 
 import {
@@ -17,6 +16,8 @@ import {
   MultiClusterPromqlsForPoolUtilization as PoolUltilizationQueries
 } from '~/app/shared/enum/dashboard-promqls.enum';
 import { SettingsService } from '~/app/shared/api/settings.service';
+import { NotificationType } from '~/app/shared/enum/notification-type.enum';
+import { NotificationService } from '~/app/shared/services/notification.service';
 
 @Component({
   selector: 'cd-multi-cluster',
@@ -26,6 +27,8 @@ import { SettingsService } from '~/app/shared/api/settings.service';
 export class MultiClusterComponent implements OnInit, OnDestroy {
   COUNT_OF_UTILIZATION_CHARTS = 5;
 
+  @ViewChild('clusterUsageTpl', { static: true })
+  clusterUsageTpl: TemplateRef<any>;
   @ViewChild('nameTpl', { static: true })
   nameTpl: any;
 
@@ -51,7 +54,8 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
     POOLS: 0,
     OSDS: 0,
     CLUSTER_ALERTS: 0,
-    version: ''
+    version: '',
+    FEDERATE_UP_METRIC: 0
   };
   alerts: any;
 
@@ -89,6 +93,9 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
   selectedTime: any;
   multiClusterQueries: any = {};
   managedByConfig$: Observable<any>;
+  clusterDetailsArray: any[];
+  prometheusConnectionErrors: any[] = [];
+  reconnectionError: string;
 
   constructor(
     private multiClusterService: MultiClusterService,
@@ -96,7 +103,7 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
     private modalService: ModalService,
     private router: Router,
     private prometheusService: PrometheusService,
-    private dimlessBinaryPipe: DimlessBinaryPipe
+    private notificationService: NotificationService
   ) {
     this.multiClusterQueries = {
       cluster: {
@@ -151,21 +158,9 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
       { prop: 'alert', name: $localize`Alerts`, flexGrow: 1 },
       { prop: 'version', name: $localize`Version`, flexGrow: 2 },
       {
-        prop: 'total_capacity',
-        name: $localize`Total Capacity`,
-        pipe: this.dimlessBinaryPipe,
-        flexGrow: 1
-      },
-      {
-        prop: 'used_capacity',
-        name: $localize`Used Capacity`,
-        pipe: this.dimlessBinaryPipe,
-        flexGrow: 1
-      },
-      {
-        prop: 'available_capacity',
-        name: $localize`Available Capacity`,
-        pipe: this.dimlessBinaryPipe,
+        prop: 'usage',
+        name: $localize`Usage`,
+        cellTemplate: this.clusterUsageTpl,
         flexGrow: 1
       },
       { prop: 'pools', name: $localize`Pools`, flexGrow: 1 },
@@ -176,6 +171,7 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
     this.subs.add(
       this.multiClusterService.subscribe((resp: any) => {
         this.isMultiCluster = Object.keys(resp['config']).length > 1;
+        this.clusterDetailsArray = Object.values(resp['config']).flat();
         const hubUrl = resp['hub_url'];
         for (const key in resp['config']) {
           if (resp['config'].hasOwnProperty(key)) {
@@ -255,7 +251,8 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
       'POOL_IOPS_UTILIZATION',
       'POOL_THROUGHPUT_UTILIZATION',
       'HOSTS',
-      'CLUSTER_ALERTS'
+      'CLUSTER_ALERTS',
+      'FEDERATE_UP_METRIC'
     ];
 
     let validSelectedQueries = allMultiClusterQueries;
@@ -333,7 +330,7 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
     }
 
     const clusters: ClusterInfo[] = [];
-    this.queriesResults.TOTAL_CAPACITY?.forEach((totalCapacityMetric: any) => {
+    this.queriesResults.TOTAL_CAPACITY?.forEach((totalCapacityMetric: any, index: number) => {
       const clusterName = totalCapacityMetric.metric.cluster;
       const totalCapacity = parseInt(totalCapacityMetric.value[1]);
       const getMgrMetadata = this.findCluster(this.queriesResults?.MGR_METADATA, clusterName);
@@ -346,6 +343,11 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
       const osds = this.findClusterData(this.queriesResults?.OSDS, clusterName);
       const status = this.findClusterData(this.queriesResults?.HEALTH_STATUS, clusterName);
       const available_capacity = totalCapacity - usedCapacity;
+      const federateJobName = `federate_${index + 1}`;
+      const federateMetrics = this.queriesResults?.FEDERATE_UP_METRIC.filter(
+        (metric: any) => metric.metric.job === federateJobName
+      );
+      this.checkFederateMetricsStatus(federateMetrics);
 
       clusters.push({
         cluster: clusterName.trim(),
@@ -402,6 +404,83 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
     );
   }
 
+  checkFederateMetricsStatus(federatedMetrics: any) {
+    if (!federatedMetrics || federatedMetrics.length === 0) {
+      return;
+    }
+
+    this.prometheusConnectionErrors = [];
+
+    federatedMetrics.forEach((metricEntry: { metric: { instance: string }; value: any }) => {
+      const instanceIpPort = metricEntry.metric.instance;
+      const instanceIp = instanceIpPort.split(':')[0];
+      const instancePort = instanceIpPort.split(':')[1];
+      const federationStatus = metricEntry.value[1];
+
+      this.clusterDetailsArray?.forEach((clusterDetails) => {
+        if (clusterDetails.name !== this.localClusterName) {
+          const prometheusUrl = clusterDetails.prometheus_url.replace(
+            /^(http:\/\/|https:\/\/)/,
+            ''
+          );
+          const prometheusIp = prometheusUrl.split(':')[0];
+          const prometheusPort = prometheusUrl.split(':')[1] ? prometheusUrl.split(':')[1] : '443';
+
+          const existingError = this.prometheusConnectionErrors.find(
+            (errorEntry) => errorEntry.url === clusterDetails.url
+          );
+
+          if (
+            !existingError &&
+            instanceIp === prometheusIp &&
+            instancePort === prometheusPort &&
+            federationStatus === '0'
+          ) {
+            this.prometheusConnectionErrors.push({
+              cluster_name: clusterDetails.name,
+              cluster_alias: clusterDetails.cluster_alias,
+              url: clusterDetails.url
+            });
+
+            this.multiClusterService
+              .reConnectCluster(
+                clusterDetails.url,
+                clusterDetails.user,
+                null,
+                clusterDetails.ssl_verify,
+                clusterDetails.ssl_certificate,
+                clusterDetails.ttl,
+                clusterDetails.token
+              )
+              .subscribe({
+                error: (errorResponse: any) => {
+                  const reconnectionError = errorResponse.error.detail;
+                  const errorIndex = this.prometheusConnectionErrors.findIndex(
+                    (errorEntry) => errorEntry.url === clusterDetails.url
+                  );
+                  if (errorIndex !== -1) {
+                    this.prometheusConnectionErrors[
+                      errorIndex
+                    ].reconnectionError = reconnectionError;
+                  }
+                },
+                next: (response: any) => {
+                  if (response === true) {
+                    const message = $localize`Cluster re-connected successfully`;
+                    this.notificationService.show(NotificationType.success, message);
+
+                    this.prometheusConnectionErrors = this.prometheusConnectionErrors.filter(
+                      (errorEntry) => errorEntry.url !== clusterDetails.url
+                    );
+                  }
+                }
+              });
+          }
+        }
+      });
+    });
+  }
+
   findClusterData(metrics: any, clusterName: string) {
     const clusterMetrics = this.findCluster(metrics, clusterName);
     return parseInt(clusterMetrics?.value[1] || 0);
@@ -445,5 +524,6 @@ export class MultiClusterComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.subs.unsubscribe();
     clearInterval(this.interval);
+    this.prometheusService.unsubscribe();
   }
 }

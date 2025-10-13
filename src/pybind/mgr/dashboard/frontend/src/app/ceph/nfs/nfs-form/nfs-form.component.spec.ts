@@ -11,7 +11,6 @@ import { Observable, of } from 'rxjs';
 import { NfsFormClientComponent } from '~/app/ceph/nfs/nfs-form-client/nfs-form-client.component';
 import { NfsFormComponent } from '~/app/ceph/nfs/nfs-form/nfs-form.component';
 import { Directory } from '~/app/shared/api/nfs.service';
-import { LoadingPanelComponent } from '~/app/shared/components/loading-panel/loading-panel.component';
 import { SharedModule } from '~/app/shared/shared.module';
 import { ActivatedRouteStub } from '~/testing/activated-route-stub';
 import { configureTestBed, RgwHelper } from '~/testing/unit-test-helper';
@@ -23,26 +22,23 @@ describe('NfsFormComponent', () => {
   let activatedRoute: ActivatedRouteStub;
   let router: Router;
 
-  configureTestBed(
-    {
-      declarations: [NfsFormComponent, NfsFormClientComponent],
-      imports: [
-        HttpClientTestingModule,
-        ReactiveFormsModule,
-        RouterTestingModule,
-        SharedModule,
-        ToastrModule.forRoot(),
-        NgbTypeaheadModule
-      ],
-      providers: [
-        {
-          provide: ActivatedRoute,
-          useValue: new ActivatedRouteStub({ cluster_id: 'mynfs', export_id: '1' })
-        }
-      ]
-    },
-    [LoadingPanelComponent]
-  );
+  configureTestBed({
+    declarations: [NfsFormComponent, NfsFormClientComponent],
+    imports: [
+      HttpClientTestingModule,
+      ReactiveFormsModule,
+      RouterTestingModule,
+      SharedModule,
+      ToastrModule.forRoot(),
+      NgbTypeaheadModule
+    ],
+    providers: [
+      {
+        provide: ActivatedRoute,
+        useValue: new ActivatedRouteStub({ cluster_id: 'mynfs', export_id: '1' })
+      }
+    ]
+  });
 
   const matchSquash = (backendSquashValue: string, uiSquashValue: string) => {
     component.ngOnInit();
@@ -91,14 +87,17 @@ describe('NfsFormComponent', () => {
       access_type: 'RW',
       clients: [],
       cluster_id: 'mynfs',
-      fsal: { fs_name: 'a', name: 'CEPH' },
-      path: '/',
+      fsal: { fs_name: '', name: 'CEPH', user_id: '' },
+      path: '',
       protocolNfsv4: true,
       protocolNfsv3: true,
       pseudo: '',
+      rgw_export_type: null,
       sec_label_xattr: 'security.selinux',
       security_label: false,
       squash: 'no_root_squash',
+      subvolume: '',
+      subvolume_group: '_nogroup',
       transportTCP: true,
       transportUDP: true
     });

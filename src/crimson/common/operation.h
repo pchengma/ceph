@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -309,7 +309,7 @@ struct AggregateBlockingEvent {
 
     class TriggerContainer final : public TriggerI::TriggerContainerI {
       AggregateBlockingEvent& event;
-      typename decltype(event.events)::iterator iter;
+      typename std::list<T>::iterator iter;
       typename T::template Trigger<OpT> trigger;
 
       typename T::TriggerI &get_trigger() final {

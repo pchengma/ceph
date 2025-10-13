@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -39,6 +40,10 @@ class Elector : public ElectionOwner, RankProvider {
    * @defgroup Elector_h_class Elector
    * @{
    */
+
+  private:
+    std::set<int> pending_pings;  // Monitors waiting for quorum features to be established
+
   ElectionLogic logic;
   // connectivity validation and scoring
   ConnectionTracker peer_tracker;
@@ -245,6 +250,19 @@ class Elector : public ElectionOwner, RankProvider {
   std::set<int> disallowed_leaders;
   const std::set<int>& get_disallowed_leaders() const { return disallowed_leaders; }
   /**
+   * Check if the monitor is the tiebreaker in a stretch cluster.
+   *
+   * @returns true if the Monitor is the tiebreaker, false otherwise.
+   */
+  bool is_tiebreaker(int rank) const;
+  /**
+   * Check if the mon is marked dwon in stretch mode.
+   *
+   * @returns true if the monitor is marked down in stretch mode,
+   * otherwise return false.
+   */
+  bool is_stretch_marked_down_mons(int from) const;
+  /**
    * Reset the expire_event timer so we can limit the amount of time we 
    * will be electing. Clean up our peer_info.
    *
@@ -362,6 +380,9 @@ class Elector : public ElectionOwner, RankProvider {
   * https://tracker.ceph.com/issues/58049
   */
   bool peer_tracker_is_clean();
+
+  std::set<std::pair<unsigned, unsigned>> get_netsplit_peer_tracker(std::set<unsigned> &mons_down);
+
   /**
    * Forget everything about our peers. :(
    */
@@ -393,6 +414,11 @@ class Elector : public ElectionOwner, RankProvider {
     disallowed_leaders = dl;
     return true;
   }
+  /**
+   * process all pending pings when quorum is established
+   *
+   */
+  void process_pending_pings();
   void dump_connection_scores(Formatter *f) {
     f->open_object_section("connection scores");
     peer_tracker.dump(f);

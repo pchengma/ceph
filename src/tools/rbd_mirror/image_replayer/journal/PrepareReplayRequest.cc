@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "PrepareReplayRequest.h"
 #include "common/debug.h"
@@ -11,6 +11,8 @@
 #include "librbd/Utils.h"
 #include "tools/rbd_mirror/ProgressContext.h"
 #include "tools/rbd_mirror/image_replayer/journal/StateBuilder.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd_mirror
@@ -160,7 +162,7 @@ void PrepareReplayRequest<I>::handle_get_remote_tag_class(int r) {
   }
 
   librbd::journal::ImageClientMeta *client_meta =
-    boost::get<librbd::journal::ImageClientMeta>(&client_data.client_meta);
+    std::get_if<librbd::journal::ImageClientMeta>(&client_data.client_meta);
   if (client_meta == nullptr) {
     derr << "unknown remote client registration" << dendl;
     finish(-EINVAL);

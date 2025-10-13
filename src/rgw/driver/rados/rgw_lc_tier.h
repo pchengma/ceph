@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -22,6 +22,8 @@ struct RGWLCCloudTierCtx {
   rgw::sal::Driver *driver;
   RGWBucketInfo& bucket_info;
   std::string storage_class;
+  std::string restore_storage_class;
+  std::string tier_type;
 
   rgw::sal::Object *obj;
 
@@ -49,3 +51,25 @@ struct RGWLCCloudTierCtx {
 
 /* Transition object to cloud endpoint */
 int rgw_cloud_tier_transfer_object(RGWLCCloudTierCtx& tier_ctx, std::set<std::string>& cloud_targets);
+
+int rgw_cloud_tier_get_object(RGWLCCloudTierCtx& tier_ctx, bool head,
+                         std::map<std::string, std::string>& headers,
+                         real_time* pset_mtime, std::string& etag,
+                         uint64_t& accounted_size, rgw::sal::Attrs& attrs,
+                         void* cb);
+int rgw_cloud_tier_restore_object(RGWLCCloudTierCtx& tier_ctx,
+                         std::map<std::string, std::string>& headers,
+                         real_time* pset_mtime, std::string& etag,
+                         uint64_t& accounted_size, rgw::sal::Attrs& attrs,
+                  	 std::optional<uint64_t> days,
+                         RGWZoneGroupTierS3Glacier& glacier_params,
+			 bool& in_progress,
+                         void* cb);
+
+int cloud_tier_restore(const DoutPrefixProvider *dpp,
+                       RGWRESTConn& dest_conn, const rgw_obj& dest_obj,
+                       std::optional<uint64_t> days,
+                       RGWZoneGroupTierS3Glacier& glacier_params);
+
+bool is_restore_in_progress(const DoutPrefixProvider *dpp,
+                            std::map<std::string, std::string>& headers);

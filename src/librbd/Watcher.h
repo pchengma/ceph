@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_WATCHER_H
 #define CEPH_LIBRBD_WATCHER_H
@@ -11,6 +11,7 @@
 #include "librbd/watcher/Notifier.h"
 #include "librbd/watcher/Types.h"
 #include <string>
+#include <shared_mutex> // for std::shared_lock
 #include <utility>
 
 namespace librbd {

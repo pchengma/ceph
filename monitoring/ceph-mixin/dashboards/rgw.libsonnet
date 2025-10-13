@@ -46,6 +46,20 @@ local g = import 'grafonnet/grafana.libsonnet';
         'dashboard'
       )
     )
+    .addLinks([
+      $.addLinkSchema(
+        asDropdown=true,
+        icon='external link',
+        includeVars=true,
+        keepTime=true,
+        tags=[],
+        targetBlank=false,
+        title='Browse Dashboards',
+        tooltip='',
+        type='dashboards',
+        url=''
+      ),
+    ])
     .addRequired(
       type='grafana', id='grafana', name='Grafana', version='5.0.0'
     )
@@ -111,6 +125,45 @@ local g = import 'grafonnet/grafana.libsonnet';
         7,
         8,
         7
+      ),
+      $.timeSeriesPanel(
+        lineInterpolation='linear',
+        lineWidth=1,
+        drawStyle='line',
+        axisPlacement='auto',
+        title='Replication(Time) Delta per shard',
+        datasource='$datasource',
+        gridPosition={ h: 7, w: 16, x: 8, y: 7 },
+        fillOpacity=0,
+        pointSize=5,
+        showPoints='auto',
+        unit='s',
+        displayMode='table',
+        showLegend=true,
+        placement='right',
+        tooltip={ mode: 'multi', sort: 'desc' },
+        stackingMode='none',
+        spanNulls=false,
+        decimals=2,
+        thresholdsMode='absolute',
+        sortBy='Last *',
+        sortDesc=true
+      )
+      .addCalcs(['lastNotNull'])
+      .addThresholds([
+        { color: 'green', value: null },
+        { color: 'red', value: 80 },
+      ])
+      .addTargets(
+        [
+          $.addTargetSchema(
+            expr='rate(ceph_rgw_sync_delta_sync_delta[$__rate_interval])',
+            datasource='$datasource',
+            instant=false,
+            legendFormat='{{instance_id}} - {{shard_id}}',
+            range=true,
+          ),
+        ]
       ),
     ]),
   'radosgw-overview.json':
@@ -178,6 +231,20 @@ local g = import 'grafonnet/grafana.libsonnet';
         'dashboard'
       )
     )
+    .addLinks([
+      $.addLinkSchema(
+        asDropdown=true,
+        icon='external link',
+        includeVars=true,
+        keepTime=true,
+        tags=[],
+        targetBlank=false,
+        title='Browse Dashboards',
+        tooltip='',
+        type='dashboards',
+        url=''
+      ),
+    ])
     .addRequired(
       type='grafana', id='grafana', name='Grafana', version='5.0.0'
     )
@@ -259,7 +326,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           label_replace(
             rate(ceph_rgw_op_get_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
               rate(ceph_rgw_op_get_obj_lat_count{%(matchers)s}[$__rate_interval]) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -275,7 +342,7 @@ local g = import 'grafonnet/grafana.libsonnet';
               label_replace(
                 rate(ceph_rgw_op_put_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
                   rate(ceph_rgw_op_put_obj_lat_count{%(matchers)s}[$__rate_interval]) *
-                  on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+                  on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
                 "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
               )
             ||| % $.matchers(),
@@ -292,7 +359,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           sum by (rgw_host) (
             label_replace(
               rate(ceph_rgw_req{%(matchers)s}[$__rate_interval]) *
-                on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+                on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
               "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
             )
           )
@@ -312,7 +379,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           label_replace(
             rate(ceph_rgw_op_get_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
               rate(ceph_rgw_op_get_obj_lat_count{%(matchers)s}[$__rate_interval]) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -346,7 +413,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           label_replace(sum by (instance_id) (
             rate(ceph_rgw_op_get_obj_bytes{%(matchers)s}[$__rate_interval]) +
               rate(ceph_rgw_op_put_obj_bytes{%(matchers)s}[$__rate_interval])) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -365,7 +432,7 @@ local g = import 'grafonnet/grafana.libsonnet';
           label_replace(
             rate(ceph_rgw_op_put_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
               rate(ceph_rgw_op_put_obj_lat_count{%(matchers)s}[$__rate_interval]) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -634,6 +701,46 @@ local g = import 'grafonnet/grafana.libsonnet';
           transform: 'negative-Y',
         },
       ]),
+      $.addRowSchema(false,
+                     true,
+                     'RGW Overview - Bucket Notification') +
+      {
+        gridPos: { x: 0, y: 27, w: 24, h: 1 },
+      },
+      RgwOverviewPanel(
+        'Pending Notifications by Topic',
+        'Shows the number of pending notifications in each Object topic queue, indicating how many messages are waiting to be delivered',
+        '',
+        'short',
+        |||
+          (
+           ceph_rgw_topic_persistent_topic_len
+          )
+        |||,
+        '{{topic}}',
+        0,
+        28,
+        12,
+        8
+      )
+      + { options: { legend: { calcs: ['lastNotNull'], displayMode: 'list', placement: 'right', showLegend: true, sortDesc: true } } },
+      RgwOverviewPanel(
+        'Pending Notifications Size by Topic',
+        'Shows the total size of pending notifications stored per Object topic, reflecting how much data is waiting to be delivered.',
+        'bytes',
+        'short',
+        |||
+          (
+           ceph_rgw_topic_persistent_topic_size
+          )
+        |||,
+        '{{topic}}',
+        12,
+        28,
+        12,
+        8
+      )
+      + { options: { legend: { calcs: ['lastNotNull'], displayMode: 'list', placement: 'right', showLegend: true, sortDesc: true } } },
     ]),
   'radosgw-detail.json':
     local RgwDetailsPanel(aliasColors,
@@ -686,6 +793,20 @@ local g = import 'grafonnet/grafana.libsonnet';
         'dashboard'
       )
     )
+    .addLinks([
+      $.addLinkSchema(
+        asDropdown=true,
+        icon='external link',
+        includeVars=true,
+        keepTime=true,
+        tags=[],
+        targetBlank=false,
+        title='Browse Dashboards',
+        tooltip='',
+        type='dashboards',
+        url=''
+      ),
+    ])
     .addRequired(
       type='grafana', id='grafana', name='Grafana', version='5.0.0'
     )

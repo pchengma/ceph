@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "pg_backend.h"
 
@@ -10,6 +10,7 @@
 #include <boost/range/algorithm/copy.hpp>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include "include/utime_fmt.h"
 #include <seastar/core/print.hh>
 
 #include "messages/MOSDOp.h"
@@ -29,6 +30,7 @@
 #include "replicated_recovery_backend.h"
 #include "ec_backend.h"
 #include "exceptions.h"
+#include "osd/object_state_fmt.h"
 
 namespace {
   seastar::logger& logger() {
@@ -40,6 +42,8 @@ using std::runtime_error;
 using std::string;
 using std::string_view;
 using crimson::common::local_conf;
+
+namespace crimson::osd {
 
 std::unique_ptr<PGBackend>
 PGBackend::create(pg_t pgid,
@@ -151,54 +155,6 @@ PGBackend::load_metadata(const hobject_t& oid)
       }));
 }
 
-PGBackend::rep_op_fut_t
-PGBackend::mutate_object(
-  std::set<pg_shard_t> pg_shards,
-  crimson::osd::ObjectContextRef &&obc,
-  ceph::os::Transaction&& txn,
-  osd_op_params_t&& osd_op_p,
-  epoch_t min_epoch,
-  epoch_t map_epoch,
-  std::vector<pg_log_entry_t>&& log_entries)
-{
-  logger().trace("mutate_object: num_ops={}", txn.get_num_ops());
-  if (obc->obs.exists) {
-    obc->obs.oi.prior_version = obc->obs.oi.version;
-    obc->obs.oi.version = osd_op_p.at_version;
-    if (osd_op_p.user_modify)
-      obc->obs.oi.user_version = osd_op_p.at_version.version;
-    obc->obs.oi.last_reqid = osd_op_p.req_id;
-    obc->obs.oi.mtime = osd_op_p.mtime;
-    obc->obs.oi.local_mtime = ceph_clock_now();
-
-    // object_info_t
-    {
-      ceph::bufferlist osv;
-      obc->obs.oi.encode_no_oid(osv, CEPH_FEATURES_ALL);
-      // TODO: get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
-      txn.setattr(coll->get_cid(), ghobject_t{obc->obs.oi.soid}, OI_ATTR, osv);
-    }
-
-    // snapset
-    if (obc->obs.oi.soid.snap == CEPH_NOSNAP) {
-      logger().debug("final snapset {} in {}",
-        obc->ssc->snapset, obc->obs.oi.soid);
-      ceph::bufferlist bss;
-      encode(obc->ssc->snapset, bss);
-      txn.setattr(coll->get_cid(), ghobject_t{obc->obs.oi.soid}, SS_ATTR, bss);
-      obc->ssc->exists = true;
-    } else {
-      logger().debug("no snapset (this is a clone)");
-    }
-  } else {
-    // reset cached ObjectState without enforcing eviction
-    obc->obs.oi = object_info_t(obc->obs.oi.soid);
-  }
-  return _submit_transaction(
-    std::move(pg_shards), obc->obs.oi.soid, std::move(txn),
-    std::move(osd_op_p), min_epoch, map_epoch, std::move(log_entries));
-}
-
 static inline bool _read_verify_data(
   const object_info_t& oi,
   const ceph::bufferlist& data)
@@ -298,7 +254,7 @@ PGBackend::sparse_read(const ObjectState& os, OSDOp& osd_op,
     adjusted_length = adjusted_size - offset;
   }
   logger().trace("sparse_read: {} {}~{}",
-                 os.oi.soid, op.extent.offset, op.extent.length);
+                 os.oi.soid, (uint64_t)op.extent.offset, (uint64_t)op.extent.length);
   return interruptor::make_interruptible(store->fiemap(coll, ghobject_t{os.oi.soid},
     offset, adjusted_length)).safe_then_interruptible(
     [&delta_stats, &os, &osd_op, this](auto&& m) {
@@ -313,7 +269,7 @@ PGBackend::sparse_read(const ObjectState& os, OSDOp& osd_op,
           ceph::encode(extents, osd_op.outdata);
           encode_destructively(bl, osd_op.outdata);
           logger().trace("sparse_read got {} bytes from object {}",
-                         osd_op.op.extent.length, os.oi.soid);
+                         (uint64_t)osd_op.op.extent.length, os.oi.soid);
          delta_stats.num_rd++;
          delta_stats.num_rd_kb += shift_round_up(osd_op.op.extent.length, 10);
           return read_errorator::make_ready_future<>();
@@ -395,7 +351,7 @@ PGBackend::checksum(const ObjectState& os, OSDOp& osd_op)
     auto& checksum = osd_op.op.checksum;
     if (read_bl.length() != checksum.length) {
       logger().warn("checksum: bytes read {} != {}",
-                        read_bl.length(), checksum.length);
+                        read_bl.length(), (uint64_t)checksum.length);
       return crimson::ct_error::invarg::make();
     }
     // calculate its checksum and put the result in outdata
@@ -877,7 +833,14 @@ PGBackend::rollback_iertr::future<> PGBackend::rollback(
                      " because got ENOENT|whiteout on obc lookup",
                      os.oi.soid, snapid);
       return remove(os, txn, osd_op_params, delta_stats,
-                    should_whiteout(ss, snapc), os.oi.size);
+                    should_whiteout(ss, snapc), os.oi.size
+      ).handle_error_interruptible(
+	crimson::ct_error::enoent::handle([] {
+	  // We consider rolling back a non-existing head to
+	  // non-existing clone as a no-op.
+	  return rollback_iertr::now();
+	})
+      );
     }),
     rollback_ertr::pass_further{},
     crimson::ct_error::assert_all{"unexpected error in rollback"}
@@ -975,6 +938,7 @@ PGBackend::create_iertr::future<> PGBackend::create(
   ceph::os::Transaction& txn,
   object_stat_sum_t& delta_stats)
 {
+  logger().debug("{} obc existed: {}, osd_op {}", __func__, os, osd_op);
   if (os.exists && !os.oi.is_whiteout() &&
       (osd_op.op.flags & CEPH_OSD_OP_FLAG_EXCL)) {
     // this is an exclusive create
@@ -1328,22 +1292,6 @@ PGBackend::rm_xattr(
   return rm_xattr_iertr::now();
 }
 
-void PGBackend::clone(
-  /* const */object_info_t& snap_oi,
-  const ObjectState& os,
-  const ObjectState& d_os,
-  ceph::os::Transaction& txn)
-{
-  // See OpsExecutor::execute_clone documentation
-  txn.clone(coll->get_cid(), ghobject_t{os.oi.soid}, ghobject_t{d_os.oi.soid});
-  {
-    ceph::bufferlist bv;
-    snap_oi.encode_no_oid(bv, CEPH_FEATURES_ALL);
-    txn.setattr(coll->get_cid(), ghobject_t{d_os.oi.soid}, OI_ATTR, bv);
-  }
-  txn.rmattr(coll->get_cid(), ghobject_t{d_os.oi.soid}, SS_ATTR);
-}
-
 using get_omap_ertr =
   crimson::os::FuturizedStore::Shard::read_errorator::extend<
     crimson::ct_error::enodata>;
@@ -1367,17 +1315,21 @@ maybe_get_omap_vals_by_keys(
   }
 }
 
+using get_omap_iterate_ertr =
+  crimson::os::FuturizedStore::Shard::read_errorator::extend<
+    crimson::ct_error::enodata>;
+using omap_iterate_cb_t = crimson::os::FuturizedStore::Shard::omap_iterate_cb_t;
 static
-get_omap_iertr::future<
-  std::tuple<bool, crimson::os::FuturizedStore::Shard::omap_values_t>>
-maybe_get_omap_vals(
+get_omap_iterate_ertr::future<ObjectStore::omap_iter_ret_t>
+maybe_do_omap_iterate(
   crimson::os::FuturizedStore::Shard* store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
-  const std::string& start_after)
+  ObjectStore::omap_iter_seek_t start_from,
+  omap_iterate_cb_t callback)
 {
   if (oi.is_omap()) {
-    return store->omap_get_values(coll, ghobject_t{oi.soid}, start_after);
+    return store->omap_iterate(coll, ghobject_t{oi.soid}, start_from, callback);
   } else {
     return crimson::ct_error::enodata::make();
   }
@@ -1386,9 +1338,10 @@ maybe_get_omap_vals(
 PGBackend::ll_read_ierrorator::future<ceph::bufferlist>
 PGBackend::omap_get_header(
   const crimson::os::CollectionRef& c,
-  const ghobject_t& oid) const
+  const ghobject_t& oid,
+  uint32_t op_flags) const
 {
-  return store->omap_get_header(c, oid)
+  return store->omap_get_header(c, oid, op_flags)
     .handle_error(
       crimson::ct_error::enodata::handle([] {
 	return seastar::make_ready_future<bufferlist>();
@@ -1401,10 +1354,13 @@ PGBackend::ll_read_ierrorator::future<>
 PGBackend::omap_get_header(
   const ObjectState& os,
   OSDOp& osd_op,
-  object_stat_sum_t& delta_stats) const
+  object_stat_sum_t& delta_stats,
+  uint32_t op_flags) const
 {
   if (os.oi.is_omap()) {
-    return omap_get_header(coll, ghobject_t{os.oi.soid}).safe_then_interruptible(
+    return omap_get_header(
+      coll, ghobject_t{os.oi.soid}, CEPH_OSD_OP_FLAG_FADVISE_DONTNEED
+    ).safe_then_interruptible(
       [&delta_stats, &osd_op] (ceph::bufferlist&& header) {
         osd_op.outdata = std::move(header);
         delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
@@ -1426,7 +1382,7 @@ PGBackend::omap_get_keys(
 {
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
-    return crimson::ct_error::enoent::make();
+    co_await ll_read_ierrorator::future<>(crimson::ct_error::enoent::make());
   }
   std::string start_after;
   uint64_t max_return;
@@ -1437,43 +1393,49 @@ PGBackend::omap_get_keys(
   } catch (buffer::error&) {
     throw crimson::osd::invalid_argument{};
   }
+  uint64_t max_omap_entries = local_conf()->osd_max_omap_entries_per_request;
   max_return =
-    std::min(max_return, local_conf()->osd_max_omap_entries_per_request);
+    std::min(max_return, max_omap_entries);
 
+  ceph::bufferlist result;
+  uint32_t num = 0;
+  bool truncated = false;
+  ObjectStore::omap_iter_seek_t start_from{start_after, ObjectStore::omap_iter_seek_t::UPPER_BOUND};
+  omap_iterate_cb_t callback = [&result, &num, &truncated, max_return]
+    (std::string_view key, std::string_view value)
+  {
+    if (num >= max_return) {
+      truncated = true;
+      return ObjectStore::omap_iter_ret_t::STOP;
+    }
+    encode(key, result);
+    ++num;
+    return ObjectStore::omap_iter_ret_t::NEXT;
+  };
 
-  // TODO: truly chunk the reading
-  return maybe_get_omap_vals(store, coll, os.oi, start_after).safe_then_interruptible(
-    [=,&delta_stats, &osd_op](auto ret) {
-      ceph::bufferlist result;
-      bool truncated = false;
+  co_await maybe_do_omap_iterate(store, coll, os.oi, start_from, callback
+  ).safe_then([&delta_stats, &osd_op, &result, &num, &truncated](auto ret){
+    if (ret != ObjectStore::omap_iter_ret_t::STOP) {
+      logger().warn("omap_iterate not meet a stop condition");
+    }
+    encode(num, osd_op.outdata);
+    osd_op.outdata.claim_append(result);
+    encode(truncated, osd_op.outdata);
+    delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+    delta_stats.num_rd++;
+  }).handle_error(
+    crimson::ct_error::enodata::handle([&osd_op] {
       uint32_t num = 0;
-      for (auto &[key, val] : std::get<1>(ret)) {
-        if (num >= max_return ||
-            result.length() >= local_conf()->osd_max_omap_bytes_per_request) {
-          truncated = true;
-          break;
-        }
-        encode(key, result);
-        ++num;
-      }
+      bool truncated = false;
       encode(num, osd_op.outdata);
-      osd_op.outdata.claim_append(result);
       encode(truncated, osd_op.outdata);
-      delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
-      delta_stats.num_rd++;
+      osd_op.rval = 0;
       return seastar::now();
-    }).handle_error_interruptible(
-      crimson::ct_error::enodata::handle([&osd_op] {
-        uint32_t num = 0;
-	bool truncated = false;
-	encode(num, osd_op.outdata);
-	encode(truncated, osd_op.outdata);
-	osd_op.rval = 0;
-	return seastar::now();
-      }),
-      ll_read_errorator::pass_further{}
-    );
+    }),
+    ll_read_errorator::pass_further{}
+  );
 }
+
 static
 PGBackend::omap_cmp_ertr::future<> do_omap_val_cmp(
   std::map<std::string, bufferlist, std::less<>> out,
@@ -1548,7 +1510,7 @@ PGBackend::omap_get_vals(
 {
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
-    return crimson::ct_error::enoent::make();
+    co_await ll_read_ierrorator::future<>(crimson::ct_error::enoent::make());
   }
   std::string start_after;
   uint64_t max_return;
@@ -1562,48 +1524,53 @@ PGBackend::omap_get_vals(
     throw crimson::osd::invalid_argument{};
   }
 
+  uint64_t max_omap_entries = local_conf()->osd_max_omap_entries_per_request;
   max_return = \
-    std::min(max_return, local_conf()->osd_max_omap_entries_per_request);
-  delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
-  delta_stats.num_rd++;
+    std::min(max_return, max_omap_entries);
 
-  // TODO: truly chunk the reading
-  return maybe_get_omap_vals(store, coll, os.oi, start_after)
-  .safe_then_interruptible(
-    [=, &osd_op] (auto&& ret) {
-      auto [done, vals] = std::move(ret);
-      assert(done);
-      ceph::bufferlist result;
-      bool truncated = false;
-      uint32_t num = 0;
-      auto iter = filter_prefix > start_after ? vals.lower_bound(filter_prefix)
-                                              : std::begin(vals);
-      for (; iter != std::end(vals); ++iter) {
-        const auto& [key, value] = *iter;
-        if (key.substr(0, filter_prefix.size()) != filter_prefix) {
-          break;
-        } else if (num >= max_return ||
-            result.length() >= local_conf()->osd_max_omap_bytes_per_request) {
-          truncated = true;
-          break;
-        }
-        encode(key, result);
-        encode(value, result);
-        ++num;
-      }
-      encode(num, osd_op.outdata);
-      osd_op.outdata.claim_append(result);
-      encode(truncated, osd_op.outdata);
+  ceph::bufferlist result;
+  uint32_t num = 0;
+  bool truncated = false;
+  ObjectStore::omap_iter_seek_t start_from = ObjectStore::omap_iter_seek_t::min_lower_bound();
+  start_from.seek_position = filter_prefix > start_after ? filter_prefix : start_after;
+  start_from.seek_type = filter_prefix > start_after ?
+                         ObjectStore::omap_iter_seek_t::LOWER_BOUND :
+                         ObjectStore::omap_iter_seek_t::UPPER_BOUND;
+  omap_iterate_cb_t callback = [filter_prefix, max_return, &result, &num, &truncated]
+    (std::string_view key, std::string_view value)
+  {
+    if (num >= max_return) {
+      truncated = true;
+    }
+    if (key.substr(0, filter_prefix.size()) != filter_prefix || truncated == true) {
+      return ObjectStore::omap_iter_ret_t::STOP;
+    }
+
+    encode(key, result);
+    encode(value, result);
+    ++num;
+    return ObjectStore::omap_iter_ret_t::NEXT;
+  };
+
+  co_await maybe_do_omap_iterate(store, coll, os.oi, start_from, callback
+  ).safe_then([&osd_op, &delta_stats, &result, &num, &truncated](auto ret) {
+    if (ret != ObjectStore::omap_iter_ret_t::STOP) {
+      logger().warn("omap_iterate not meet a stop condition");
+    }
+    encode(num, osd_op.outdata);
+    osd_op.outdata.claim_append(result);
+    encode(truncated, osd_op.outdata);
+    delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+    delta_stats.num_rd++;
+  }).handle_error(
+    crimson::ct_error::enodata::handle([&osd_op] {
+      encode(uint32_t{0} /* num */, osd_op.outdata);
+      encode(bool{false} /* truncated */, osd_op.outdata);
+      osd_op.rval = 0;
       return ll_read_errorator::now();
-    }).handle_error_interruptible(
-      crimson::ct_error::enodata::handle([&osd_op] {
-        encode(uint32_t{0} /* num */, osd_op.outdata);
-        encode(bool{false} /* truncated */, osd_op.outdata);
-        osd_op.rval = 0;
-        return ll_read_errorator::now();
-      }),
-      ll_read_errorator::pass_further{}
-    );
+    }),
+    ll_read_errorator::pass_further{}
+  );
 }
 
 PGBackend::ll_read_ierrorator::future<>
@@ -1612,11 +1579,6 @@ PGBackend::omap_get_vals_by_keys(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (!os.exists || os.oi.is_whiteout()) {
-    logger().debug("{}: object does not exist: {}", __func__, os.oi.soid);
-    return crimson::ct_error::enoent::make();
-  }
-
   std::set<std::string> keys_to_get;
   try {
     auto p = osd_op.indata.cbegin();
@@ -1635,6 +1597,9 @@ PGBackend::omap_get_vals_by_keys(
       crimson::ct_error::enodata::handle([&osd_op] {
         uint32_t num = 0;
         encode(num, osd_op.outdata);
+        // Although an error should be expected here since the object doesn't exist,
+        // we want to match classic's behavior as clients possibly rely on it.
+        // Return an empty, but successful return instead.
         osd_op.rval = 0;
         return ll_read_errorator::now();
       }),
@@ -1768,7 +1733,8 @@ PGBackend::fiemap(
   CollectionRef c,
   const ghobject_t& oid,
   uint64_t off,
-  uint64_t len)
+  uint64_t len,
+  uint32_t op_flags)
 {
   return store->fiemap(c, oid, off, len);
 }
@@ -1815,8 +1781,9 @@ PGBackend::tmapup_iertr::future<> PGBackend::tmapup(
       return seastar::make_ready_future<bufferlist>();
     }),
     PGBackend::write_iertr::pass_further{},
-    crimson::ct_error::assert_all{"read error in mutate_object_contents"}
-  ).si_then([this, &os, &osd_op, &txn,
+    crimson::ct_error::assert_all{fmt::format(
+      "read error in mutate_object_contents of {}", os.oi.soid).c_str()
+    }).si_then([this, &os, &osd_op, &txn,
 	     &delta_stats, &osd_op_params]
 	    (auto &&bl) mutable -> PGBackend::tmapup_iertr::future<> {
     auto result = crimson::common::do_tmap_up(
@@ -1880,3 +1847,33 @@ PGBackend::read_ierrorator::future<> PGBackend::tmapget(
     read_errorator::pass_further{});
 }
 
+void PGBackend::set_metadata(
+  const hobject_t &obj,
+  object_info_t &oi,
+  const SnapSet *ss /* non-null iff head */,
+  ceph::os::Transaction& txn)
+{
+  ceph_assert((obj.is_head() && ss) || (!obj.is_head() && !ss));
+  {
+    ceph::bufferlist bv;
+    oi.encode_no_oid(bv, CEPH_FEATURES_ALL);
+    txn.setattr(coll->get_cid(), ghobject_t{obj}, OI_ATTR, bv);
+  }
+  if (ss) {
+    ceph::bufferlist bss;
+    encode(*ss, bss);
+    txn.setattr(coll->get_cid(), ghobject_t{obj}, SS_ATTR, bss);
+  }
+}
+
+void PGBackend::clone_for_write(
+  const hobject_t &from,
+  const hobject_t &to,
+  ceph::os::Transaction &txn)
+{
+  // See OpsExecuter::execute_clone documentation
+  txn.clone(coll->get_cid(), ghobject_t{from}, ghobject_t{to});
+  txn.rmattr(coll->get_cid(), ghobject_t{to}, SS_ATTR);
+}
+
+}

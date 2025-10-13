@@ -12,11 +12,14 @@ if(WIN32)
   add_library(dlfcn_win32 STATIC win32/dlfcn.cc win32/errno.cc)
 endif()
 
+add_subdirectory(io_exerciser)
+add_subdirectory(json)
 add_subdirectory(options)
 
 set(common_srcs
   AsyncOpTracker.cc
   BackTrace.cc
+  CompatSet.cc
   ConfUtils.cc
   Cycles.cc
   CDC.cc
@@ -26,6 +29,7 @@ set(common_srcs
   FixedCDC.cc
   Formatter.cc
   Graylog.cc
+  JSONFormatter.cc
   HTMLFormatter.cc
   HeartbeatMap.cc
   LogClient.cc
@@ -36,12 +40,14 @@ set(common_srcs
   Readahead.cc
   RefCountedObj.cc
   SloppyCRCMap.cc
+  TableFormatter.cc
   Thread.cc
   Throttle.cc
   Timer.cc
   TracepointProvider.cc
   TrackedOp.cc
   WorkQueue.cc
+  XMLFormatter.cc
   admin_socket.cc
   admin_socket_client.cc
   assert.cc
@@ -102,8 +108,11 @@ set(common_srcs
   pretty_binary.cc
   utf8.c
   util.cc
-  version.cc)
+  version.cc
+  mclock_common.cc
+  tcp_info.cc)
 
+include_directories(${CMAKE_SOURCE_DIR}/src/dmclock/support/src)
 if(WITH_SYSTEMD)
   list(APPEND common_srcs
     Journald.cc)
@@ -193,7 +202,11 @@ target_compile_definitions(common-common-objs PRIVATE
   "CEPH_INSTALL_FULL_PKGLIBDIR=\"${CEPH_INSTALL_FULL_PKGLIBDIR}\""
   "CEPH_INSTALL_DATADIR=\"${CEPH_INSTALL_DATADIR}\""
   $<TARGET_PROPERTY:${FMT_LIB},INTERFACE_COMPILE_DEFINITIONS>)
-target_link_libraries(common-common-objs legacy-option-headers)
+target_link_libraries(common-common-objs PUBLIC legacy-option-headers)
+if(WITH_BREAKPAD)
+  target_link_libraries(common-common-objs PUBLIC
+    Breakpad::client)
+endif()
 
 set(common_mountcephfs_srcs
   armor.c
@@ -225,10 +238,16 @@ elseif(HAVE_POWER8)
     list(APPEND crc32_srcs
       crc32c_ppc_asm.S
       crc32c_ppc_fast_zero_asm.S)
+    set_source_files_properties(crc32c_ppc_asm.S PROPERTIES COMPILE_FLAGS -D__ASSEMBLY__)
   endif(HAVE_PPC64LE)
 elseif(HAVE_ARMV8_CRC)
   list(APPEND crc32_srcs
     crc32c_aarch64.c)
+elseif(HAVE_S390X)
+  list(APPEND crc32_srcs
+    crc32c_s390x.c
+    crc32c_s390x_le-vx.S
+  )
 endif(HAVE_INTEL)
 
 add_library(crc32 OBJECT ${crc32_srcs})

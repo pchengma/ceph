@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -29,15 +29,23 @@ public:
 
   void init(RGWSI_BucketIndex_RADOS *bi_rados_svc);
 
-  int log_start(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw::bucket_log_layout_generation& log_layout, int shard_id);
-  int log_stop(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw::bucket_log_layout_generation& log_layout, int shard_id);
+  int log_start(const DoutPrefixProvider *dpp, optional_yield y,
+                const RGWBucketInfo& bucket_info,
+                const rgw::bucket_log_layout_generation& log_layout,
+                int shard_id);
+  int log_stop(const DoutPrefixProvider *dpp, optional_yield y,
+               const RGWBucketInfo& bucket_info,
+               const rgw::bucket_log_layout_generation& log_layout,
+               int shard_id);
 
-  int log_trim(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+  int log_trim(const DoutPrefixProvider *dpp, optional_yield y,
+               const RGWBucketInfo& bucket_info,
                const rgw::bucket_log_layout_generation& log_layout,
                int shard_id,
                std::string_view start_marker,
                std::string_view end_marker);
-  int log_list(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+  int log_list(const DoutPrefixProvider *dpp, optional_yield y,
+               const RGWBucketInfo& bucket_info,
                const rgw::bucket_log_layout_generation& log_layout,
                int shard_id,
                std::string& marker,

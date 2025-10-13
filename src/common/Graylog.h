@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef __CEPH_LOG_GRAYLOG_H
 #define __CEPH_LOG_GRAYLOG_H
@@ -10,6 +10,8 @@
 #include <boost/iostreams/filter/zlib.hpp>
 
 #include "include/ceph_assert.h"  // boost clobbers this
+
+#include <sstream>
 
 struct uuid_d;
 class LogEntry;

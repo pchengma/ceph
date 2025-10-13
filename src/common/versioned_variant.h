@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -203,7 +204,7 @@ void decode(std::variant<Ts...>& v, bufferlist::const_iterator& p)
 
   // use struct_v as an index into the variant after converting it into a
   // compile-time index I
-  const uint8_t index = struct_v - converted_max_version;
+  const uint8_t index = struct_v.v - converted_max_version;
   boost::mp11::mp_with_index<sizeof...(Ts)>(index, [&v, &p] (auto I) {
       // default-construct the type at index I and call its decoder
       decode(v.template emplace<I>(), p);

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,14 +16,19 @@
 #ifndef CEPH_MDS_SNAPREALM_H
 #define CEPH_MDS_SNAPREALM_H
 
+#include <map>
+#include <set>
 #include <string_view>
 
+#include "Capability.h"
 #include "mdstypes.h"
 #include "snap.h"
 #include "include/xlist.h"
 #include "include/elist.h"
 #include "common/snap_types.h"
-#include "MDSContext.h"
+
+class CInode;
+class MDCache;
 
 struct SnapRealm {
 public:
@@ -103,18 +109,18 @@ public:
   void merge_to(SnapRealm *newparent);
 
   void add_cap(client_t client, Capability *cap) {
-    auto client_caps_entry = client_caps.find(client);
-    if (client_caps_entry == client_caps.end())
-      client_caps_entry = client_caps.emplace(client,
-					      new xlist<Capability*>).first;
-    client_caps_entry->second->push_back(&cap->item_snaprealm_caps);
+    auto em = client_caps.emplace(cap->get_client(),
+				  member_offset(Capability, item_snaprealm_caps));
+    em.first->second.push_back(&cap->item_snaprealm_caps);
   }
   void remove_cap(client_t client, Capability *cap) {
+    bool last_cap = cap->item_snaprealm_caps.is_singular();
     cap->item_snaprealm_caps.remove_myself();
-    auto found = client_caps.find(client);
-    if (found != client_caps.end() && found->second->empty()) {
-      delete found->second;
-      client_caps.erase(found);
+    if (last_cap) {
+      auto it = client_caps.find(client);
+      ceph_assert(it != client_caps.end());
+      ceph_assert(it->second.empty());
+      client_caps.erase(it);
     }
   }
 
@@ -129,7 +135,7 @@ public:
   std::set<SnapRealm*> open_children;    // active children that are currently open
 
   elist<CInode*> inodes_with_caps;             // for efficient realm splits
-  std::map<client_t, xlist<Capability*>* > client_caps;   // to identify clients who need snap notifications
+  std::map<client_t, elist<Capability*> > client_caps;   // to identify clients who need snap notifications
 
 protected:
   void check_cache() const;
@@ -146,6 +152,8 @@ private:
   mutable ceph::buffer::list cached_snap_trace;
   mutable ceph::buffer::list cached_snap_trace_new;
   mutable inodeno_t cached_subvolume_ino = 0;
+  mutable utime_t cached_last_modified = utime_t();
+  mutable uint64_t cached_change_attr = 0;
 };
 
 std::ostream& operator<<(std::ostream& out, const SnapRealm &realm);

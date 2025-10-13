@@ -11,7 +11,7 @@
                 [hasDetails]="true"
                 (setExpandedRow)="setExpandedRow($event)"
                 (fetchData)="getDaemonList($event)">
-        <cd-rgw-daemon-details cdTableDetail
+        <cd-rgw-daemon-details *cdTableDetail
                                [selection]="expandedRow">
         </cd-rgw-daemon-details>
       </cd-table>
@@ -28,7 +28,7 @@
                   [grafanaPath]="'rgw-overview?'"
                   [type]="'metrics'"
                   uid="WAkugZpiz"
-                  grafanaStyle="two">
+                  grafanaStyle="three">
       </cd-grafana>
     </ng-template>
   </ng-container>

@@ -34,6 +34,7 @@ import { RbdFormEditRequestModel } from './rbd-form-edit-request.model';
 import { RbdFormMode } from './rbd-form-mode.enum';
 import { RbdFormResponseModel } from './rbd-form-response.model';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
+import { RBDActionHelpers, RBDMirroringModes, RBDPoolMirrorModes } from '../rbd-contants';
 
 class ExternalData {
   rbd: RbdFormResponseModel;
@@ -69,34 +70,31 @@ export class RbdFormComponent extends CdForm implements OnInit {
 
   pool: string;
   peerConfigured = false;
-
   advancedEnabled = false;
-
   public rbdFormMode = RbdFormMode;
   mode: RbdFormMode;
-
   response: RbdFormResponseModel;
   snapName: string;
-
   defaultObjectSize = '4 MiB';
+
+  rbdPoolMirrorModes = RBDPoolMirrorModes;
+  rbdMirrorModes = RBDMirroringModes;
 
   mirroringOptions = [
     {
-      value: 'journal',
-      text:
-        'Ensures reliable replication by logging changes before updating the image, but doubles write time, impacting performance. Not recommended for high-speed data processing tasks.'
+      value: this.rbdMirrorModes.journal,
+      text: RBDActionHelpers.journalTooltipText
     },
     {
-      value: 'snapshot',
-      text:
-        'This mode replicates RBD images between clusters using snapshots, efficiently copying data changes but requiring complete delta syncing during failover. Ideal for less demanding tasks due to its less granular approach compared to journaling.'
+      value: this.rbdMirrorModes.snapshot,
+      text: RBDActionHelpers.snapshotTooltipText
     }
   ];
   poolMirrorMode: string;
   mirroring = false;
   currentPoolName = '';
   currentPoolMirrorMode = '';
-
+  copyMessage: string = RBDActionHelpers.copy;
   objectSizes: Array<string> = [
     '4 KiB',
     '8 KiB',
@@ -142,7 +140,7 @@ export class RbdFormComponent extends CdForm implements OnInit {
     super();
     this.routerUrl = this.router.url;
     this.poolPermission = this.authStorageService.getPermissions().pool;
-    this.resource = $localize`RBD`;
+    this.resource = $localize`Image`;
     this.features = {
       'deep-flatten': {
         desc: $localize`Deep flatten`,
@@ -221,7 +219,7 @@ export class RbdFormComponent extends CdForm implements OnInit {
           validators: [
             Validators.pattern(/^([0-9]+)d|([0-9]+)h|([0-9]+)m$/),
             CdValidators.requiredIf({
-              mirroringMode: 'snapshot',
+              mirroringMode: this.rbdMirrorModes.snapshot,
               mirroring: true
             })
           ] // check schedule interval to be in format - 1d or 1h or 1m
@@ -277,7 +275,7 @@ export class RbdFormComponent extends CdForm implements OnInit {
   }
 
   setExclusiveLock() {
-    if (this.mirroring && this.rbdForm.get('mirroringMode').value === 'journal') {
+    if (this.mirroring && this.rbdForm.get('mirroringMode').value === this.rbdMirrorModes.journal) {
       this.rbdForm.get('exclusive-lock').setValue(true);
       this.rbdForm.get('exclusive-lock').disable();
     } else {
@@ -303,7 +301,7 @@ export class RbdFormComponent extends CdForm implements OnInit {
     });
   }
 
-  setPoolMirrorMode() {
+  setPoolMirrorMode(namespace?: string) {
     this.currentPoolName =
       this.mode === this.rbdFormMode.editing
         ? this.response?.pool_name
@@ -314,12 +312,16 @@ export class RbdFormComponent extends CdForm implements OnInit {
         const pool = data.content_data.pools.find((o: any) => o.name === this.currentPoolName);
         this.currentPoolMirrorMode = pool.mirror_mode;
         if (this.mode === this.rbdFormMode.editing) {
-          if (this.currentPoolMirrorMode === 'pool') {
+          if (namespace) {
+            this.mirroring = false;
+            this.rbdForm.get('mirroring').disable();
+          }
+          if (this.currentPoolMirrorMode === this.rbdPoolMirrorModes.pool) {
             this.showMirrorDisableMessage = true;
           } else {
             this.showMirrorDisableMessage = false;
           }
-          if (this.currentPoolMirrorMode !== 'image') {
+          if (this.currentPoolMirrorMode !== this.rbdPoolMirrorModes.image) {
             this.rbdForm.get('mirroring').disable();
             this.rbdForm.get('mirroringMode').disable();
           }
@@ -659,17 +661,24 @@ export class RbdFormComponent extends CdForm implements OnInit {
     }
     if (this.mode === this.rbdFormMode.editing) {
       this.rbdForm.get('name').setValue(response.name);
-      if (response?.mirror_mode === 'snapshot' || response.features_name.includes('journaling')) {
+      if (
+        response?.mirror_mode === this.rbdMirrorModes.snapshot ||
+        response.features_name.includes('journaling')
+      ) {
         this.mirroring = true;
         this.rbdForm.get('mirroring').setValue(this.mirroring);
         this.rbdForm.get('mirroringMode').setValue(response?.mirror_mode);
         this.currentImageMirrorMode = response?.mirror_mode;
-        this.rbdForm.get('schedule').setValue(response?.schedule_interval);
+        const scheduleInterval = response?.schedule_info?.schedule_interval[0]?.interval;
+        if (scheduleInterval) {
+          this.rbdForm.get('schedule').setValue(scheduleInterval);
+          this.rbdForm.get('schedule').disable();
+        }
       } else {
         this.mirroring = false;
         this.rbdForm.get('mirroring').setValue(this.mirroring);
       }
-      this.setPoolMirrorMode();
+      this.setPoolMirrorMode(response.namespace);
     }
     this.rbdForm.get('pool').setValue(response.pool_name);
     this.onPoolChange(response.pool_name);
@@ -701,7 +710,7 @@ export class RbdFormComponent extends CdForm implements OnInit {
     request.size = this.formatter.toBytes(this.rbdForm.getValue('size'));
     this.addObjectSizeAndStripingToRequest(request);
     request.configuration = this.getDirtyConfigurationValues();
-    if (this.mirroring && this.currentPoolMirrorMode === 'image') {
+    if (this.mirroring && this.currentPoolMirrorMode === this.rbdPoolMirrorModes.image) {
       request.mirror_mode = this.rbdForm.getValue('mirroringMode');
     }
     return request;
@@ -717,7 +726,7 @@ export class RbdFormComponent extends CdForm implements OnInit {
       }
     });
 
-    if (this.mirroring && this.rbdForm.getValue('mirroringMode') === 'journal') {
+    if (this.mirroring && this.rbdForm.getValue('mirroringMode') === this.rbdMirrorModes.journal) {
       request.features.push('journaling');
     }
 
@@ -755,11 +764,11 @@ export class RbdFormComponent extends CdForm implements OnInit {
     });
     if (request.enable_mirror) {
       request.image_mirror_mode = this.currentImageMirrorMode;
-      if (this.rbdForm.getValue('mirroringMode') === 'journal') {
-        request.mirror_mode = 'journal';
+      if (this.rbdForm.getValue('mirroringMode') === this.rbdMirrorModes.journal) {
+        request.mirror_mode = this.rbdMirrorModes.journal;
         request.features.push('journaling');
       }
-      if (this.currentPoolMirrorMode === 'image') {
+      if (this.currentPoolMirrorMode === this.rbdPoolMirrorModes.image) {
         request.mirror_mode = this.rbdForm.getValue('mirroringMode');
       }
     } else {
@@ -853,7 +862,21 @@ export class RbdFormComponent extends CdForm implements OnInit {
   }
 
   shouldDisable(option: string): boolean {
-    return this.currentPoolMirrorMode === 'pool' && option === 'snapshot' ? true : null;
+    return (
+      this.currentPoolMirrorMode === this.rbdPoolMirrorModes.pool &&
+      option === this.rbdMirrorModes.snapshot
+    );
+  }
+
+  disableMirroring(namespace: string) {
+    const mirroringControl = this.rbdForm.get('mirroring');
+    if (namespace) {
+      this.mirroring = false;
+      mirroringControl.setValue(false);
+      mirroringControl.disable();
+    } else {
+      mirroringControl.enable();
+    }
   }
 
   submit() {
@@ -880,5 +903,12 @@ export class RbdFormComponent extends CdForm implements OnInit {
         () => this.rbdForm.setErrors({ cdSubmitButton: true }),
         () => this.router.navigate(['/block/rbd'])
       );
+  }
+
+  onAlertAction() {
+    this.router.navigate([
+      '/block/mirroring',
+      { outlets: { modal: ['edit', this.rbdForm.getValue('pool')] } }
+    ]);
   }
 }

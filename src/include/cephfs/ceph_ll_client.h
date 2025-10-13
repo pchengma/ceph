@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * scalable distributed file system
  *
@@ -110,6 +111,9 @@ struct ceph_statx {
  * others in the future, we disallow setting any that aren't recognized.
  */
 #define CEPH_REQ_FLAG_MASK		(AT_SYMLINK_NOFOLLOW|AT_STATX_DONT_SYNC)
+#if defined(__linux__) && defined(AT_EMPTY_PATH)
+#define CEPH_AT_EMPTY_PATH		(CEPH_REQ_FLAG_MASK|AT_EMPTY_PATH)
+#endif
 
 /* fallocate mode flags */
 #ifndef FALLOC_FL_KEEP_SIZE

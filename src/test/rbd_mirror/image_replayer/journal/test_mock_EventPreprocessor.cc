@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/rbd_mirror/test_mock_fixture.h"
 #include "librbd/journal/Types.h"
@@ -163,7 +163,7 @@ TEST_F(TestMockImageReplayerJournalEventPreprocessor, PreprocessSnapRename) {
   ASSERT_EQ(expected_snap_seqs, m_client_meta.snap_seqs);
 
   librbd::journal::SnapRenameEvent *event =
-    boost::get<librbd::journal::SnapRenameEvent>(&event_entry.event);
+    std::get_if<librbd::journal::SnapRenameEvent>(&event_entry.event);
   ASSERT_EQ(6U, event->snap_id);
 }
 
@@ -186,7 +186,7 @@ TEST_F(TestMockImageReplayerJournalEventPreprocessor, PreprocessSnapRenameMissin
   ASSERT_EQ(-ENOENT, ctx.wait());
 
   librbd::journal::SnapRenameEvent *event =
-    boost::get<librbd::journal::SnapRenameEvent>(&event_entry.event);
+    std::get_if<librbd::journal::SnapRenameEvent>(&event_entry.event);
   ASSERT_EQ(CEPH_NOSNAP, event->snap_id);
 }
 
@@ -215,7 +215,7 @@ TEST_F(TestMockImageReplayerJournalEventPreprocessor, PreprocessSnapRenameKnown)
   ASSERT_EQ(expected_snap_seqs, m_client_meta.snap_seqs);
 
   librbd::journal::SnapRenameEvent *event =
-    boost::get<librbd::journal::SnapRenameEvent>(&event_entry.event);
+    std::get_if<librbd::journal::SnapRenameEvent>(&event_entry.event);
   ASSERT_EQ(6U, event->snap_id);
 }
 

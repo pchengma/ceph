@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -33,7 +34,7 @@ void PerfHistogramCommon::dump_formatted_axis(
       f->dump_string("scale_type", "log2");
       break;
     default:
-      ceph_assert(false && "Invalid scale type");
+      ceph_abort_msg("Invalid scale type");
   }
 
   {
@@ -63,7 +64,7 @@ int64_t get_quants(int64_t i, PerfHistogramCommon::scale_type_d st) {
     case PerfHistogramCommon::SCALE_LOG2:
       return int64_t(1) << (i - 1);
   }
-  ceph_assert(false && "Invalid scale type");
+  ceph_abort_msg("Invalid scale type");
 }
 
 int64_t PerfHistogramCommon::get_bucket_for_axis(
@@ -87,7 +88,7 @@ int64_t PerfHistogramCommon::get_bucket_for_axis(
       }
       return ac.m_buckets - 1;
   }
-  ceph_assert(false && "Invalid scale type");
+  ceph_abort_msg("Invalid scale type");
 }
 
 std::vector<std::pair<int64_t, int64_t>>

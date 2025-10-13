@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Journald.h"
 
@@ -14,6 +14,9 @@
 #include <sys/un.h>
 #include <syslog.h>
 #include <unistd.h>
+
+#include <iostream> // for std::cerr
+
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
@@ -22,7 +25,6 @@
 #include "log/Entry.h"
 #include "log/SubsystemMap.h"
 #include "msg/msg_fmt.h"
-
 
 namespace ceph::logging {
 

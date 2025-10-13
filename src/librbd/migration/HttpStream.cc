@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/migration/HttpStream.h"
 #include "common/dout.h"
@@ -75,6 +75,18 @@ void HttpStream<I>::read(io::Extents&& byte_extents, bufferlist* data,
   ldout(m_cct, 20) << "byte_extents=" << byte_extents << dendl;
 
   m_http_client->read(std::move(byte_extents), data, on_finish);
+}
+
+template <typename I>
+void HttpStream<I>::list_sparse_extents(io::Extents&& byte_extents,
+                                        io::SparseExtents* sparse_extents,
+                                        Context* on_finish) {
+  // no sparseness information -- list the full range as DATA
+  for (auto [byte_offset, byte_length] : byte_extents) {
+    sparse_extents->insert(byte_offset, byte_length,
+                           {io::SPARSE_EXTENT_STATE_DATA, byte_length});
+  }
+  on_finish->complete(0);
 }
 
 } // namespace migration

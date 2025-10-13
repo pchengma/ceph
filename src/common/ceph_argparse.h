@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,11 +24,15 @@
  * stuff to live.
  */
 
+#include <iosfwd>
 #include <string>
 #include <vector>
 
 #include "common/entity_name.h"
 #include "include/encoding.h"
+#include "msg/msg_types.h" // for struct entity_addr_t
+
+class entity_addrvec_t;
 
 /////////////////////// Types ///////////////////////
 class CephInitParameters

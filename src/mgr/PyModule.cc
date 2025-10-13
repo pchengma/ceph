@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,6 +22,7 @@
 
 #include "include/stringify.h"
 #include "common/BackTrace.h"
+#include "common/JSONFormatter.h"
 #include "global/signal_handler.h"
 
 #include "common/debug.h"
@@ -38,6 +40,18 @@ std::string PyModule::mgr_store_prefix = "mgr/";
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 // Boost apparently can't be bothered to fix its own usage of its own
 // deprecated features.
+
+// Fix instances of "'BOOST_PP_ITERATION_02' was not declared in this scope; did
+// you mean 'BOOST_PP_ITERATION_05'" and related macro error bullshit that spans
+// 300 lines of errors
+//
+// Apparently you can't include boost/python stuff _and_ have this header
+// defined
+//
+// Thanks to the ceph-aur folks for the fix at:
+// https://github.com/bazaah/aur-ceph/commit/8c5cc7d8deec002f7596b6d0860859a0a718f12b 
+#undef BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS
+
 #include <boost/python/extract.hpp>
 #include <boost/python/import.hpp>
 #include <boost/python/object.hpp>
@@ -47,7 +61,6 @@ std::string PyModule::mgr_store_prefix = "mgr/";
 
 
 using std::string;
-using std::wstring;
 
 // decode a Python exception into a string
 std::string handle_pyerror(
@@ -231,72 +244,6 @@ std::pair<int, std::string> PyModuleConfig::set_config(
   }
 }
 
-std::string PyModule::get_site_packages()
-{
-  std::stringstream site_packages;
-
-  // CPython doesn't auto-add site-packages dirs to sys.path for us,
-  // but it does provide a module that we can ask for them.
-  auto site_module = PyImport_ImportModule("site");
-  ceph_assert(site_module);
-
-  auto site_packages_fn = PyObject_GetAttrString(site_module, "getsitepackages");
-  if (site_packages_fn != nullptr) {
-    auto site_packages_list = PyObject_CallObject(site_packages_fn, nullptr);
-    ceph_assert(site_packages_list);
-
-    auto n = PyList_Size(site_packages_list);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-      if (i != 0) {
-        site_packages << ":";
-      }
-      site_packages << PyUnicode_AsUTF8(PyList_GetItem(site_packages_list, i));
-    }
-
-    Py_DECREF(site_packages_list);
-    Py_DECREF(site_packages_fn);
-  } else {
-    // Fall back to generating our own site-packages paths by imitating
-    // what the standard site.py does.  This is annoying but it lets us
-    // run inside virtualenvs :-/
-
-    auto site_packages_fn = PyObject_GetAttrString(site_module, "addsitepackages");
-    ceph_assert(site_packages_fn);
-
-    auto known_paths = PySet_New(nullptr);
-    auto pArgs = PyTuple_Pack(1, known_paths);
-    PyObject_CallObject(site_packages_fn, pArgs);
-    Py_DECREF(pArgs);
-    Py_DECREF(known_paths);
-    Py_DECREF(site_packages_fn);
-
-    auto sys_module = PyImport_ImportModule("sys");
-    ceph_assert(sys_module);
-    auto sys_path = PyObject_GetAttrString(sys_module, "path");
-    ceph_assert(sys_path);
-
-    dout(1) << "sys.path:" << dendl;
-    auto n = PyList_Size(sys_path);
-    bool first = true;
-    for (Py_ssize_t i = 0; i < n; ++i) {
-      dout(1) << "  " << PyUnicode_AsUTF8(PyList_GetItem(sys_path, i)) << dendl;
-      if (first) {
-        first = false;
-      } else {
-        site_packages << ":";
-      }
-      site_packages << PyUnicode_AsUTF8(PyList_GetItem(sys_path, i));
-    }
-
-    Py_DECREF(sys_path);
-    Py_DECREF(sys_module);
-  }
-
-  Py_DECREF(site_module);
-
-  return site_packages.str();
-}
-
 PyObject* PyModule::init_ceph_logger()
 {
   auto py_logger = PyModule_Create(&ceph_logger_module);
@@ -357,17 +304,6 @@ int PyModule::load(PyThreadState *pMainThreadState)
       return -EINVAL;
     } else {
       pMyThreadState.set(thread_state);
-      // Some python modules do not cope with an unpopulated argv, so lets
-      // fake one.  This step also picks up site-packages into sys.path.
-      const wchar_t *argv[] = {L"ceph-mgr"};
-      PySys_SetArgv(1, (wchar_t**)argv);
-      // Configure sys.path to include mgr_module_path
-      string paths = (g_conf().get_val<std::string>("mgr_module_path") + ':' +
-                      get_site_packages() + ':');
-      wstring sys_path(wstring(begin(paths), end(paths)) + Py_GetPath());
-      PySys_SetPath(const_cast<wchar_t*>(sys_path.c_str()));
-      dout(10) << "Computed sys.path '"
-	       << string(begin(sys_path), end(sys_path)) << "'" << dendl;
     }
   }
   // Environment is all good, import the external module
@@ -733,6 +669,7 @@ int PyModule::load_subclass_of(const char* base_class, PyObject** py_class)
     error_string = peek_pyerror();
     derr << "Module not found: '" << module_name << "'" << dendl;
     derr << handle_pyerror(true, module_name, "PyModule::load_subclass_of") << dendl;
+    Py_DECREF(mgr_module_type);
     return -ENOENT;
   }
   auto locals = PyModule_GetDict(plugin_module);
@@ -773,6 +710,8 @@ PyModule::~PyModule()
     Gil gil(pMyThreadState, true);
     Py_XDECREF(pClass);
     Py_XDECREF(pStandbyClass);
+    Py_EndInterpreter(pMyThreadState.ts);
+    pMyThreadState.ts = nullptr;
   }
 }
 

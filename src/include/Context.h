@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,7 +22,10 @@
 #include <functional>
 #include <list>
 #include <memory>
+
+#ifdef DEBUG_GATHER
 #include <set>
+#endif
 
 #include <boost/function.hpp>
 #include <boost/system/error_code.hpp>

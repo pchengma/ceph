@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "compression_onwire.h"
 #include "compression_meta.h"
@@ -81,6 +81,14 @@ std::optional<ceph::bufferlist> RxHandler::decompress(const ceph::bufferlist &in
 void TxHandler::done()
 {
   ldout(m_cct, 25) << __func__ << " compression ratio=" << get_ratio() << dendl;
+}
+
+std::string_view RxHandler::compressor_name() const {
+  return m_compressor->get_type_name();
+}
+
+std::string_view TxHandler::compressor_name() const {
+  return m_compressor->get_type_name();
 }
 
 } // namespace ceph::compression::onwire

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "tools/rbd_mirror/image_replayer/Utils.h"
 #include "include/rados/librados.hpp"
@@ -42,7 +42,7 @@ bool decode_client_meta(const cls::journal::Client& client,
     return false;
   }
 
-  auto local_client_meta = boost::get<librbd::journal::MirrorPeerClientMeta>(
+  auto local_client_meta = std::get_if<librbd::journal::MirrorPeerClientMeta>(
     &client_data.client_meta);
   if (local_client_meta == nullptr) {
     derr << "unknown peer registration" << dendl;

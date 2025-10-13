@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
   *
@@ -25,11 +26,13 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <queue>
 
 #include "acconfig.h"
 #include "common/ceph_mutex.h"
 #include "include/common_fwd.h"
 #include "extblkdev/ExtBlkDevInterface.h"
+#include "osd/osd_types.h"
 
 #if defined(HAVE_LIBAIO) || defined(HAVE_POSIXAIO)
 #include "aio/aio.h"
@@ -148,6 +151,8 @@ class BlockDevice {
 public:
   CephContext* cct;
   typedef void (*aio_callback_t)(void *handle, void *aio);
+  void collect_alerts(osd_alert_list_t& alerts, const std::string& device_name);
+
 private:
   ceph::mutex ioc_reap_lock = ceph::make_mutex("BlockDevice::ioc_reap_lock");
   std::vector<IOContext*> ioc_reap_queue;
@@ -164,11 +169,14 @@ private:
     pmem,
 #endif
   };
+  std::queue <ceph::mono_clock::time_point> stalled_read_event_queue;
+  ceph::mutex stalled_read_event_queue_lock = ceph::make_mutex("BlockDevice::stalled_read_event_queue_lock");
+  size_t trim_stalled_read_event_queue(mono_clock::time_point cur_time);
   static block_device_t detect_device_type(const std::string& path);
   static block_device_t device_type_from_name(const std::string& blk_dev_name);
   static BlockDevice *create_with_type(block_device_t device_type,
     CephContext* cct, const std::string& path, aio_callback_t cb,
-    void *cbpriv, aio_callback_t d_cb, void *d_cbpriv);
+    void *cbpriv, aio_callback_t d_cb, void *d_cbpriv, const char* dev_name);
 
 protected:
   uint64_t size = 0;
@@ -187,6 +195,7 @@ protected:
   // of the drive.  The zones 524-52155 are sequential zones.
   uint64_t conventional_region_size = 0;
   uint64_t zone_size = 0;
+  void add_stalled_read_event();
 
 public:
   aio_callback_t aio_callback;
@@ -199,7 +208,8 @@ public:
   virtual ~BlockDevice() = default;
 
   static BlockDevice *create(
-    CephContext* cct, const std::string& path, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb, void *d_cbpriv);
+    CephContext* cct, const std::string& path, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb,
+    void *d_cbpriv, const char* dev_name = "");
   virtual bool supported_bdev_label() { return true; }
   virtual bool is_rotational() { return rotational; }
 
@@ -233,6 +243,7 @@ public:
   uint64_t get_size() const { return size; }
   uint64_t get_block_size() const { return block_size; }
   uint64_t get_optimal_io_size() const { return optimal_io_size; }
+  bool is_discard_supported() const { return support_discard; }
 
   /// hook to provide utilization of thinly-provisioned device
   virtual int get_ebd_state(ExtBlkDevState &state) const {
@@ -284,7 +295,9 @@ public:
     bool buffered,
     int write_hint = WRITE_LIFE_NOT_SET) = 0;
   virtual int flush() = 0;
-  virtual bool try_discard(interval_set<uint64_t> &to_release, bool async=true) { return false; }
+  virtual bool try_discard(interval_set<uint64_t> &to_release,
+                           bool async=true,
+                           bool force=false) { return false; }
   virtual void discard_drain() { return; }
   virtual void swap_discard_queued(interval_set<uint64_t>& other)  { other.clear(); }
   // for managing buffered readers/writers
@@ -293,6 +306,9 @@ public:
   virtual void close() = 0;
 
   struct hugepaged_raw_marker_t {};
+
+  std::atomic<size_t> discard_queue_bytes = 0;
+  std::atomic<uint64_t> discard_queue_length = 0;
 
 protected:
   bool is_valid_io(uint64_t off, uint64_t len) const;

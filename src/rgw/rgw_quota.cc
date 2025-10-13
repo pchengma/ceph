@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -16,6 +16,7 @@
 
 #include "include/function2.hpp"
 #include "include/utime.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/lru_map.h"
 #include "common/RefCountedObj.h"
 #include "common/Thread.h"
@@ -29,7 +30,6 @@
 #include "rgw_user.h"
 
 #include "services/svc_sys_obj.h"
-#include "services/svc_meta.h"
 
 #include <atomic>
 
@@ -267,7 +267,7 @@ int RGWBucketStatsCache::fetch_stats_from_storage(const rgw_owner& owner, const 
   string master_ver;
 
   map<RGWObjCategory, RGWStorageStats> bucket_stats;
-  r = bucket->read_stats(dpp, index, RGW_NO_SHARD, &bucket_ver,
+  r = bucket->read_stats(dpp, y, index, RGW_NO_SHARD, &bucket_ver,
 			 &master_ver, bucket_stats, nullptr);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "could not get bucket stats for bucket="
@@ -363,7 +363,7 @@ class RGWOwnerStatsCache : public RGWQuotaCache<rgw_owner> {
       // option, so we can assume it won't change while the RGW server
       // is running, so we'll handle it once before we loop
       double sync_interval_factor = 1.0;
-      const uint64_t debug_interval = cct->_conf->rgw_reshard_debug_interval;
+      const int64_t debug_interval = cct->_conf->rgw_reshard_debug_interval;
       if (debug_interval >= 1) {
 	  constexpr double secs_per_day = 60 * 60 * 24;
 	  sync_interval_factor = debug_interval / secs_per_day;
@@ -1039,14 +1039,16 @@ void RGWQuotaInfo::dump(Formatter *f) const
   f->dump_int("max_objects", max_objects);
 }
 
-void RGWQuotaInfo::generate_test_instances(std::list<RGWQuotaInfo*>& o)
+std::list<RGWQuotaInfo> RGWQuotaInfo::generate_test_instances()
 {
-  o.push_back(new RGWQuotaInfo);
-  o.push_back(new RGWQuotaInfo);
-  o.back()->enabled = true;
-  o.back()->check_on_raw = true;
-  o.back()->max_size = 1024;
-  o.back()->max_objects = 1;
+  std::list<RGWQuotaInfo> o;
+  o.emplace_back();
+  o.emplace_back();
+  o.back().enabled = true;
+  o.back().check_on_raw = true;
+  o.back().max_size = 1024;
+  o.back().max_objects = 1;
+  return o;
 }
 
 void RGWQuotaInfo::decode_json(JSONObj *obj)

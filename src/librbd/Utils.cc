@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
@@ -28,6 +28,18 @@ namespace util {
 namespace {
 
 const std::string CONFIG_KEY_URI_PREFIX{"config://"};
+
+uint32_t quiesce_mode_to_snap_create_flags(const std::string& mode) {
+  if (mode == "required") {
+    return 0;
+  } else if (mode == "ignore-error") {
+    return RBD_SNAP_CREATE_IGNORE_QUIESCE_ERROR;
+  } else if (mode == "skip") {
+    return RBD_SNAP_CREATE_SKIP_QUIESCE;
+  } else {
+    ceph_abort_msg("invalid rbd_default_snapshot_quiesce_mode");
+  }
+}
 
 } // anonymous namespace
 
@@ -181,15 +193,15 @@ uint32_t get_default_snap_create_flags(ImageCtx *ictx) {
   auto mode = ictx->config.get_val<std::string>(
       "rbd_default_snapshot_quiesce_mode");
 
-  if (mode == "required") {
-    return 0;
-  } else if (mode == "ignore-error") {
-    return RBD_SNAP_CREATE_IGNORE_QUIESCE_ERROR;
-  } else if (mode == "skip") {
-    return RBD_SNAP_CREATE_SKIP_QUIESCE;
-  } else {
-    ceph_abort_msg("invalid rbd_default_snapshot_quiesce_mode");
-  }
+  return quiesce_mode_to_snap_create_flags(mode);
+}
+
+uint32_t get_default_snap_create_flags(librados::IoCtx& group_ioctx) {
+  auto cct = reinterpret_cast<CephContext*>(group_ioctx.cct());
+  auto mode = cct->_conf.get_val<std::string>(
+      "rbd_default_snapshot_quiesce_mode");
+
+  return quiesce_mode_to_snap_create_flags(mode);
 }
 
 SnapContext get_snap_context(

@@ -4,15 +4,13 @@
 SMB Service
 ===========
 
-.. note:: Only the SMB3 protocol is supported.
-
 .. warning::
 
     SMB support is under active development and many features may be
-    missing or immature. Additionally, a Manager module to automate
-    SMB clusters and SMB shares is in development. Once that feature
-    is developed it will be the preferred method for managing
-    SMB on ceph.
+    missing or immature. A Ceph MGR module, named smb, is available to help
+    organize and manage SMB related featues. Unless the smb module
+    has been determined to be unsuitable for your needs we recommend using that
+    module over directly using the smb service spec.
 
 
 Deploying Samba Containers
@@ -26,7 +24,7 @@ Samba Containers with the following command:
 
 .. prompt:: bash #
 
-    orch apply smb <cluster_id> <config_uri> [--features ...] [--placement ...] ...
+    ceph orch apply smb <cluster_id> <config_uri> [--features ...] [--placement ...] ...
 
 There are a number of additional parameters that the command accepts. See
 the Service Specification for a description of these options.
@@ -78,6 +76,7 @@ features
     An empty list is valid. Supported terms:
 
     * ``domain``: Enable domain member mode
+    * ``clustered``: Enable Samba native cluster mode
 
 config_uri
     A string containing a (standard or de-facto) URI that identifies a
@@ -85,6 +84,11 @@ config_uri
     primary configuration file.
     Supported URI schemes include ``http:``, ``https:``, ``rados:``, and
     ``rados:mon-config-key:``.
+
+user_sources
+    A list of strings with (standard or de-facto) URI values that will
+    be used to identify where credentials for authentication are located.
+    See ``config_uri`` for the supported list of URI schemes.
 
 join_sources
     A list of strings with (standard or de-facto) URI values that will
@@ -99,10 +103,80 @@ custom_dns
     Active Directory even if the Ceph host nodes are not tied into the Active
     Directory DNS domain(s).
 
-include_ceph_users:
+custom_ports
+    A mapping of service names to port numbers that will override the
+    default ports used for those services. The service names are:
+    ``smb``, ``smbmetrics``, and ``ctdb``. If a service name is not
+    present in the mapping the default port will be used.
+    For example, ``{"smb": 4455, "smbmetrics": 9009}`` will change the
+    ports used by smb for client access and the metrics exporter, but
+    not change the port used by the CTDB clustering daemon.
+
+bind_addrs
+    A list of objects indicating what IP address or IP network the
+    SMB and related services may bind to. The fields described for these
+    objects are mutually exclusive, but at least one field is required.
+    Fields:
+
+    address
+        Optional. A single IP address represented as a string. For example,
+        ``192.168.7.50``.
+    network
+        Optional. A single IP network represented as a string. A network
+        can be used to specify a range of many IP addresses. The network
+        string always includes a "/" character before a prefix length.
+        For example, ``192.168.7.0/24``.
+
+include_ceph_users
     A list of cephx user (aka entity) names that the Samba Containers may use.
     The cephx keys for each user in the list will automatically be added to
     the keyring in the container.
+
+cluster_meta_uri
+    A string containing a URI that identifies where the cluster structure
+    metadata will be stored. Required if ``clustered`` feature is set. Must be
+    a RADOS pseudo-URI.
+
+cluster_lock_uri
+    A string containing a URI that identifies where Samba/CTDB will store a
+    cluster lock. Required if ``clustered`` feature is set. Must be a RADOS
+    pseudo-URI.
+
+cluster_public_addrs
+    List of objects; optional. Supported only when using Samba's clustering.
+    Assign "virtual" IP addresses that will be managed by the clustering
+    subsystem and may automatically move between nodes running Samba
+    containers.
+    Fields:
+
+    address
+        Required string. An IP address with a required prefix length (example:
+        ``192.168.4.51/24``). This address will be assigned to one of the
+        host's network devices and managed automatically.
+    destination
+        Optional. String or list of strings. A ``destination`` defines where
+        the system will assign the managed IPs. Each string value must be a
+        network address (example ``192.168.4.0/24``). One or more destinations
+        may be supplied. The typical case is to use exactly one destination and
+        so the value may be supplied as a string, rather than a list with a
+        single item. Each destination network will be mapped to a device on a
+        host. Run ``cephadm list-networks`` for an example of these mappings.
+        If destination is not supplied the network is automatically determined
+        using the address value supplied and taken as the destination.
+
+
+.. note::
+
+   If one desires clustering between smbd instances (also known as
+   High-Availability or "transparent state migration") the feature flag
+   ``clustered`` is needed. If this flag is not specified cephadm may deploy
+   multiple smb servers but they will lack the coordination needed of an actual
+   Highly-Avaiable cluster. When the ``clustered`` flag is specified cephadm
+   will deploy additional containers that manage this coordination.
+   Additionally, the cluster_meta_uri and cluster_lock_uri values must be
+   specified. The former is used by cephadm to describe the smb cluster layout
+   to the samba containers. The latter is used by Samba's CTDB component to
+   manage an internal cluster lock.
 
 
 Configuring an SMB Service
@@ -129,7 +203,7 @@ it accepts.
 When one has composed a configuration it should be stored in a location
 that the Samba Container can access. The recommended approach for running
 Samba Containers within Ceph orchestration is to store the configuration
-in the Ceph cluster. There are two ways to store the configuration
+in the Ceph cluster. There are a few ways to store the configuration
 in ceph:
 
 RADOS
@@ -197,9 +271,5 @@ A non-exhaustive list of important limitations for the SMB service follows:
   configured so that it can resolve the Active Directory (AD) domain or the
   ``custom_dns`` option may be used. In both cases DNS hosts for the AD domain
   must still be reachable from whatever network segment the ceph cluster is on.
-* Proper clustering/high-availability/"transparent state migration" is not yet
-  supported. If a placement causes more than service to be created these
-  services will act independently and may lead to unexpected behavior if clients
-  access the same files at once.
 * Services must bind to TCP port 445. Running multiple SMB services on the same
   node is not yet supported and will trigger a port-in-use conflict.

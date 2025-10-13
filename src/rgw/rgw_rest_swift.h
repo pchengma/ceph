@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 #define TIME_BUF_SIZE 128
@@ -86,6 +86,7 @@ public:
   RGWStatBucket_ObjStore_SWIFT() {}
   ~RGWStatBucket_ObjStore_SWIFT() override {}
 
+  int get_params(optional_yield y) override { return 0; }
   void send_response() override;
 };
 

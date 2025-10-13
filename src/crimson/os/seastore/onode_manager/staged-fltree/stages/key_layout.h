@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -46,9 +46,9 @@ static laddr_t get_lba_hint(shard_t shard, pool_t pool, crush_hash_t crush) {
   // FIXME: It is possible that PGs from different pools share the same prefix
   // if the mask 0xFF is not long enough, result in unexpected transaction
   // conflicts.
-  return ((uint64_t)(shard & 0XFF)<<56 |
-          (uint64_t)(pool  & 0xFF)<<48 |
-          (uint64_t)(crush       )<<16);
+  return laddr_t::from_raw_uint((uint64_t)(shard & 0xFF)<<56 |
+                                (uint64_t)(pool  & 0xFF)<<48 |
+                                (uint64_t)(crush       )<<16);
 }
 
 struct node_offset_packed_t {
@@ -178,7 +178,7 @@ struct string_key_view_t {
     } else if (dedup_type == Type::MAX) {
       len = MARKER_MAX;
     } else {
-      ceph_abort("impossible path");
+      ceph_abort_msg("impossible path");
     }
     std::memcpy(p_append, &len, sizeof(string_size_t));
   }
@@ -430,7 +430,7 @@ class key_hobj_t {
    * common interfaces as a full_key_t
    */
   shard_t shard() const {
-    return ghobj.shard_id;
+    return static_cast<shard_t>(ghobj.shard_id);
   }
   pool_t pool() const {
     return ghobj.hobj.pool;

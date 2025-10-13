@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -60,14 +61,13 @@
 #include <list>
 #include <map>
 
-#include "Objecter.h"
 #include "Filer.h"
 
-#include "common/Timer.h"
 #include "common/Throttle.h"
 #include "include/common_fwd.h"
 
 class Context;
+class Objecter;
 class Finisher;
 class C_OnFinisher;
 
@@ -186,19 +186,33 @@ public:
       f->close_section(); // journal_header
     }
 
-    static void generate_test_instances(std::list<Header*> &ls)
+    void print(std::ostream& os) const {
+      os << std::hex
+         << "Journaler::Header"
+            "(t=" << trimmed_pos
+         << " e=" << expire_pos
+         << " w=" << write_pos
+         << ")"
+         << std::dec;
+    }
+
+    static std::list<Header> generate_test_instances()
     {
-      ls.push_back(new Header());
+      std::list<Header> ls;
 
-      ls.push_back(new Header());
-      ls.back()->trimmed_pos = 1;
-      ls.back()->expire_pos = 2;
-      ls.back()->unused_field = 3;
-      ls.back()->write_pos = 4;
-      ls.back()->magic = "magique";
+      ls.push_back(Header());
 
-      ls.push_back(new Header());
-      ls.back()->stream_format = JOURNAL_FORMAT_RESILIENT;
+      ls.push_back(Header());
+      ls.back().trimmed_pos = 1;
+      ls.back().expire_pos = 2;
+      ls.back().unused_field = 3;
+      ls.back().write_pos = 4;
+      ls.back().magic = "magique";
+
+      ls.push_back(Header());
+      ls.back().stream_format = JOURNAL_FORMAT_RESILIENT;
+
+      return ls;
     }
   };
   WRITE_CLASS_ENCODER(Header)
@@ -207,15 +221,14 @@ public:
     return stream_format;
   }
 
-  Header last_committed;
-
 private:
   // me
+  Header last_committed;
   CephContext *cct;
-  std::mutex lock;
+  mutable ceph::mutex lock;
   const std::string name;
-  typedef std::lock_guard<std::mutex> lock_guard;
-  typedef std::unique_lock<std::mutex> unique_lock;
+  typedef std::lock_guard<ceph::mutex> lock_guard;
+  typedef std::unique_lock<ceph::mutex> unique_lock;
   Finisher *finisher;
   Header last_written;
   inodeno_t ino;
@@ -396,26 +409,7 @@ private:
 
 public:
   Journaler(const std::string &name_, inodeno_t ino_, int64_t pool,
-      const char *mag, Objecter *obj, PerfCounters *l, int lkey, Finisher *f) :
-    last_committed(mag),
-    cct(obj->cct), name(name_), finisher(f), last_written(mag),
-    ino(ino_), pg_pool(pool), readonly(true),
-    stream_format(-1), journal_stream(-1),
-    magic(mag),
-    objecter(obj), filer(objecter, f), logger(l), logger_key_lat(lkey),
-    delay_flush_event(0),
-    state(STATE_UNDEF), error(0),
-    prezeroing_pos(0), prezero_pos(0), write_pos(0), flush_pos(0),
-    safe_pos(0), next_safe_pos(0),
-    write_buf_throttle(cct, "write_buf_throttle", UINT_MAX - (UINT_MAX >> 3)),
-    waiting_for_zero_pos(0),
-    read_pos(0), requested_pos(0), received_pos(0),
-    fetch_len(0), temp_fetch_len(0),
-    on_readable(0), on_write_error(NULL), called_write_error(false),
-    expire_pos(0), trimming_pos(0), trimmed_pos(0), readable(false),
-    write_iohint(0)
-  {
-  }
+	    const char *mag, Objecter *obj, PerfCounters *l, int lkey, Finisher *f);
 
   /* reset
    *
@@ -518,24 +512,65 @@ public:
 
   // Synchronous getters
   // ===================
-  // TODO: need some locks on reads for true safety
+
+  Header get_last_committed() const {
+    lock_guard l(lock);
+    return last_committed;
+  }
+  Header get_last_written() const {
+    lock_guard l(lock);
+    return last_written;
+  }
+
   uint64_t get_layout_period() const {
+    lock_guard l(lock);
     return layout.get_period();
   }
-  file_layout_t& get_layout() { return layout; }
-  bool is_active() { return state == STATE_ACTIVE; }
-  bool is_stopping() { return state == STATE_STOPPING; }
-  int get_error() { return error; }
-  bool is_readonly() { return readonly; }
+  file_layout_t get_layout() const {
+    lock_guard l(lock);
+    return layout;
+  }
+  bool is_active() const {
+    lock_guard l(lock);
+    return state == STATE_ACTIVE;
+  }
+  bool is_stopping() const {
+    lock_guard l(lock);
+    return state == STATE_STOPPING;
+  }
+  int get_error() const {
+    lock_guard l(lock);
+    return error;
+  }
+  bool is_readonly() const {
+    lock_guard l(lock);
+    return readonly;
+  }
   bool is_readable();
   bool _is_readable();
   bool try_read_entry(bufferlist& bl);
-  uint64_t get_write_pos() const { return write_pos; }
-  uint64_t get_write_safe_pos() const { return safe_pos; }
-  uint64_t get_read_pos() const { return read_pos; }
-  uint64_t get_expire_pos() const { return expire_pos; }
-  uint64_t get_trimmed_pos() const { return trimmed_pos; }
+  uint64_t get_write_pos() const {
+    lock_guard l(lock);
+    return write_pos;
+  }
+  uint64_t get_write_safe_pos() const {
+    lock_guard l(lock);
+    return safe_pos;
+  }
+  uint64_t get_read_pos() const {
+    lock_guard l(lock);
+    return read_pos;
+  }
+  uint64_t get_expire_pos() const {
+    lock_guard l(lock);
+    return expire_pos;
+  }
+  uint64_t get_trimmed_pos() const {
+    lock_guard l(lock);
+    return trimmed_pos;
+  }
   size_t get_journal_envelope_size() const { 
+    lock_guard l(lock);
     return journal_stream.get_envelope_size(); 
   }
   void check_isreadable();

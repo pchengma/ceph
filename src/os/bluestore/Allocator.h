@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,6 +17,10 @@
 #include <ostream>
 #include "include/ceph_assert.h"
 #include "bluestore_types.h"
+#include "common/ceph_mutex.h"
+
+typedef interval_set<uint64_t> release_set_t;
+typedef release_set_t::value_type release_set_entry_t;
 
 class Allocator {
 public:
@@ -49,7 +54,7 @@ public:
 
   /* Bulk release. Implementations may override this method to handle the whole
    * set at once. This could save e.g. unnecessary mutex dance. */
-  virtual void release(const interval_set<uint64_t>& release_set) = 0;
+  virtual void release(const release_set_t& release_set) = 0;
   void release(const PExtentVector& release_set);
 
   virtual void dump() = 0;
@@ -76,7 +81,7 @@ public:
     );
 
 
-  const std::string& get_name() const;
+  virtual const std::string& get_name() const = 0;
   int64_t get_capacity() const
   {
     return device_size;
@@ -86,40 +91,6 @@ public:
     return block_size;
   }
 
-  // The following code build Allocator's free extents histogram.
-  // Which is a set of N buckets to track extents layout.
-  // Extent matches a bucket depending on its length using the following
-  // length spans:
-  // [0..4K] (4K..16K] (16K..64K] .. (4M..16M] (16M..]
-  // Each bucket tracks:
-  // - total amount of extents of specific lengths
-  // - amount of extents aligned with allocation boundary
-  // - amount of allocation units in aligned extents
-  //
-  struct free_state_hist_bucket {
-    static const size_t base_bits = 12;
-    static const size_t base = 1ull << base_bits;
-    static const size_t mux = 2;
-
-    size_t total = 0;
-    size_t aligned = 0;
-    size_t alloc_units = 0;
-
-    // returns upper bound of the bucket
-    static size_t get_max(size_t bucket, size_t num_buckets) {
-      return
-        bucket < num_buckets - 1 ?
-          base << (mux * bucket) :
-          std::numeric_limits<uint64_t>::max();
-    };
-  };
-
-  typedef std::vector<free_state_hist_bucket> FreeStateHistogram;
-  void build_free_state_histogram(size_t alloc_unit, FreeStateHistogram& hist);
-
-private:
-  class SocketHook;
-  SocketHook* asok_hook = nullptr;
 protected:
   const int64_t device_size = 0;
   const int64_t block_size = 0;

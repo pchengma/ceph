@@ -11,7 +11,7 @@ is a monitor quorum.
 
 If the monitors don't have a quorum or if there are errors with the monitor
 status, address the monitor issues before proceeding by consulting the material
-in `Troubleshooting Monitors <../troubleshooting-mon>`_.
+in :ref:`rados-troubleshooting-mon`.
 
 Next, check your networks to make sure that they are running properly. Networks
 can have a significant impact on OSD operation and performance. Look for
@@ -421,7 +421,7 @@ the full OSD.
    copy of your data on at least one OSD. Deleting placement group directories
    is a rare and extreme intervention. It is not to be undertaken lightly.
 
-See `Monitor Config Reference`_ for more information.
+See :ref:`monitor-config-reference` for more information.
 
 
 OSDs are Slow/Unresponsive
@@ -578,10 +578,6 @@ ENOSPC errors.  We do not recommend ``ext4`` for Filestore OSDs because
 ``xattr`` limitations break support for long object names, which are needed for
 RGW.
 
-For more information, see `Filesystem Recommendations`_.
-
-.. _Filesystem Recommendations: ../configuration/filesystem-recommendations
-
 Insufficient RAM
 ----------------
 
@@ -618,6 +614,7 @@ Possible causes include:
 - A bug in the kernel file system (check ``dmesg`` output)
 - An overloaded cluster (check system load, iostat, etc.)
 - A bug in the ``ceph-osd`` daemon.
+- Suboptimal OSD shard configuration (on HDD based cluster with mClock scheduler)
 
 Possible solutions:
 
@@ -626,6 +623,8 @@ Possible solutions:
 - Upgrade Ceph
 - Restart OSDs
 - Replace failed or failing components
+- Override OSD shard configuration (on HDD based cluster with mClock scheduler)
+    - See :ref:`mclock-tblshoot-hdd-shard-config` for resolution
 
 Debugging Slow Requests
 -----------------------
@@ -680,6 +679,44 @@ Although some of these events may appear redundant, they cross important
 boundaries in the internal code (such as passing data across locks into new
 threads).
 
+.. _mclock-tblshoot-hdd-shard-config:
+
+Slow Requests or Slow Recovery With mClock Scheduler
+----------------------------------------------------
+
+.. note:: This troubleshooting is applicable only for HDD based clusters running
+   mClock scheduler and with the following OSD shard configuration:
+   ``osd_op_num_shards_hdd`` = 5 and ``osd_op_num_threads_per_shard_hdd`` = 1.
+   Also, see :ref:`mclock-hdd-cfg` for details around the reason for the change
+   made to the default OSD HDD shard configuration for mClock.
+
+On scaled HDD based clusters with mClock scheduler enabled and under multiple
+OSD node failure condition, the following could be reported or observed:
+
+- slow requests: This also manifests into degraded client I/O performance.
+- slow background recoveries: Lower than expected recovery throughput.
+
+**Troubleshooting Steps:**
+
+#. Verify from OSD events that the slow requests are predominantly of type
+   ``queued_for_pg``.
+#. Verify if the reported recovery rate is significantly lower than the expected
+   rate considering the QoS allocations for background recovery service.
+
+If either of the above steps are true, then the following resolution may be
+applied. Note that this is disruptive as it involves OSD restarts. Run the
+following commands to change the default OSD shard configuration for HDDs:
+
+.. prompt:: bash
+
+   ceph config set osd osd_op_num_shards_hdd 1
+   ceph config set osd osd_op_num_threads_per_shard_hdd 5
+
+The above configuration won't take effect immediately and would require a
+restart of the OSDs in the environment. For this process to be least disruptive,
+the OSDs may be restarted in a carefully staggered manner.
+
+.. _rados_tshooting_flapping_osd:
 
 Flapping OSDs
 =============
@@ -771,11 +808,8 @@ being marked ``out`` (regardless of the current value of
 
 
 .. _iostat: https://en.wikipedia.org/wiki/Iostat
-.. _Ceph Logging and Debugging: ../../configuration/ceph-conf#ceph-logging-and-debugging
 .. _Logging and Debugging: ../log-and-debug
-.. _Debugging and Logging: ../debug
 .. _Monitor/OSD Interaction: ../../configuration/mon-osd-interaction
-.. _Monitor Config Reference: ../../configuration/mon-config-ref
 .. _monitoring your OSDs: ../../operations/monitoring-osd-pg
 
 .. _monitoring OSDs: ../../operations/monitoring-osd-pg/#monitoring-osds

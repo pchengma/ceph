@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -14,7 +14,7 @@
 // and make_recursive_mutex() factory methods, which take a string
 // naming the mutex for the purposes of the lockdep debug variant.
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include <seastar/core/condition-variable.hh>
 
 #include "crimson/common/log.h"
@@ -83,12 +83,11 @@ namespace ceph {
     return {};
   }
 
-  static constexpr bool mutex_debugging = false;
   #define ceph_mutex_is_locked(m) true
   #define ceph_mutex_is_locked_by_me(m) true
 }
 
-#else  // defined (WITH_SEASTAR) && !defined(WITH_ALIEN)
+#else  // ifdef WITH_CRIMSON
 //
 // For legacy Mutex users that passed recursive=true, use
 // ceph::make_recursive_mutex.  For legacy Mutex users that passed
@@ -130,8 +129,6 @@ namespace ceph {
   shared_mutex make_shared_mutex(Args&& ...args) {
     return {std::forward<Args>(args)...};
   }
-
-  static constexpr bool mutex_debugging = true;
 
   // debug methods
   #define ceph_mutex_is_locked(m) ((m).is_locked())
@@ -186,8 +183,6 @@ namespace ceph {
     return {};
   }
 
-  static constexpr bool mutex_debugging = false;
-
   // debug methods.  Note that these can blindly return true
   // because any code that does anything other than assert these
   // are true is broken.
@@ -202,7 +197,7 @@ namespace ceph {
 
 #endif	// CEPH_DEBUG_MUTEX
 
-#endif	// WITH_SEASTAR
+#endif	// WITH_CRIMSON
 
 namespace ceph {
 

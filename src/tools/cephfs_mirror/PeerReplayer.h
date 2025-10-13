@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_PEER_REPLAYER_H
 #define CEPHFS_MIRROR_PEER_REPLAYER_H
@@ -9,6 +9,9 @@
 #include "mds/FSMap.h"
 #include "ServiceDaemon.h"
 #include "Types.h"
+
+#include <stack>
+#include <boost/optional.hpp>
 
 namespace cephfs {
 namespace mirror {
@@ -101,11 +104,18 @@ private:
   struct SyncEntry {
     std::string epath;
     ceph_dir_result *dirp; // valid for directories
+    ceph_snapdiff_info info;
     struct ceph_statx stx;
     // set by incremental sync _after_ ensuring missing entries
     // in the currently synced snapshot have been propagated to
     // the remote filesystem.
     bool remote_synced = false;
+    // includes parent dentry purge
+    bool purged_or_itype_changed = false;
+    bool is_snapdiff = false;
+
+    SyncEntry() {
+    }
 
     SyncEntry(std::string_view path,
               const struct ceph_statx &stx)
@@ -119,6 +129,14 @@ private:
         dirp(dirp),
         stx(stx) {
     }
+    SyncEntry(std::string_view path,
+              const ceph_snapdiff_info &info,
+              const struct ceph_statx &stx)
+      : epath(path),
+        info(info),
+        stx(stx) {
+      is_snapdiff = true;
+    }
 
     bool is_directory() const {
       return S_ISDIR(stx.stx_mode);
@@ -130,6 +148,91 @@ private:
     void set_remote_synced() {
       remote_synced = true;
     }
+
+    bool is_purged_or_itype_changed() const {
+      return purged_or_itype_changed;
+    }
+    void set_purged_or_itype_changed() {
+      purged_or_itype_changed = true;
+    }
+
+    bool sync_is_snapdiff() const {
+      return is_snapdiff;
+    }
+  };
+
+  class SyncMechanism {
+  public:
+    SyncMechanism(MountRef local, MountRef remote, FHandles *fh,
+                  const Peer &peer, /* keep dout happy */
+                  const Snapshot &current, boost::optional<Snapshot> prev);
+    virtual ~SyncMechanism() = 0;
+
+    virtual int init_sync() = 0;
+
+    virtual int get_entry(std::string *epath, struct ceph_statx *stx, bool *sync_check,
+                          const std::function<int (const std::string&)> &dirsync_func,
+                          const std::function<int (const std::string&)> &purge_func) = 0;
+
+    virtual int get_changed_blocks(const std::string &epath,
+                                   const struct ceph_statx &stx, bool sync_check,
+                                   const std::function<int (uint64_t, struct cblock *)> &callback);
+
+    virtual void finish_sync() = 0;
+
+  protected:
+    MountRef m_local;
+    MountRef m_remote;
+    FHandles *m_fh;
+    Peer m_peer;
+    Snapshot m_current;
+    boost::optional<Snapshot> m_prev;
+    std::stack<PeerReplayer::SyncEntry> m_sync_stack;
+  };
+
+  class RemoteSync : public SyncMechanism {
+  public:
+    RemoteSync(MountRef local, MountRef remote, FHandles *fh,
+               const Peer &peer, /* keep dout happy */
+               const Snapshot &current, boost::optional<Snapshot> prev);
+    ~RemoteSync();
+
+    int init_sync() override;
+
+    int get_entry(std::string *epath, struct ceph_statx *stx, bool *sync_check,
+                  const std::function<int (const std::string&)> &dirsync_func,
+                  const std::function<int (const std::string&)> &purge_func);
+
+    void finish_sync();
+  };
+
+  class SnapDiffSync : public SyncMechanism {
+  public:
+    SnapDiffSync(std::string_view dir_root, MountRef local, MountRef remote,
+                 FHandles *fh, const Peer &peer, const Snapshot &current,
+                 boost::optional<Snapshot> prev);
+    ~SnapDiffSync();
+
+    int init_sync() override;
+
+    int get_entry(std::string *epeth, struct ceph_statx *stx, bool *sync_check,
+                  const std::function<int (const std::string&)> &dirsync_func,
+                  const std::function<int (const std::string&)> &purge_func);
+
+    int get_changed_blocks(const std::string &epath,
+                           const struct ceph_statx &stx, bool sync_check,
+                           const std::function<int (uint64_t, struct cblock *)> &callback);
+
+    void finish_sync();
+
+  private:
+    int init_directory(const std::string &epath,
+                       const struct ceph_statx &stx, bool pic, SyncEntry *se);
+    int next_entry(SyncEntry &entry, std::string *e_name, snapid_t *snapid);
+    void fini_directory(SyncEntry &entry);
+
+    std::string m_dir_root;
+    std::map<std::string, std::set<std::string>> m_deleted;
   };
 
   // stats sent to service daemon
@@ -141,6 +244,7 @@ private:
   struct SnapSyncStat {
     uint64_t nr_failures = 0; // number of consecutive failures
     boost::optional<monotime> last_failed; // lat failed timestamp
+    boost::optional<std::string> last_failed_reason;
     bool failed = false; // hit upper cap for consecutive failures
     boost::optional<std::pair<uint64_t, std::string>> last_synced_snap;
     boost::optional<std::pair<uint64_t, std::string>> current_syncing_snap;
@@ -149,6 +253,8 @@ private:
     uint64_t renamed_snap_count = 0;
     monotime last_synced = clock::zero();
     boost::optional<double> last_sync_duration;
+    boost::optional<uint64_t> last_sync_bytes; //last sync bytes for display in status
+    uint64_t sync_bytes = 0; //sync bytes counter, independently for each directory sync.
   };
 
   void _inc_failed_count(const std::string &dir_root) {
@@ -175,6 +281,7 @@ private:
     sync_stat.nr_failures = 0;
     sync_stat.failed = false;
     sync_stat.last_failed = boost::none;
+    sync_stat.last_failed_reason = boost::none;
   }
 
   void _set_last_synced_snap(const std::string &dir_root, uint64_t snap_id,
@@ -187,6 +294,8 @@ private:
                             const std::string &snap_name) {
     std::scoped_lock locker(m_lock);
     _set_last_synced_snap(dir_root, snap_id, snap_name);
+    auto &sync_stat = m_snap_sync_stats.at(dir_root);
+    sync_stat.sync_bytes = 0;
   }
   void set_current_syncing_snap(const std::string &dir_root, uint64_t snap_id,
                                 const std::string &snap_name) {
@@ -216,9 +325,14 @@ private:
     auto &sync_stat = m_snap_sync_stats.at(dir_root);
     sync_stat.last_synced = clock::now();
     sync_stat.last_sync_duration = duration;
+    sync_stat.last_sync_bytes = sync_stat.sync_bytes;
     ++sync_stat.synced_snap_count;
   }
-
+  void inc_sync_bytes(const std::string &dir_root, const uint64_t& b) {
+    std::scoped_lock locker(m_lock);
+    auto &sync_stat = m_snap_sync_stats.at(dir_root);
+    sync_stat.sync_bytes += b;
+  }
   bool should_backoff(const std::string &dir_root, int *retval) {
     if (m_fs_mirror->is_blocklisted()) {
       *retval = -EBLOCKLISTED;
@@ -296,22 +410,23 @@ private:
   int open_dir(MountRef mnt, const std::string &dir_path, boost::optional<uint64_t> snap_id);
   int pre_sync_check_and_open_handles(const std::string &dir_root, const Snapshot &current,
                                       boost::optional<Snapshot> prev, FHandles *fh);
-  void post_sync_close_handles(const FHandles &fh);
 
   int do_synchronize(const std::string &dir_root, const Snapshot &current,
                      boost::optional<Snapshot> prev);
-
-  int do_synchronize(const std::string &dir_root, const Snapshot &current);
+  int do_synchronize(const std::string &dir_root, const Snapshot &current) {
+    return do_synchronize(dir_root, current, boost::none);
+  }
 
   int synchronize(const std::string &dir_root, const Snapshot &current,
                   boost::optional<Snapshot> prev);
   int do_sync_snaps(const std::string &dir_root);
 
   int remote_mkdir(const std::string &epath, const struct ceph_statx &stx, const FHandles &fh);
-  int remote_file_op(const std::string &dir_root, const std::string &epath, const struct ceph_statx &stx,
-                     const FHandles &fh, bool need_data_sync, bool need_attr_sync);
+  int remote_file_op(SyncMechanism *syncm, const std::string &dir_root,
+                     const std::string &epath, const struct ceph_statx &stx,
+                     bool sync_check, const FHandles &fh, bool need_data_sync, bool need_attr_sync);
   int copy_to_remote(const std::string &dir_root, const std::string &epath, const struct ceph_statx &stx,
-                     const FHandles &fh);
+                     const FHandles &fh, uint64_t num_blocks, struct cblock *b);
   int sync_perms(const std::string& path);
 };
 

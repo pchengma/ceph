@@ -1,8 +1,8 @@
 # test_rados
-add_executable(ceph_test_rados 
+add_executable(ceph_test_rados
   TestRados.cc
   TestOpStat.cc
-  Object.cc 
+  Object.cc
   RadosModel.cc
   )
 target_link_libraries(ceph_test_rados
@@ -17,6 +17,15 @@ target_link_libraries(ceph_test_rados
   )
 install(TARGETS
   ceph_test_rados
+  DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(ceph_test_rados_io_sequence
+  ${CMAKE_CURRENT_SOURCE_DIR}/ceph_test_rados_io_sequence/ceph_test_rados_io_sequence.cc)
+add_dependencies(ceph_test_rados_io_sequence erasure_code_plugins)
+target_link_libraries(ceph_test_rados_io_sequence
+  librados global object_io_exerciser json_structures ec_consistency)
+install(TARGETS
+  ceph_test_rados_io_sequence
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # test_stale_read
@@ -52,12 +61,29 @@ add_executable(unittest_osd_types
 add_ceph_unittest(unittest_osd_types)
 target_link_libraries(unittest_osd_types global)
 
+# unittest_ecbackend_l (legacy EC)
+add_executable(unittest_ecbackend_l
+  TestECBackendL.cc
+  $<TARGET_OBJECTS:unit-main>
+  )
+add_ceph_unittest(unittest_ecbackend_l)
+target_link_libraries(unittest_ecbackend_l osd global)
+
 # unittest_ecbackend
 add_executable(unittest_ecbackend
   TestECBackend.cc
+  $<TARGET_OBJECTS:unit-main>
   )
 add_ceph_unittest(unittest_ecbackend)
 target_link_libraries(unittest_ecbackend osd global)
+
+# unittest_ecutil
+add_executable(unittest_ecutil
+        TestECUtil.cc
+        $<TARGET_OBJECTS:unit-main>
+)
+add_ceph_unittest(unittest_ecutil)
+target_link_libraries(unittest_ecutil osd global)
 
 # unittest_osdscrub
 add_executable(unittest_osdscrub
@@ -75,13 +101,6 @@ add_executable(unittest_scrubber_be
   )
 add_ceph_unittest(unittest_scrubber_be)
 target_link_libraries(unittest_scrubber_be osd os global ${CMAKE_DL_LIBS} mon ${BLKID_LIBRARIES})
-
-# unittest_scrub_sched
-add_executable(unittest_scrub_sched
-  test_scrub_sched.cc
-  )
-add_ceph_unittest(unittest_scrub_sched)
-target_link_libraries(unittest_scrub_sched osd os global ${CMAKE_DL_LIBS} mon ${BLKID_LIBRARIES})
 
 # unittest_pglog
 add_executable(unittest_pglog
@@ -110,6 +129,13 @@ endif()
 add_ceph_unittest(unittest_osd_osdcap)
 target_link_libraries(unittest_osd_osdcap osd global ${BLKID_LIBRARIES})
 
+# unittest ExtentCache (Legacy)
+add_executable(unittest_extent_cache_l
+  test_extent_cache_l.cc
+)
+add_ceph_unittest(unittest_extent_cache_l)
+target_link_libraries(unittest_extent_cache_l osd global ${BLKID_LIBRARIES})
+
 # unittest ExtentCache
 add_executable(unittest_extent_cache
   test_extent_cache.cc
@@ -124,6 +150,13 @@ add_executable(unittest_pg_transaction
 add_ceph_unittest(unittest_pg_transaction)
 target_link_libraries(unittest_pg_transaction osd global ${BLKID_LIBRARIES})
 
+# unittest ECTransaction (Legacy)
+add_executable(unittest_ec_transaction_l
+  test_ec_transaction_l.cc
+)
+add_ceph_unittest(unittest_ec_transaction_l)
+target_link_libraries(unittest_ec_transaction_l osd global ${BLKID_LIBRARIES})
+
 # unittest ECTransaction
 add_executable(unittest_ec_transaction
   test_ec_transaction.cc
@@ -131,6 +164,7 @@ add_executable(unittest_ec_transaction
 add_ceph_unittest(unittest_ec_transaction)
 target_link_libraries(unittest_ec_transaction osd global ${BLKID_LIBRARIES})
 
+# unittest_mclock_scheduler
 # unittest_mclock_scheduler
 add_executable(unittest_mclock_scheduler
   TestMClockScheduler.cc

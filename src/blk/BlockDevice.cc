@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
   *
@@ -42,6 +43,7 @@
 #define dout_prefix *_dout << "bdev "
 
 using std::string;
+using ceph::mono_clock;
 
 
 blk_access_mode_t buffermode(bool buffered) 
@@ -139,13 +141,13 @@ BlockDevice::device_type_from_name(const std::string& blk_dev_name)
 
 BlockDevice* BlockDevice::create_with_type(block_device_t device_type,
   CephContext* cct, const std::string& path, aio_callback_t cb,
-  void *cbpriv, aio_callback_t d_cb, void *d_cbpriv)
+  void *cbpriv, aio_callback_t d_cb, void *d_cbpriv, const char* dev_name)
 {
 
   switch (device_type) {
 #if defined(HAVE_LIBAIO) || defined(HAVE_POSIXAIO)
   case block_device_t::aio:
-    return new KernelDevice(cct, cb, cbpriv, d_cb, d_cbpriv);
+    return new KernelDevice(cct, cb, cbpriv, d_cb, d_cbpriv, dev_name);
 #endif
 #if defined(HAVE_SPDK)
   case block_device_t::spdk:
@@ -163,7 +165,7 @@ BlockDevice* BlockDevice::create_with_type(block_device_t device_type,
 
 BlockDevice *BlockDevice::create(
     CephContext* cct, const string& path, aio_callback_t cb,
-    void *cbpriv, aio_callback_t d_cb, void *d_cbpriv)
+    void *cbpriv, aio_callback_t d_cb, void *d_cbpriv, const char* dev_name)
 {
   const string blk_dev_name = cct->_conf.get_val<string>("bdev_type");
   block_device_t device_type = block_device_t::unknown;
@@ -172,7 +174,7 @@ BlockDevice *BlockDevice::create(
   } else {
     device_type = device_type_from_name(blk_dev_name);
   }
-  return create_with_type(device_type, cct, path, cb, cbpriv, d_cb, d_cbpriv);
+  return create_with_type(device_type, cct, path, cb, cbpriv, d_cb, d_cbpriv, dev_name);
 }
 
 bool BlockDevice::is_valid_io(uint64_t off, uint64_t len) const {
@@ -191,3 +193,60 @@ bool BlockDevice::is_valid_io(uint64_t off, uint64_t len) const {
   }
   return ret;
 }
+
+size_t BlockDevice::trim_stalled_read_event_queue(mono_clock::time_point cur_time) {
+  std::lock_guard lock(stalled_read_event_queue_lock);
+  auto warn_duration = std::chrono::seconds(cct->_conf->bdev_stalled_read_warn_lifetime);
+  while (!stalled_read_event_queue.empty() && 
+    ((stalled_read_event_queue.front() < cur_time - warn_duration) ||
+      (stalled_read_event_queue.size() > cct->_conf->bdev_stalled_read_warn_threshold))) {
+      stalled_read_event_queue.pop();
+  }
+  return stalled_read_event_queue.size();
+}
+
+void BlockDevice::add_stalled_read_event() {
+  if (!cct->_conf->bdev_stalled_read_warn_threshold) {
+    return;
+  }
+  auto cur_time = mono_clock::now();
+  {
+    std::lock_guard lock(stalled_read_event_queue_lock);
+    stalled_read_event_queue.push(cur_time);
+  }
+  trim_stalled_read_event_queue(cur_time);
+}
+
+void BlockDevice::collect_alerts(osd_alert_list_t& alerts, const std::string& device_name) {
+  if (cct->_conf->bdev_stalled_read_warn_threshold) {
+    size_t qsize = trim_stalled_read_event_queue(mono_clock::now());
+    if (qsize >= cct->_conf->bdev_stalled_read_warn_threshold) {
+      std::ostringstream ss;
+      ss << "observed stalled read indications in "
+        << device_name << " device";
+      alerts.emplace(device_name + "_DEVICE_STALLED_READ_ALERT", ss.str());
+    }
+  }
+  if (support_discard && cct->_conf->bdev_enable_discard) {
+    size_t current_discarded_bytes = discard_queue_bytes.load();
+    uint64_t current_discard_queue_items = discard_queue_length.load();
+
+    size_t discard_bytes_warn_threshold = static_cast<size_t>(0.8 * cct->_conf->bdev_discard_max_bytes);
+    uint64_t discard_items_warn_threshold =
+      static_cast<uint64_t>(0.8 * cct->_conf->bdev_async_discard_max_pending);
+
+    bool discard_queue_overload =
+      (current_discarded_bytes >= discard_bytes_warn_threshold) ||
+      (cct->_conf->bdev_async_discard_max_pending > 0 &&
+       current_discard_queue_items >= discard_items_warn_threshold);
+
+    if (discard_queue_overload) {
+      std::ostringstream ss;
+      ss << "Slow discard on " << device_name
+         << ", queue: " << current_discard_queue_items
+	 << " items " << byte_u_t(current_discarded_bytes);
+      alerts.emplace(device_name + "_DEVICE_DISCARD_QUEUE", ss.str());
+    }
+  }
+}
+

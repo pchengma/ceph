@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,8 @@
 #include "WorkQueue.h"
 #include "include/compat.h"
 #include "common/errno.h"
+
+#include <sstream>
 
 #define dout_subsys ceph_subsys_tp
 #undef dout_prefix
@@ -32,13 +35,6 @@ ThreadPool::ThreadPool(CephContext *cct_, std::string nm, std::string tn, int n,
 {
   if (option) {
     _thread_num_option = option;
-    // set up conf_keys
-    _conf_keys = new const char*[2];
-    _conf_keys[0] = _thread_num_option.c_str();
-    _conf_keys[1] = NULL;
-  } else {
-    _conf_keys = new const char*[1];
-    _conf_keys[0] = NULL;
   }
 }
 
@@ -56,7 +52,6 @@ void ThreadPool::TPHandle::reset_tp_timeout()
 ThreadPool::~ThreadPool()
 {
   ceph_assert(_threads.empty());
-  delete[] _conf_keys;
 }
 
 void ThreadPool::handle_conf_change(const ConfigProxy& conf,

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "common/ceph_argparse.h"
 #include "common/ceph_context.h"
@@ -10,6 +10,7 @@
 #include "common/Timer.h"
 #include "common/WorkQueue.h"
 #include "common/perf_counters.h"
+#include "common/perf_counters_collection.h"
 #include "common/perf_counters_key.h"
 #include "include/types.h"
 #include "mon/MonClient.h"
@@ -558,9 +559,9 @@ void Mirror::update_fs_mirrors() {
     std::scoped_lock locker(m_lock);
     for (auto &[filesystem, mirror_action] : m_mirror_actions) {
       auto failed_restart = mirror_action.fs_mirror && mirror_action.fs_mirror->is_failed() &&
-	(failed_interval.count() > 0 && duration_cast<seconds>(mirror_action.fs_mirror->get_failed_ts() - clock::now()) > failed_interval);
+        (failed_interval.count() > 0 && duration_cast<seconds>(clock::now() - mirror_action.fs_mirror->get_failed_ts()).count() > failed_interval.count());
       auto blocklisted_restart = mirror_action.fs_mirror && mirror_action.fs_mirror->is_blocklisted() &&
-	(blocklist_interval.count() > 0 && duration_cast<seconds>(mirror_action.fs_mirror->get_blocklisted_ts() - clock::now()) > blocklist_interval);
+        (blocklist_interval.count() > 0 && duration_cast<seconds>(clock::now() - mirror_action.fs_mirror->get_blocklisted_ts()).count() > blocklist_interval.count());
 
       if (!mirror_action.action_in_progress && !_is_restarting(filesystem)) {
 	if (failed_restart || blocklisted_restart) {

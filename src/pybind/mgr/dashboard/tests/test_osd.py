@@ -8,6 +8,7 @@ from ceph.deployment.drive_group import DeviceSelection, DriveGroupSpec  # type:
 from ceph.deployment.service_spec import PlacementSpec
 
 from .. import mgr
+from ..controllers._version import APIVersion
 from ..controllers.osd import Osd, OsdUi
 from ..services.osd import OsdDeploymentOptions
 from ..tests import ControllerTestCase
@@ -241,8 +242,12 @@ class OsdTest(ControllerTestCase):
 
         with mock.patch.object(Osd, 'get_osd_map', return_value=OsdHelper.gen_osdmap(osdmap_ids)):
             with mock.patch.object(mgr, 'get', side_effect=mgr_get_replacement):
-                with mock.patch.object(mgr, 'get_counter', side_effect=mgr_get_counter_replacement):
-                    with mock.patch.object(mgr, 'get_latest', return_value=1146609664):
+                with mock.patch.object(
+                    mgr, "get_unlabeled_counter", side_effect=mgr_get_counter_replacement
+                ):
+                    with mock.patch.object(
+                        mgr, "get_unlabeled_counter_latest", return_value=1146609664
+                    ):
                         with mock.patch.object(Osd, 'get_removing_osds', return_value=[]):
                             yield
 
@@ -274,7 +279,7 @@ class OsdTest(ControllerTestCase):
         osds_leftover = [0, 1, 2]
         with self._mock_osd_list(osd_stat_ids=osds_actual, osdmap_tree_node_ids=osds_leftover,
                                  osdmap_ids=osds_actual):
-            self._get('/api/osd')
+            self._get('/api/osd', version=APIVersion(1, 1))
             self.assertEqual(len(self.json_body()), 2, 'It should display two OSDs without failure')
             self.assertStatus(200)
 

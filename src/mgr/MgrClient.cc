@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,6 +15,7 @@
 
 #include "MgrClient.h"
 
+#include "common/perf_counters_collection.h"
 #include "common/perf_counters_key.h"
 #include "mgr/MgrContext.h"
 #include "mon/MonMap.h"
@@ -97,7 +99,7 @@ void MgrClient::shutdown()
   }
 }
 
-bool MgrClient::ms_dispatch2(const ref_t<Message>& m)
+Dispatcher::dispatch_result_t MgrClient::ms_dispatch2(const ref_t<Message>& m)
 {
   std::lock_guard l(lock);
 
@@ -329,15 +331,8 @@ void MgrClient::_send_report()
   {
     // Helper for checking whether a counter should be included
     auto include_counter = [this](
-        const PerfCounters::perf_counter_data_any_d &ctr,
-        const PerfCounters &perf_counters)
-    {
-      // FIXME: We don't send labeled perf counters to the mgr currently.
-      auto labels = ceph::perf_counters::key_labels(perf_counters.get_name());
-      if (labels.begin() != labels.end()) {
-        return false;
-      }
-
+			       const PerfCounters::perf_counter_data_any_d &ctr,
+			       const PerfCounters &perf_counters) {
       return perf_counters.get_adjusted_priority(ctr.prio) >= (int)stats_threshold;
     };
 
@@ -471,7 +466,7 @@ bool MgrClient::handle_mgr_configure(ref_t<MMgrConfigure> m)
     handle_config_payload(m->osd_perf_metric_queries);
   } else if (m->metric_config_message) {
     const MetricConfigMessage &message = *m->metric_config_message;
-    boost::apply_visitor(HandlePayloadVisitor(this), message.payload);
+    std::visit(HandlePayloadVisitor(this), message.payload);
   }
 
   bool starting = (stats_period == 0) && (m->stats_period != 0);

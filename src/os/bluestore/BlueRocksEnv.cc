@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "BlueRocksEnv.h"
 #include "BlueFS.h"
@@ -36,7 +36,7 @@ std::pair<std::string_view, std::string_view>
 split(const std::string &fn)
 {
   size_t slash = fn.rfind('/');
-  assert(slash != fn.npos);
+  ceph_assert(slash != fn.npos);
   size_t file_begin = slash + 1;
   while (slash && fn[slash - 1] == '/')
     --slash;
@@ -213,26 +213,15 @@ class BlueRocksWritableFile : public rocksdb::WritableFile {
   // size due to whole pages writes. The behavior is undefined if called
   // with other writes to follow.
   rocksdb::Status Truncate(uint64_t size) override {
-    // we mirror the posix env, which does nothing here; instead, it
-    // truncates to the final size on close.  whatever!
+    int r = fs->truncate(h, size);
+    if (r < 0) {
+      return err_to_status(r);
+    }
     return rocksdb::Status::OK();
-    //int r = fs->truncate(h, size);
-    //  return err_to_status(r);
   }
 
   rocksdb::Status Close() override {
     fs->fsync(h);
-
-    // mimic posix env, here.  shrug.
-    size_t block_size;
-    size_t last_allocated_block;
-    GetPreallocationStatus(&block_size, &last_allocated_block);
-    if (last_allocated_block > 0) {
-      int r = fs->truncate(h, h->pos);
-      if (r < 0)
-	return err_to_status(r);
-    }
-
     return rocksdb::Status::OK();
   }
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "common/errno.h"
 
@@ -115,7 +115,7 @@ int RGWBucketLifecycleConfigCR::Request::_send_request(const DoutPrefixProvider 
     return -EIO;
   }
 
-  int ret = lc->set_bucket_config(params.bucket,
+  int ret = lc->set_bucket_config(dpp, null_yield, params.bucket,
                                   params.bucket_attrs,
                                   &params.config);
   if (ret < 0) {

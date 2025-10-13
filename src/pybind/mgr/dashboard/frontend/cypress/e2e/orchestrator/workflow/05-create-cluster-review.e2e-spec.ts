@@ -14,12 +14,8 @@ describe('Create Cluster Review page', () => {
     createCluster.navigateTo();
     createCluster.createCluster();
 
-    cy.get('.nav-link').contains('Review').click();
-  });
-
-  describe('navigation link test', () => {
-    it('should check if active nav-link is of Review section', () => {
-      cy.get('.nav-link.active').should('contain.text', 'Review');
+    cy.get('cd-wizard').within(() => {
+      cy.get('button').contains('Review').click();
     });
   });
 
@@ -40,23 +36,23 @@ describe('Create Cluster Review page', () => {
       createCluster.getDataTables().should('have.length', 1);
 
       // verify correct columns on Host Details table
-      createCluster.getDataTableHeaders(0).contains('Hostname');
+      createCluster.getDataTableHeaders().contains('Hostname');
 
-      createCluster.getDataTableHeaders(0).contains('Labels');
+      createCluster.getDataTableHeaders().contains('Labels');
 
-      createCluster.getDataTableHeaders(0).contains('CPUs');
+      createCluster.getDataTableHeaders().contains('CPUs');
 
-      createCluster.getDataTableHeaders(0).contains('Cores');
+      createCluster.getDataTableHeaders().contains('Cores');
 
-      createCluster.getDataTableHeaders(0).contains('Total Memory');
+      createCluster.getDataTableHeaders().contains('Total Memory');
 
-      createCluster.getDataTableHeaders(0).contains('Raw Capacity');
+      createCluster.getDataTableHeaders().contains('Raw Capacity');
 
-      createCluster.getDataTableHeaders(0).contains('HDDs');
+      createCluster.getDataTableHeaders().contains('HDDs');
 
-      createCluster.getDataTableHeaders(0).contains('Flash');
+      createCluster.getDataTableHeaders().contains('Flash');
 
-      createCluster.getDataTableHeaders(0).contains('NICs');
+      createCluster.getDataTableHeaders().contains('NICs');
     });
 
     it('should check default host name is present', () => {

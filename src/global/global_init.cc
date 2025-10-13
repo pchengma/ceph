@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,6 +14,14 @@
  */
 
 #include <filesystem>
+#include <memory>
+#include <sstream>
+#include "acconfig.h"
+#ifdef HAVE_BREAKPAD
+#include <breakpad/client/linux/handler/exception_handler.h>
+#include <breakpad/client/linux/handler/minidump_descriptor.h>
+#include <breakpad/google_breakpad/common/minidump_format.h>
+#endif
 #include "common/async/context_pool.h"
 #include "common/ceph_argparse.h"
 #include "common/code_environment.h"
@@ -29,6 +38,7 @@
 #include "global/signal_handler.h"
 #include "include/compat.h"
 #include "include/str_list.h"
+#include "log/Log.h"
 #include "mon/MonClient.h"
 
 #ifndef _WIN32
@@ -177,6 +187,17 @@ void global_pre_init(
   g_conf().complain_about_parse_error(g_ceph_context);
 }
 
+#ifdef HAVE_BREAKPAD
+static bool dumpCallback(
+    const google_breakpad::MinidumpDescriptor& descriptor, void* context,
+    bool succeeded) {
+  char buf[1024];
+  snprintf(buf, sizeof(buf), "minidump created in path %s", descriptor.path());
+  dout_emergency(buf);
+  return succeeded;
+}
+#endif
+
 boost::intrusive_ptr<CephContext>
 global_init(const std::map<std::string,std::string> *defaults,
 	    std::vector < const char* >& args,
@@ -214,6 +235,20 @@ global_init(const std::map<std::string,std::string> *defaults,
   if (g_conf()->fatal_signal_handlers) {
     install_standard_sighandlers();
   }
+
+#ifdef HAVE_BREAKPAD
+  if (g_conf()->breakpad) {
+    google_breakpad::MinidumpDescriptor descriptor(g_conf()->crash_dir);
+    g_ceph_context->_ex_handler.reset(
+	new google_breakpad::ExceptionHandler(descriptor, nullptr, dumpCallback, nullptr, true, -1));
+  }
+#else
+  if (g_conf()->breakpad) {
+    cerr << "breakpad crash reporting requested, but disabled at build time"
+         << std::endl;
+  }
+#endif
+
   ceph::register_assert_context(g_ceph_context);
 
   if (g_conf()->log_flush_on_exit)
@@ -268,10 +303,14 @@ global_init(const std::map<std::string,std::string> *defaults,
     if (g_conf()->setgroup.length() > 0) {
       gid = atoi(g_conf()->setgroup.c_str());
       if (!gid) {
-	char buf[4096];
+	// There's no actual well-defined max that I could find in
+	// library documentation. If we're allocating on the heap,
+	// 64KiB seems at least reasonable.
+	static constexpr std::size_t size = 64 * 1024;
+	auto buf = std::make_unique_for_overwrite<char[]>(size);
 	struct group gr;
 	struct group *g = 0;
-	getgrnam_r(g_conf()->setgroup.c_str(), &gr, buf, sizeof(buf), &g);
+	getgrnam_r(g_conf()->setgroup.c_str(), &gr, buf.get(), size, &g);
 	if (!g) {
 	  cerr << "unable to look up group '" << g_conf()->setgroup << "'"
 	       << ": " << cpp_strerror(errno) << std::endl;

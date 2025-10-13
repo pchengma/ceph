@@ -13,15 +13,37 @@ import {
   NgbTooltipModule
 } from '@ng-bootstrap/ng-bootstrap';
 import { ClickOutsideModule } from 'ng-click-outside';
-import { NgChartsModule } from 'ng2-charts';
+import { provideCharts, withDefaultRegisterables, BaseChartDirective } from 'ng2-charts';
 import { SimplebarAngularModule } from 'simplebar-angular';
 import {
   UIShellModule,
   ButtonModule,
   NotificationModule,
-  IconModule
+  IconModule,
+  IconService,
+  TooltipModule,
+  GridModule,
+  AccordionModule,
+  LoadingModule,
+  ModalModule,
+  InputModule,
+  CheckboxModule,
+  DatePickerModule,
+  TimePickerModule,
+  TimePickerSelectModule,
+  NumberModule,
+  DropdownModule,
+  SelectModule,
+  ComboBoxModule,
+  ProgressIndicatorModule,
+  PanelModule,
+  LayoutModule,
+  TilesModule,
+  PopoverModule,
+  InlineLoadingModule
 } from 'carbon-components-angular';
-
+import EditIcon from '@carbon/icons/es/edit/20';
+import CodeIcon from '@carbon/icons/es/code/16';
 import { MotdComponent } from '~/app/shared/components/motd/motd.component';
 import { DirectivesModule } from '../directives/directives.module';
 import { PipesModule } from '../pipes/pipes.module';
@@ -32,7 +54,7 @@ import { ColorClassFromTextPipe } from './cd-label/color-class-from-text.pipe';
 import { ConfigOptionComponent } from './config-option/config-option.component';
 import { ConfirmationModalComponent } from './confirmation-modal/confirmation-modal.component';
 import { Copy2ClipboardButtonComponent } from './copy2clipboard-button/copy2clipboard-button.component';
-import { CriticalConfirmationModalComponent } from './critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from './delete-confirmation-modal/delete-confirmation-modal.component';
 import { CustomLoginBannerComponent } from './custom-login-banner/custom-login-banner.component';
 import { DateTimePickerComponent } from './date-time-picker/date-time-picker.component';
 import { DocComponent } from './doc/doc.component';
@@ -47,7 +69,6 @@ import { ModalComponent } from './modal/modal.component';
 import { NotificationsSidebarComponent } from './notifications-sidebar/notifications-sidebar.component';
 import { OrchestratorDocPanelComponent } from './orchestrator-doc-panel/orchestrator-doc-panel.component';
 import { PwdExpirationNotificationComponent } from './pwd-expiration-notification/pwd-expiration-notification.component';
-import { RefreshSelectorComponent } from './refresh-selector/refresh-selector.component';
 import { SelectBadgesComponent } from './select-badges/select-badges.component';
 import { SelectComponent } from './select/select.component';
 import { SparklineComponent } from './sparkline/sparkline.component';
@@ -63,6 +84,20 @@ import { CardGroupComponent } from './card-group/card-group.component';
 import { HelpTextComponent } from './help-text/help-text.component';
 import { FormAdvancedFieldsetComponent } from './form-advanced-fieldset/form-advanced-fieldset.component';
 import { UpgradableComponent } from './upgradable/upgradable.component';
+import { ProgressComponent } from './progress/progress.component';
+import { SidePanelComponent } from './side-panel/side-panel.component';
+import { ChartsModule } from '@carbon/charts-angular';
+import { InlineMessageComponent } from './inline-message/inline-message.component';
+import { IconComponent } from './icon/icon.component';
+import { DetailsCardComponent } from './details-card/details-card.component';
+import { ToastComponent } from './notification-toast/notification-toast.component';
+
+// Icons
+import InfoIcon from '@carbon/icons/es/information/16';
+import CopyIcon from '@carbon/icons/es/copy/32';
+import downloadIcon from '@carbon/icons/es/download/16';
+import IdeaIcon from '@carbon/icons/es/idea/20';
+import CloseIcon from '@carbon/icons/es/close/16';
 
 @NgModule({
   imports: [
@@ -73,7 +108,6 @@ import { UpgradableComponent } from './upgradable/upgradable.component';
     NgbPopoverModule,
     NgbProgressbarModule,
     NgbTooltipModule,
-    NgChartsModule,
     ReactiveFormsModule,
     PipesModule,
     DirectivesModule,
@@ -86,7 +120,29 @@ import { UpgradableComponent } from './upgradable/upgradable.component';
     UIShellModule,
     ButtonModule,
     NotificationModule,
-    IconModule
+    IconModule,
+    TooltipModule,
+    GridModule,
+    AccordionModule,
+    LoadingModule,
+    ModalModule,
+    InputModule,
+    NumberModule,
+    CheckboxModule,
+    DatePickerModule,
+    TimePickerModule,
+    TimePickerSelectModule,
+    DropdownModule,
+    SelectModule,
+    ComboBoxModule,
+    ProgressIndicatorModule,
+    BaseChartDirective,
+    PanelModule,
+    ChartsModule,
+    LayoutModule,
+    TilesModule,
+    PopoverModule,
+    InlineLoadingModule
   ],
   declarations: [
     SparklineComponent,
@@ -97,13 +153,12 @@ import { UpgradableComponent } from './upgradable/upgradable.component';
     LoadingPanelComponent,
     ModalComponent,
     NotificationsSidebarComponent,
-    CriticalConfirmationModalComponent,
+    DeleteConfirmationModalComponent,
     ConfirmationModalComponent,
     LanguageSelectorComponent,
     GrafanaComponent,
     SelectComponent,
     BackButtonComponent,
-    RefreshSelectorComponent,
     ConfigOptionComponent,
     AlertPanelComponent,
     FormModalComponent,
@@ -127,9 +182,15 @@ import { UpgradableComponent } from './upgradable/upgradable.component';
     CardGroupComponent,
     HelpTextComponent,
     FormAdvancedFieldsetComponent,
-    UpgradableComponent
+    UpgradableComponent,
+    ProgressComponent,
+    SidePanelComponent,
+    IconComponent,
+    InlineMessageComponent,
+    DetailsCardComponent,
+    ToastComponent
   ],
-  providers: [],
+  providers: [provideCharts(withDefaultRegisterables())],
   exports: [
     SparklineComponent,
     HelperComponent,
@@ -143,7 +204,6 @@ import { UpgradableComponent } from './upgradable/upgradable.component';
     LanguageSelectorComponent,
     GrafanaComponent,
     SelectComponent,
-    RefreshSelectorComponent,
     ConfigOptionComponent,
     AlertPanelComponent,
     PwdExpirationNotificationComponent,
@@ -165,7 +225,25 @@ import { UpgradableComponent } from './upgradable/upgradable.component';
     CardGroupComponent,
     HelpTextComponent,
     FormAdvancedFieldsetComponent,
-    UpgradableComponent
+    UpgradableComponent,
+    ProgressComponent,
+    SidePanelComponent,
+    IconComponent,
+    InlineMessageComponent,
+    DetailsCardComponent,
+    ToastComponent
   ]
 })
-export class ComponentsModule {}
+export class ComponentsModule {
+  constructor(private iconService: IconService) {
+    this.iconService.registerAll([
+      InfoIcon,
+      CopyIcon,
+      EditIcon,
+      CodeIcon,
+      downloadIcon,
+      IdeaIcon,
+      CloseIcon
+    ]);
+  }
+}

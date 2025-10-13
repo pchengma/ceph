@@ -1,16 +1,17 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <vector>
 
 #include "AuthAuthorizeHandler.h"
 #include "AuthMethodList.h"
 #include "common/ceph_mutex.h"
-#include "common/ceph_context.h"
-#include "common/config_cacher.h"
+#include "common/config_obs.h"
+#include "include/common_fwd.h" // for CephContext
 
 class AuthRegistry : public md_config_obs_t {
   CephContext *cct;
@@ -70,7 +71,7 @@ public:
 
   AuthAuthorizeHandler *get_handler(int peer_type, int method);
 
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set<std::string>& changed) override;
 

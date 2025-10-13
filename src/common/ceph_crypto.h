@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 #ifndef CEPH_CRYPTO_H
 #define CEPH_CRYPTO_H
 
@@ -90,7 +90,6 @@ namespace TOPNSPC::crypto {
         static constexpr size_t digest_size = CEPH_CRYPTO_SHA512_DIGESTSIZE;
         SHA512 () : OpenSSLDigest(EVP_sha512()) { }
     };
-
 
 # if OPENSSL_VERSION_NUMBER < 0x10100000L
   class HMAC {

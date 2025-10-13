@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -29,6 +30,7 @@ extern "C"{
 #include "common/ceph_json.h"
 #include "common/code_environment.h"
 #include "common/ceph_argparse.h"
+#include "common/armor.h"
 #include "common/Finisher.h"
 #include "global/global_init.h"
 #include "rgw_common.h"
@@ -47,8 +49,6 @@ static string uid = CEPH_UID;
 static string display_name = "CEPH";
 static string meta_caps = "metadata";
 
-extern "C" int ceph_armor(char *dst, const char *dst_end, 
-                          const char *src, const char *end);
 static void print_usage(char *exec){
   cout << "Usage: " << exec << " <Options>\n";
   cout << "Options:\n"

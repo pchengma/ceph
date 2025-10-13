@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -24,14 +25,16 @@
  using namespace libradosstriper;
 #endif
 
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "global/global_init.h"
 #include "common/Cond.h"
 #include "common/debug.h"
 #include "common/errno.h"
-#include "common/Formatter.h"
+#include "common/JSONFormatter.h"
 #include "common/obj_bencher.h"
+#include "common/strtol.h" // for strict_strtoll()
 #include "common/TextTable.h"
 #include "include/stringify.h"
 #include "mds/inode_backtrace.h"
@@ -46,6 +49,7 @@
 #include <dirent.h>
 #include <stdexcept>
 #include <climits>
+#include <limits>
 #include <locale>
 #include <memory>
 #include <optional>
@@ -58,7 +62,13 @@
 #include "PoolDump.h"
 #include "RadosImport.h"
 
-#include "osd/ECUtil.h"
+#include "osd/ECUtilL.h" // For hinfo in legacy EC
+#include "objclass/objclass.h"
+#include "cls/refcount/cls_refcount_ops.h"
+
+#include <boost/optional.hpp>
+
+#include <iomanip>
 
 using namespace std::chrono_literals;
 using namespace librados;
@@ -125,6 +135,7 @@ void usage(ostream& out)
 "                                    default is 16 concurrent IOs and 4 MB ops\n"
 "                                    default is to clean up after write benchmark\n"
 "                                    default run-name is 'benchmark_last_metadata'\n"
+"                                    seconds can be numeral or 'max'\n"
 "   cleanup [--run-name run_name] [--prefix prefix]\n"
 "                                    clean up a previous benchmark operation\n"
 "                                    default run-name is 'benchmark_last_metadata'\n"
@@ -134,10 +145,11 @@ void usage(ostream& out)
 "   getomapval <obj-name> <key> [file] show the value for the specified key\n"
 "                                    in the object's object map\n"
 "   setomapval <obj-name> <key> <val | --input-file file>\n"
-"   rmomapkey <obj-name> <key>       Remove key from the object map of <obj-name>\n"
+"   rmomapkey <obj-name> <key>       remove key from the object map of <obj-name>\n"
 "   clearomap <obj-name> [obj-name2 obj-name3...] clear all the omap keys for the specified objects\n"
-"   getomapheader <obj-name> [file]  Dump the hexadecimal value of the object map header of <obj-name>\n"
-"   setomapheader <obj-name> <val>   Set the value of the object map header of <obj-name>\n"
+"   getomapheader <obj-name> [file]  dump the hexadecimal value of the object map header of <obj-name>\n"
+"   setomapheader <obj-name> <val | --input-file file>\n"
+"                                    set the value of the object map header of <obj-name>\n"
 "   watch <obj-name>                 add watcher on this object\n"
 "   notify <obj-name> <message>      notify watcher of this object with message\n"
 "   listwatchers <obj-name>          list the watchers of this object\n"
@@ -207,6 +219,12 @@ void usage(ostream& out)
 "        set the max number of objects for write benchmarking\n"
 "   --obj-name-file file\n"
 "        use the content of the specified file in place of <obj-name>\n"
+"   --omap-read-start-after\n"
+"        set the start_after parameter for OMAP list benchmarking\n"
+"   --omap-read-filter-prefix\n"
+"        set the filter_prefix parameter for OMAP list benchmarking\n"
+"   --omap-read-max-return\n"
+"        set the max number of entries for OMAP list benchmarking\n"
 "   -s name\n"
 "   --snap name\n"
 "        select given snap name for (read) IO\n"
@@ -242,12 +260,12 @@ void usage(ostream& out)
 "        prefix output with date/time\n"
 "   --no-verify\n"
 "        do not verify contents of read objects\n"
-"   --write-object\n"
-"        write contents to the objects\n"
-"   --write-omap\n"
-"        write contents to the omap\n"
-"   --write-xattr\n"
-"        write contents to the extended attributes\n"
+"   --object | --write-object (deprecated)\n"
+"        read or write contents to the objects\n"
+"   --omap | --write-omap (deprecated)\n"
+"        read or write contents to the omap\n"
+"   --xattr | write-xattr (deprecated)\n"
+"        read or write contents to the extended attributes\n"
 "\n"
 "LOAD GEN OPTIONS:\n"
 "   --num-objects                    total number of objects\n"
@@ -1052,10 +1070,16 @@ void LoadGen::cleanup()
   }
 }
 
-enum OpWriteDest {
-  OP_WRITE_DEST_OBJ = 2 << 0,
-  OP_WRITE_DEST_OMAP = 2 << 1,
-  OP_WRITE_DEST_XATTR = 2 << 2,
+enum OpDest {
+  OP_DEST_OBJ = 2 << 0,
+  OP_DEST_OMAP = 2 << 1,
+  OP_DEST_XATTR = 2 << 2,
+};
+
+struct omap_read_params_t {
+  std::string start_after;
+  std::string filter_prefix;
+  uint64_t max_return{MAX_OMAP_BYTES_PER_REQUEST};
 };
 
 class RadosBencher : public ObjBencher {
@@ -1064,7 +1088,8 @@ class RadosBencher : public ObjBencher {
   librados::IoCtx& io_ctx;
   librados::NObjectIterator oi;
   bool iterator_valid;
-  OpWriteDest write_destination;
+  OpDest destination;
+  omap_read_params_t omap_read;
 
 protected:
   int completions_init(int concurrentios) override {
@@ -1090,14 +1115,35 @@ protected:
 
   int aio_read(const std::string& oid, int slot, bufferlist *pbl, size_t len,
 	       size_t offset) override {
-    return io_ctx.aio_read(oid, completions[slot], pbl, len, offset);
+    int ret = 0;
+    if (destination & OP_DEST_OBJ) {
+      ret = io_ctx.aio_read(oid, completions[slot], pbl, len, offset);
+      if (ret < 0) {
+        return ret;
+      }
+    }
+
+    if (destination & OP_DEST_OMAP) {
+      std::map<std::string, librados::bufferlist> values;
+      ObjectReadOperation rop;
+      rop.omap_get_vals2(omap_read.start_after, omap_read.filter_prefix, omap_read.max_return, nullptr, nullptr, nullptr);
+      ret = io_ctx.aio_operate(oid, completions[slot], &rop, pbl);
+      if (ret < 0) {
+        return ret;
+      }
+    }
+
+    if (destination & OP_DEST_XATTR) {
+      ceph_abort("not supported yet");
+    }
+    return ret;
   }
 
   int aio_write(const std::string& oid, int slot, bufferlist& bl, size_t len,
 		size_t offset) override {
     librados::ObjectWriteOperation op;
 
-    if (write_destination & OP_WRITE_DEST_OBJ) {
+    if (destination & OP_DEST_OBJ) {
       if (data.hints)
 	op.set_alloc_hint2(data.object_size, data.op_size,
 			   ALLOC_HINT_FLAG_SEQUENTIAL_WRITE |
@@ -1107,13 +1153,13 @@ protected:
       op.write(offset, bl);
     }
 
-    if (write_destination & OP_WRITE_DEST_OMAP) {
+    if (destination & OP_DEST_OMAP) {
       std::map<std::string, librados::bufferlist> omap;
       omap[string("bench-omap-key-") + stringify(offset)] = bl;
       op.omap_set(omap);
     }
 
-    if (write_destination & OP_WRITE_DEST_XATTR) {
+    if (destination & OP_DEST_XATTR) {
       char key[80];
       snprintf(key, sizeof(key), "bench-xattr-key-%d", (int)offset);
       op.setxattr(key, bl);
@@ -1179,11 +1225,14 @@ protected:
 
 public:
   RadosBencher(CephContext *cct_, librados::Rados& _r, librados::IoCtx& _i)
-    : ObjBencher(cct_), completions(NULL), rados(_r), io_ctx(_i), iterator_valid(false), write_destination(OP_WRITE_DEST_OBJ) {}
+    : ObjBencher(cct_), completions(NULL), rados(_r), io_ctx(_i), iterator_valid(false), destination(OP_DEST_OBJ) {}
   ~RadosBencher() override { }
 
-  void set_write_destination(OpWriteDest dest) {
-    write_destination = dest;
+  void set_destination(OpDest dest) {
+    destination = dest;
+  }
+  void set_omap_read_patams(const omap_read_params_t& omap_read_params) {
+    omap_read = omap_read_params;
   }
 };
 
@@ -1596,10 +1645,10 @@ static void dump_shard(const shard_info_t& shard,
        || inc.union_shards.has_hinfo_corrupted()
        || inc.has_hinfo_inconsistency()) &&
        !shard.has_hinfo_missing()) {
-    map<std::string, ceph::bufferlist>::iterator k = (const_cast<shard_info_t&>(shard)).attrs.find(ECUtil::get_hinfo_key());
+    map<std::string, ceph::bufferlist>::iterator k = (const_cast<shard_info_t&>(shard)).attrs.find(ECLegacy::ECUtilL::get_hinfo_key());
     ceph_assert(k != shard.attrs.end()); // Can't be missing
     if (!shard.has_hinfo_corrupted()) {
-      ECUtil::HashInfo hi;
+      ECLegacy::ECUtilL::HashInfo hi;
       bufferlist bl;
       auto bliter = k->second.cbegin();
       decode(hi, bliter);  // Can't be corrupted
@@ -1704,7 +1753,7 @@ static void dump_inconsistent(const inconsistent_obj_t& inc,
     f.dump_int("osd", osd_shard.osd);
     f.dump_bool("primary", shard_info.second.primary);
     auto shard = osd_shard.shard;
-    if (shard != shard_id_t::NO_SHARD)
+    if (shard != static_cast<int>(shard_id_t::NO_SHARD))
       f.dump_unsigned("shard", shard);
     dump_shard(shard_info.second, inc, f);
     f.close_section();
@@ -1881,7 +1930,8 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
   uint64_t obj_offset = 0;
   bool obj_offset_specified = false;
   bool block_size_specified = false;
-  int bench_write_dest = 0;
+  int bench_dest = 0;
+  omap_read_params_t omap_read;
   bool cleanup = true;
   bool hints = true; // for rados bench
   bool reuse_bench = false;
@@ -2102,17 +2152,17 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
   if (i != opts.end()) {
     output = i->second.c_str();
   }
-  i = opts.find("write-dest-obj");
+  i = opts.find("dest-obj");
   if (i != opts.end()) {
-    bench_write_dest |= static_cast<int>(OP_WRITE_DEST_OBJ);
+    bench_dest |= static_cast<int>(OP_DEST_OBJ);
   }
-  i = opts.find("write-dest-omap");
+  i = opts.find("dest-omap");
   if (i != opts.end()) {
-    bench_write_dest |= static_cast<int>(OP_WRITE_DEST_OMAP);
+    bench_dest |= static_cast<int>(OP_DEST_OMAP);
   }
-  i = opts.find("write-dest-xattr");
+  i = opts.find("dest-xattr");
   if (i != opts.end()) {
-    bench_write_dest |= static_cast<int>(OP_WRITE_DEST_XATTR);
+    bench_dest |= static_cast<int>(OP_DEST_XATTR);
   }
   i = opts.find("with-clones");
   if (i != opts.end()) {
@@ -2128,6 +2178,22 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       return 1;
     }
     omap_key = std::string(indata.c_str(), indata.length());
+  }
+  i = opts.find("omap-read-start-after");
+  if (i != opts.end()) {
+    omap_read.start_after = i->second;
+  } else {
+    // fall back to empty string which is set by the omap_read_params_t's ctor
+  }
+  i = opts.find("omap-read-filter-prefix");
+  if (i != opts.end()) {
+    omap_read.filter_prefix = i->second;
+  }
+  i = opts.find("omap-read-max-return");
+  if (i != opts.end()) {
+    if (rados_sistrtoll(i, &omap_read.max_return)) {
+      return -EINVAL;
+    }
   }
   i = opts.find("obj-name-file");
   if (i != opts.end()) {
@@ -2469,7 +2535,8 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
 #endif // WITH_LIBRADOSSTRIPER
           if (pgid) {
             uint32_t ps;
-            if (io_ctx.get_object_pg_hash_position2(i->get_oid(), &ps) || pgid->ps() != ps) {
+            if (const auto& key = i->get_locator().size() ? i->get_locator() : i->get_oid();
+		io_ctx.get_object_pg_hash_position2(key, &ps) || pgid->ps() != ps) {
               break;
 	    }
           }
@@ -2750,8 +2817,30 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     }
     else
       ret = 0;
-    string s(bl.c_str(), bl.length());
-    cout << s;
+
+    if (attr_name == "refcount")  {
+      obj_refcount oref;
+      auto p = bl.cbegin();
+      decode(oref, p);
+      for (auto itr = oref.refs.begin(); itr != oref.refs.end(); itr++) {
+	if (!itr->first.empty()) {
+	  cout << itr->first << "::" << itr->second << std::endl;
+	}
+	else {
+	  cout << "wildcard reference::" << itr->second << std::endl;
+	}
+      }
+      if (!oref.retired_refs.empty()) {
+	cout << "--------------------------------------" << std::endl;
+	for (const auto & ref : oref.retired_refs) {
+	  cout << "retired_refs::" << ref << std::endl;
+	}
+      }
+    }
+    else {
+      string s(bl.c_str(), bl.length());
+      cout << s;
+    }
   } else if (strcmp(nargs[0], "rmxattr") == 0) {
     if (!pool_name || nargs.size() < (obj_name ? 2 : 3)) {
       usage(cerr);
@@ -2820,17 +2909,33 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       ret = 0;
     }
   } else if (strcmp(nargs[0], "setomapheader") == 0) {
-    if (!pool_name || nargs.size() < (obj_name ? 2 : 3)) {
+    uint32_t min_args = 3;
+    if (obj_name) {
+      min_args--;
+    }
+    if (!input_file.empty()) {
+      min_args--;
+    }
+
+    if (!pool_name || nargs.size() < min_args) {
       usage(cerr);
       return 1;
     }
 
-    bufferlist bl;
     if (!obj_name) {
       obj_name = nargs[1];
-      bl.append(nargs[2]); // val
+    }
+
+    bufferlist bl;
+    if (!input_file.empty()) {
+      string err;
+      ret = bl.read_file(input_file.c_str(), &err);
+      if (ret < 0) {
+        cerr << "error reading file " << input_file.c_str() << ": " << err << std::endl;
+        return 1;
+      }
     } else {
-      bl.append(nargs[1]); // val
+      bl.append(nargs[min_args - 1]); // val
     }
     ret = io_ctx.omap_set_header(*obj_name, bl);
     if (ret < 0) {
@@ -3273,11 +3378,16 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       usage(cerr);
       return 1;
     }
-    char* endptr = NULL;
-    int seconds = strtol(nargs[1], &endptr, 10);
-    if (*endptr) {
-      cerr << "Invalid value for seconds: '" << nargs[1] << "'" << std::endl;
-      return 1;
+    int seconds = 0;
+    if (strcmp(nargs[1], "max") == 0) {
+      seconds = std::numeric_limits<int>::max();
+    } else {
+      char* endptr = NULL;
+      seconds = strtol(nargs[1], &endptr, 10);
+      if (*endptr) {
+        cerr << "Invalid value for seconds: '" << nargs[1] << "'" << std::endl;
+        return 1;
+      }
     }
     int operation = 0;
     if (strcmp(nargs[2], "write") == 0)
@@ -3296,15 +3406,9 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
              << std::endl;
         return 1;
       }
-      if (bench_write_dest != 0) {
-        cerr << "--write-object, --write-omap and --write-xattr options can "
-                "only be used with the 'write' bench test"
-             << std::endl;
-        return 1;
-      }
     }
-    else if (bench_write_dest == 0) {
-      bench_write_dest = OP_WRITE_DEST_OBJ;
+    if (bench_dest == 0) {
+      bench_dest = OP_DEST_OBJ;
     }
 
     if (!formatter && output) {
@@ -3314,7 +3418,8 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     }
     RadosBencher bencher(g_ceph_context, rados, io_ctx);
     bencher.set_show_time(show_time);
-    bencher.set_write_destination(static_cast<OpWriteDest>(bench_write_dest));
+    bencher.set_destination(static_cast<OpDest>(bench_dest));
+    bencher.set_omap_read_patams(omap_read);
 
     ostream *outstream = NULL;
     if (formatter) {
@@ -3558,9 +3663,10 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     if (formatter) {
       formatter->open_object_section("object");
       formatter->dump_string("name", *obj_name);
+      formatter->dump_int("seq", ls.seq);
       formatter->open_array_section("clones");
     } else {
-      cout << prettify(*obj_name) << ":" << std::endl;
+      cout << prettify(*obj_name) << " (seq:" << ls.seq << "):" << std::endl;
       cout << "cloneid	snaps	size	overlap" << std::endl;
     }
 
@@ -4096,7 +4202,7 @@ int main(int argc, const char **argv)
     }
   }
 
-  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+  auto cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_CLIENT,
 			     CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 
@@ -4104,122 +4210,137 @@ int main(int argc, const char **argv)
   for (i = args.begin(); i != args.end(); ) {
     if (ceph_argparse_double_dash(args, i)) {
       break;
-    } else if (ceph_argparse_flag(args, i, "--force-full", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--force-full", (char*)nullptr)) {
       opts["force-full"] = "true";
-    } else if (ceph_argparse_flag(args, i, "-d", "--delete-after", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "-d", "--delete-after", (char*)nullptr)) {
       opts["delete-after"] = "true";
     } else if (ceph_argparse_flag(args, i, "-C", "--create", "--create-pool",
-				  (char*)NULL)) {
+				  (char*)nullptr)) {
       opts["create"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--pretty-format", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--pretty-format", (char*)nullptr)) {
       opts["pretty-format"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--show-time", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--show-time", (char*)nullptr)) {
       opts["show-time"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--no-cleanup", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--no-cleanup", (char*)nullptr)) {
       opts["no-cleanup"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--no-hints", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--no-hints", (char*)nullptr)) {
       opts["no-hints"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--reuse-bench", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--reuse-bench", (char*)nullptr)) {
       opts["reuse-bench"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--no-verify", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--no-verify", (char*)nullptr)) {
       opts["no-verify"] = "true";
-    } else if (ceph_argparse_witharg(args, i, &val, "--run-name", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--run-name", (char*)nullptr)) {
       opts["run-name"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--prefix", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--prefix", (char*)nullptr)) {
       opts["prefix"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-p", "--pool", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-p", "--pool", (char*)nullptr)) {
       opts["pool"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--target-pool", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--target-pool", (char*)nullptr)) {
       opts["target_pool"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--object-locator" , (char *)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--object-locator" , (char *)nullptr)) {
       opts["object_locator"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--target-locator" , (char *)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--target-locator" , (char *)nullptr)) {
       opts["target_locator"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--target-nspace" , (char *)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--target-nspace" , (char *)nullptr)) {
       opts["target_nspace"] = val;
 #ifdef WITH_LIBRADOSSTRIPER
-    } else if (ceph_argparse_flag(args, i, "--striper" , (char *)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--striper" , (char *)nullptr)) {
       opts["striper"] = "true";
 #endif
-    } else if (ceph_argparse_witharg(args, i, &val, "-t", "--concurrent-ios", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-t", "--concurrent-ios", (char*)nullptr)) {
       opts["concurrent-ios"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--block-size", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--block-size", (char*)nullptr)) {
       opts["block-size"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-b", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-b", (char*)nullptr)) {
       opts["block-size"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--object-size", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--object-size", (char*)nullptr)) {
       opts["object-size"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--max-objects", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--max-objects", (char*)nullptr)) {
       opts["max-objects"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--offset", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--offset", (char*)nullptr)) {
       opts["offset"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-O", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-O", (char*)nullptr)) {
       opts["object-size"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-s", "--snap", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-s", "--snap", (char*)nullptr)) {
       opts["snap"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-S", "--snapid", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-S", "--snapid", (char*)nullptr)) {
       opts["snapid"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--min-object-size", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--min-object-size", (char*)nullptr)) {
       opts["min-object-size"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--max-object-size", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--max-object-size", (char*)nullptr)) {
       opts["max-object-size"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--min-op-len", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--min-op-len", (char*)nullptr)) {
       opts["min-op-len"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--max-op-len", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--max-op-len", (char*)nullptr)) {
       opts["max-op-len"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--max-ops", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--max-ops", (char*)nullptr)) {
       opts["max-ops"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--max-backlog", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--max-backlog", (char*)nullptr)) {
       opts["max-backlog"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--target-throughput", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--target-throughput", (char*)nullptr)) {
       opts["target-throughput"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--offset-align", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--offset-align", (char*)nullptr)) {
       opts["offset_align"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--read-percent", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--read-percent", (char*)nullptr)) {
       opts["read-percent"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--num-objects", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--num-objects", (char*)nullptr)) {
       opts["num-objects"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--run-length", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--run-length", (char*)nullptr)) {
       opts["run-length"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--workers", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--workers", (char*)nullptr)) {
       opts["workers"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-f", "--format", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-f", "--format", (char*)nullptr)) {
       opts["format"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--lock-tag", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--lock-tag", (char*)nullptr)) {
       opts["lock-tag"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--lock-cookie", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--lock-cookie", (char*)nullptr)) {
       opts["lock-cookie"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--lock-description", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--lock-description", (char*)nullptr)) {
       opts["lock-description"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--lock-duration", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--lock-duration", (char*)nullptr)) {
       opts["lock-duration"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--lock-type", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--lock-type", (char*)nullptr)) {
       opts["lock-type"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "-N", "--namespace", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-N", "--namespace", (char*)nullptr)) {
       opts["namespace"] = val;
-    } else if (ceph_argparse_flag(args, i, "--all", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--all", (char*)nullptr)) {
       opts["all"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--default", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--default", (char*)nullptr)) {
       opts["default"] = "true";
-    } else if (ceph_argparse_witharg(args, i, &val, "-o", "--output", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "-o", "--output", (char*)nullptr)) {
       opts["output"] = val;
-    } else if (ceph_argparse_flag(args, i, "--write-omap", (char*)NULL)) {
-      opts["write-dest-omap"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--write-object", (char*)NULL)) {
-      opts["write-dest-obj"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--write-xattr", (char*)NULL)) {
-      opts["write-dest-xattr"] = "true";
-    } else if (ceph_argparse_flag(args, i, "--with-clones", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--write-omap", (char*)nullptr)) {
+      // write- prefixed dests are legacy and have been deprecated
+      opts["dest-omap"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--write-object", (char*)nullptr)) {
+      // write- prefixed dests are legacy and have been deprecated
+      opts["dest-obj"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--write-xattr", (char*)nullptr)) {
+      // write- prefixed dests are legacy and have been deprecated
+      opts["dest-xattr"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--omap", (char*)nullptr)) {
+      opts["dest-omap"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--object", (char*)nullptr)) {
+      opts["dest-obj"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--xattr", (char*)nullptr)) {
+      opts["dest-xattr"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--with-clones", (char*)nullptr)) {
       opts["with-clones"] = "true";
-    } else if (ceph_argparse_witharg(args, i, &val, "--omap-key-file", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--omap-read-start-after", (char*)nullptr)) {
+      opts["omap-read-start-after"] = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--omap-read-filter-prefix", (char*)nullptr)) {
+      opts["omap-read-filter-prefix"] = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--omap-read-max-return", (char*)nullptr)) {
+      opts["omap-read-max-return"] = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--omap-key-file", (char*)nullptr)) {
       opts["omap-key-file"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--obj-name-file", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--obj-name-file", (char*)nullptr)) {
       opts["obj-name-file"] = val;
-    } else if (ceph_argparse_flag(args, i, "--with-reference", (char*)NULL)) {
+    } else if (ceph_argparse_flag(args, i, "--with-reference", (char*)nullptr)) {
       opts["with-reference"] = "true";
-    } else if (ceph_argparse_witharg(args, i, &val, "--pgid", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--pgid", (char*)nullptr)) {
       opts["pgid"] = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--input-file", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(args, i, &val, "--input-file", (char*)nullptr)) {
       opts["input_file"] = val;
     } else {
       if (val[0] == '-')

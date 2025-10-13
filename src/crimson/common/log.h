@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -48,6 +48,8 @@ static inline seastar::log_level to_log_level(int level) {
 #define LOGGER(subname_) crimson::get_logger(ceph_subsys_##subname_)
 #define LOG_PREFIX(x) constexpr auto FNAME = #x
 
+#define GENERIC_LOG(level_, MSG, ...) \
+  LOCAL_LOGGER.log(level_, MSG , ##__VA_ARGS__)
 #define LOG(level_, MSG, ...) \
   LOCAL_LOGGER.log(level_, "{}: " MSG, FNAME , ##__VA_ARGS__)
 #define SUBLOG(subname_, level_, MSG, ...) \
@@ -80,6 +82,7 @@ static inline seastar::log_level to_log_level(int level) {
 #define SUBWARNI(subname_, ...) SUBLOGI(subname_, seastar::log_level::warn, __VA_ARGS__)
 
 #define ERROR(...) LOG(seastar::log_level::error, __VA_ARGS__)
+#define GENERIC_ERROR(...) GENERIC_LOG(seastar::log_level::error, __VA_ARGS__)
 #define ERRORI(...) LOGI(seastar::log_level::error, __VA_ARGS__)
 #define SUBERROR(subname_, ...) SUBLOG(subname_, seastar::log_level::error, __VA_ARGS__)
 #define SUBERRORI(subname_, ...) SUBLOGI(subname_, seastar::log_level::error, __VA_ARGS__)
@@ -90,7 +93,7 @@ static inline seastar::log_level to_log_level(int level) {
 #define SUBLOGDPP(subname_, level_, MSG, dpp, ...) \
   LOGGER(subname_).log(level_, "{} {}: " MSG, dpp, FNAME , ##__VA_ARGS__)
 #define SUBLOGDPPI(subname_, level_, MSG, dpp, ...) \
-  LOGGER(subname_).log(level_, "{} {}: " MSG, \
+  LOGGER(subname_).log(level_, "{} {} {}: " MSG,			\
   interruptor::get_interrupt_cond(), dpp, FNAME , ##__VA_ARGS__)
 #define SUBTRACEDPP(subname_, ...) SUBLOGDPP(subname_, seastar::log_level::trace, __VA_ARGS__)
 #define SUBTRACEDPPI(subname_, ...) SUBLOGDPPI(subname_, seastar::log_level::trace, __VA_ARGS__)
@@ -106,7 +109,7 @@ static inline seastar::log_level to_log_level(int level) {
 #define LOGDPP(level_, MSG, dpp, ...) \
   LOCAL_LOGGER.log(level_, "{} {}: " MSG, dpp, FNAME , ##__VA_ARGS__)
 #define LOGDPPI(level_, MSG, dpp, ...) \
-  LOCAL_LOGGER.log(level_, "{} {}: " MSG, \
+  LOCAL_LOGGER.log(level_, "{} {} {}: " MSG, \
   interruptor::get_interrupt_cond(), dpp, FNAME , ##__VA_ARGS__)
 #define TRACEDPP(...) LOGDPP(seastar::log_level::trace, __VA_ARGS__)
 #define TRACEDPPI(...) LOGDPPI(seastar::log_level::trace, __VA_ARGS__)

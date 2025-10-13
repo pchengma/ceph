@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -ex
 
-. $(dirname $0)/../../standalone/ceph-helpers.sh
-
 POOL=rbd
 ANOTHER_POOL=new_default_pool$$
 NS=ns
@@ -105,7 +103,7 @@ function get_pid()
     local pool=$1
     local ns=$2
 
-    PID=$(rbd device --device-type nbd --format xml list | $XMLSTARLET sel -t -v \
+    PID=$(rbd device --device-type nbd --format xml list | xmlstarlet sel -t -v \
       "//devices/device[pool='${pool}'][namespace='${ns}'][image='${IMAGE}'][device='${DEV}']/id")
     test -n "${PID}" || return 1
     ps -p ${PID} -C rbd-nbd
@@ -122,6 +120,20 @@ unmap_device()
 
     # workaround possible race between unmap and following map
     sleep 0.5
+}
+
+function wait_for_blockdev_size() {
+    local dev=$1
+    local size=$2
+
+    for s in 0.25 0.5 0.75 1 1.25 1.5 1.75 2 2.25 2.5 2.75 3 3.25 3.5 3.75; do
+        if (( $(sudo blockdev --getsize64 $dev) == $size )); then
+            return 0
+        fi
+        sleep $s
+    done
+
+    return 1
 }
 
 #
@@ -172,17 +184,17 @@ unmap_device ${DEV} ${PID}
 DEV=`_sudo rbd device --device-type nbd --options notrim map ${POOL}/${IMAGE}`
 get_pid ${POOL}
 provisioned=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/provisioned_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/provisioned_size" -v .`
 used=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/used_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/used_size" -v .`
 [ "${used}" -eq "${provisioned}" ]
 # should fail discard as at time of mapping notrim was used
 expect_false _sudo blkdiscard ${DEV}
 sync
 provisioned=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/provisioned_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/provisioned_size" -v .`
 used=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/used_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/used_size" -v .`
 [ "${used}" -eq "${provisioned}" ]
 unmap_device ${DEV} ${PID}
 
@@ -190,17 +202,17 @@ unmap_device ${DEV} ${PID}
 DEV=`_sudo rbd device --device-type nbd map ${POOL}/${IMAGE}`
 get_pid ${POOL}
 provisioned=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/provisioned_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/provisioned_size" -v .`
 used=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/used_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/used_size" -v .`
 [ "${used}" -eq "${provisioned}" ]
 # should honor discard as at time of mapping trim was considered by default
 _sudo blkdiscard ${DEV}
 sync
 provisioned=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/provisioned_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/provisioned_size" -v .`
 used=`rbd -p ${POOL} --format xml du ${IMAGE} |
-  $XMLSTARLET sel -t -m "//stats/images/image/used_size" -v .`
+  xmlstarlet sel -t -m "//stats/images/image/used_size" -v .`
 [ "${used}" -lt "${provisioned}" ]
 unmap_device ${DEV} ${PID}
 
@@ -212,11 +224,12 @@ devname=$(basename ${DEV})
 blocks=$(awk -v dev=${devname} '$4 == dev {print $3}' /proc/partitions)
 test -n "${blocks}"
 rbd resize ${POOL}/${IMAGE} --size $((SIZE * 2))M
-rbd info ${POOL}/${IMAGE}
+wait_for_blockdev_size ${DEV} $(((SIZE * 2) << 20))
 blocks2=$(awk -v dev=${devname} '$4 == dev {print $3}' /proc/partitions)
 test -n "${blocks2}"
 test ${blocks2} -eq $((blocks * 2))
 rbd resize ${POOL}/${IMAGE} --allow-shrink --size ${SIZE}M
+wait_for_blockdev_size ${DEV} $((SIZE << 20))
 blocks2=$(awk -v dev=${devname} '$4 == dev {print $3}' /proc/partitions)
 test -n "${blocks2}"
 test ${blocks2} -eq ${blocks}

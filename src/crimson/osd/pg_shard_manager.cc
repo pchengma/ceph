@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "crimson/osd/pg_shard_manager.h"
 #include "crimson/osd/pg.h"
@@ -26,7 +26,7 @@ seastar::future<> PGShardManager::load_pgs(crimson::os::FuturizedStore& store)
           return get_pg_to_shard_mapping().get_or_create_pg_mapping(
             pgid, shard_core
           ).then([this, pgid] (auto core) {
-            return this->template with_remote_shard_state(
+            return this->with_remote_shard_state(
               core,
               [pgid](
 	      PerShardState &per_shard_state,
@@ -35,8 +35,10 @@ seastar::future<> PGShardManager::load_pgs(crimson::os::FuturizedStore& store)
 		pgid
 	      ).then([pgid, &per_shard_state](auto &&pg) {
 		logger().info("load_pgs: loaded {}", pgid);
-		per_shard_state.pg_map.pg_loaded(pgid, std::move(pg));
-		return seastar::now();
+		return pg->clear_temp_objects(
+		).then([&per_shard_state, pg, pgid] {
+		  per_shard_state.pg_map.pg_loaded(pgid, std::move(pg));
+		});
 	      });
 	    });
           });

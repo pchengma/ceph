@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -49,6 +49,7 @@ class RGWMetadataLister {
   int get_next(const DoutPrefixProvider* dpp, int max,
                std::list<std::string>& keys, bool* truncated)
   {
+    keys.clear();
     std::vector<std::string> oids;
     int r = listing.get_next(dpp, max, &oids, truncated);
     if (r == -ENOENT) {

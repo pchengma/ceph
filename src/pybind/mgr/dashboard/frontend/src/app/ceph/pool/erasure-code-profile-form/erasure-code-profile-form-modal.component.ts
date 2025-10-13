@@ -11,7 +11,7 @@ import { CdFormBuilder } from '~/app/shared/forms/cd-form-builder';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
 import { CrushNode } from '~/app/shared/models/crush-node';
-import { ErasureCodeProfile } from '~/app/shared/models/erasure-code-profile';
+import { ErasureCodeProfile, CrushFailureDomains } from '~/app/shared/models/erasure-code-profile';
 import { FinishedTask } from '~/app/shared/models/finished-task';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 
@@ -26,7 +26,7 @@ export class ErasureCodeProfileFormModalComponent
   @Output()
   submitAction = new EventEmitter();
 
-  tooltips = this.ecpService.formTooltips;
+  tooltips!: Record<string, any>;
   PLUGIN = {
     LRC: 'lrc', // Locally Repairable Erasure Code
     SHEC: 'shec', // Shingled Erasure Code
@@ -46,6 +46,8 @@ export class ErasureCodeProfileFormModalComponent
   dCalc: boolean;
   lrcGroups: number;
   lrcMultiK: number;
+
+  public CrushFailureDomains = CrushFailureDomains;
 
   constructor(
     private formBuilder: CdFormBuilder,
@@ -89,6 +91,14 @@ export class ErasureCodeProfileFormModalComponent
         [Validators.required, CdValidators.custom('max', () => this.baseValueValidation())]
       ],
       crushFailureDomain: '', // Will be preselected
+      crushNumFailureDomains: [
+        0,
+        CdValidators.requiredIf({ crushOsdsPerFailureDomain: { op: 'minValue', arg1: 1 } })
+      ],
+      crushOsdsPerFailureDomain: [
+        0,
+        CdValidators.requiredIf({ crushNumFailureDomains: { op: 'minValue', arg1: 1 } })
+      ],
       crushRoot: null, // Will be preselected
       crushDeviceClass: '', // Will be preselected
       directory: '',
@@ -136,9 +146,12 @@ export class ErasureCodeProfileFormModalComponent
 
   private baseValueValidation(dataChunk: boolean = false): boolean {
     return this.validValidation(() => {
+      const kMSum =
+        this.form.get('crushFailureDomain').value === CrushFailureDomains.Host
+          ? this.getKMSum() + 1
+          : this.getKMSum();
       return (
-        this.getKMSum() > this.deviceCount &&
-        this.form.getValue('k') > this.form.getValue('m') === dataChunk
+        kMSum > this.deviceCount && this.form.getValue('k') > this.form.getValue('m') === dataChunk
       );
     });
   }
@@ -357,6 +370,8 @@ export class ErasureCodeProfileFormModalComponent
   }
 
   ngOnInit() {
+    this.tooltips = this.ecpService.formTooltips;
+
     this.ecpService
       .getInfo()
       .subscribe(
@@ -375,7 +390,8 @@ export class ErasureCodeProfileFormModalComponent
             nodes,
             this.form.get('crushRoot'),
             this.form.get('crushFailureDomain'),
-            this.form.get('crushDeviceClass')
+            this.form.get('crushDeviceClass'),
+            false
           );
           this.plugins = plugins;
           this.names = names;
@@ -448,6 +464,8 @@ export class ErasureCodeProfileFormModalComponent
   private extendJson(name: string, ecp: ErasureCodeProfile) {
     const differentApiAttributes = {
       crushFailureDomain: 'crush-failure-domain',
+      crushNumFailureDomains: 'crush-num-failure-domains',
+      crushOsdsPerFailureDomain: 'crush-osds-per-failure-domain',
       crushRoot: 'crush-root',
       crushDeviceClass: 'crush-device-class',
       packetSize: 'packetsize',
@@ -455,5 +473,10 @@ export class ErasureCodeProfileFormModalComponent
     };
     const value = this.form.getValue(name);
     ecp[differentApiAttributes[name] || name] = name === 'crushRoot' ? value.name : value;
+  }
+
+  onCrushFailureDomainChane() {
+    this.form.get('k').updateValueAndValidity();
+    this.form.get('m').updateValueAndValidity();
   }
 }

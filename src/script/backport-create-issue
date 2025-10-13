@@ -34,7 +34,7 @@ import os
 import re
 import time
 from redminelib import Redmine  # https://pypi.org/project/python-redmine/
-from redminelib.exceptions import ResourceAttrError
+from redminelib.exceptions import ResourceAttrError, ValidationError
 
 redmine_endpoint = "https://tracker.ceph.com"
 project_name = "Ceph"
@@ -137,7 +137,7 @@ def releases():
     return ('argonaut', 'bobtail', 'cuttlefish', 'dumpling', 'emperor',
             'firefly', 'giant', 'hammer', 'infernalis', 'jewel', 'kraken',
             'luminous', 'mimic', 'nautilus', 'octopus', 'pacific', 'quincy',
-            'reef', 'squid')
+            'reef', 'squid', 'tentacle')
 
 def populate_status_dict(r):
     for status in r.issue_status.all():
@@ -177,7 +177,7 @@ def url(issue):
 def set_backport(issue):
     for field in issue['custom_fields']:
         if field['name'] == 'Backport' and field['value'] != 0:
-            issue['backports'] = set(re.findall('\w+', field['value']))
+            issue['backports'] = set(re.findall(r'\w+', field['value']))
             logging.debug("backports for " + str(issue['id']) +
                           " is " + str(field['value']) + " " +
                           str(issue['backports']))
@@ -239,16 +239,26 @@ def update_relations(r, issue, dry_run):
         if dry_run:
             logging.info(url(issue) + " add backport to " + release)
             continue
-        other = r.issue.create(project_id=issue['project']['id'],
-                               tracker_id=backport_tracker_id,
-                               subject=subject,
-                               priority_id=issue['priority']['id'],
-                               assigned_to_id=assigned_to_id,
-                               target_version=None,
-                               custom_fields=[{
-                                   "id": release_id,
-                                   "value": release,
-                               }])
+        create_args = {
+            "project_id": issue['project']['id'],
+            "tracker_id": backport_tracker_id,
+            "subject": subject,
+            "priority_id": issue['priority']['id'],
+            "assigned_to_id": assigned_to_id,
+            "target_version": None,
+            "custom_fields": [
+                {
+                    "id": release_id,
+                    "value": release,
+                }
+            ]
+        }
+        try:
+            other = r.issue.create(**create_args)
+        except ValidationError as e:
+            logging.info("Retrying backport issue creation for {issue['id']} to {release} without an assignee due to failure: {e}")
+            del create_args['assigned_to_id']
+            other = r.issue.create(**create_args)
         logging.debug("Rate-limiting to avoid seeming like a spammer")
         time.sleep(delay_seconds)
         r.issue_relation.create(issue_id=issue['id'],
@@ -309,11 +319,13 @@ def mark_as_processed(r, issue):
     logging.debug("custom_fields: %s", list(issue['custom_fields']))
 
     tags_cf = next(filter(lambda x: x['id'] == CF_TAGS, issue['custom_fields']), None)
-
     if tags_cf is None:
         tags = ''
     else:
-        tags = tags_cf.value
+        try:
+            tags = tags_cf.value
+        except ResourceAttrError:
+            tags = None
         if tags is None:
             tags = ''
         else:

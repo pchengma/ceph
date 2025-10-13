@@ -1,12 +1,11 @@
 import { Component, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { Router } from '@angular/router';
 
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import { Observable, Subscriber, Subscription } from 'rxjs';
 
 import { RbdMirroringService } from '~/app/shared/api/rbd-mirroring.service';
 import { TableStatusViewCache } from '~/app/shared/classes/table-status-view-cache';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { URLVerbs } from '~/app/shared/constants/app.constants';
 import { Icons } from '~/app/shared/enum/icons.enum';
 import { CdTableAction } from '~/app/shared/models/cd-table-action';
@@ -14,9 +13,10 @@ import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 import { FinishedTask } from '~/app/shared/models/finished-task';
 import { Permission } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 import { PoolEditPeerModalComponent } from '../pool-edit-peer-modal/pool-edit-peer-modal.component';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { DeletionImpact } from '~/app/shared/enum/delete-confirmation-modal-impact.enum';
 
 const BASE_URL = '/block/mirroring';
 @Component({
@@ -38,8 +38,6 @@ export class PoolListComponent implements OnInit, OnDestroy {
   tableActions: CdTableAction[];
   selection = new CdTableSelection();
 
-  modalRef: NgbModalRef;
-
   data: [];
   columns: {};
 
@@ -48,7 +46,7 @@ export class PoolListComponent implements OnInit, OnDestroy {
   constructor(
     private authStorageService: AuthStorageService,
     private rbdMirroringService: RbdMirroringService,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private taskWrapper: TaskWrapperService,
     private router: Router
   ) {
@@ -142,14 +140,15 @@ export class PoolListComponent implements OnInit, OnDestroy {
     if (mode === 'edit') {
       initialState['peerUUID'] = this.getPeerUUID();
     }
-    this.modalRef = this.modalService.show(PoolEditPeerModalComponent, initialState);
+    this.modalService.show(PoolEditPeerModalComponent, initialState);
   }
 
   deletePeersModal() {
     const poolName = this.selection.first().name;
     const peerUUID = this.getPeerUUID();
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalService.show(DeleteConfirmationModalComponent, {
+      impact: DeletionImpact.high,
       itemDescription: $localize`mirror peer`,
       itemNames: [`${poolName} (${peerUUID})`],
       submitActionObservable: () =>

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,11 +21,13 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <chrono>
 
 #include <boost/container/flat_map.hpp>
 #include <boost/lockfree/queue.hpp>
 
 #include "KernelDevice.h"
+#include "log/Log.h"
 #include "include/buffer_raw.h"
 #include "include/intarith.h"
 #include "include/types.h"
@@ -33,6 +36,7 @@
 #include "include/str_map.h"
 #include "common/blkdev.h"
 #include "common/buffer_instrumentation.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/errno.h"
 #if defined(__FreeBSD__)
 #include "bsm/audit_errno.h"
@@ -43,6 +47,12 @@
 #include "global/global_context.h"
 #include "io_uring.h"
 
+#ifdef WITH_CRIMSON
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
+
 #define dout_context cct
 #define dout_subsys ceph_subsys_bdev
 #undef dout_prefix
@@ -52,6 +62,7 @@ using std::list;
 using std::map;
 using std::string;
 using std::vector;
+using namespace std::literals;
 
 using ceph::bufferlist;
 using ceph::bufferptr;
@@ -59,7 +70,7 @@ using ceph::make_timespan;
 using ceph::mono_clock;
 using ceph::operator <<;
 
-KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb, void *d_cbpriv)
+KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb, void *d_cbpriv, const char* dev_name)
   : BlockDevice(cct, cb, cbpriv),
     aio(false), dio(false),
     discard_callback(d_cb),
@@ -88,10 +99,27 @@ KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, ai
     }
     io_queue = std::make_unique<aio_queue_t>(iodepth);
   }
+
+  char name[128];
+  sprintf(name, "blk-kernel-device-%s", dev_name);
+  PerfCountersBuilder b(cct, name,
+                       l_blk_kernel_device_first, l_blk_kernel_device_last);
+  b.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
+  b.add_u64_counter(l_blk_kernel_device_discard_op, "discard_op",
+            "Number of discard ops issued to kernel device");
+  b.add_u64_counter(l_blk_kernel_discard_threads, "discard_threads",
+            "Number of discard threads running");
+
+  logger.reset(b.create_perf_counters());
+  cct->get_perfcounters_collection()->add(logger.get());
 }
 
 KernelDevice::~KernelDevice()
 {
+  if (logger) {
+    cct->get_perfcounters_collection()->remove(logger.get());
+    logger.reset();
+  }
   cct->_conf.remove_observer(this);
 }
 
@@ -134,7 +162,6 @@ int KernelDevice::open(const string& p)
 {
   path = p;
   int r = 0, i = 0;
-  uint64_t num_discard_threads = 0;
   dout(1) << __func__ << " path " << path << dendl;
 
   struct stat statbuf;
@@ -281,15 +308,16 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
-  r = _aio_start();
-  if (r < 0) {
-    goto out_fail;
+  if (size > 0) {
+    r = _aio_start();
+    if (r < 0) {
+      goto out_fail;
+    }
+  } else {
+    aio = false;
   }
 
-  num_discard_threads = cct->_conf.get_val<uint64_t>("bdev_async_discard_threads");
-  if (support_discard && cct->_conf->bdev_enable_discard && num_discard_threads > 0) {
-    _discard_start();
-  }
+  _discard_update_threads();
 
   // round size down to an even block
   size &= ~(block_size - 1);
@@ -344,11 +372,11 @@ void KernelDevice::close()
   extblkdev::release_device(ebd_impl);
 
   for (int i = 0; i < WRITE_LIFE_MAX; i++) {
-    assert(fd_directs[i] >= 0);
+    ceph_assert(fd_directs[i] >= 0);
     VOID_TEMP_FAILURE_RETRY(::close(fd_directs[i]));
     fd_directs[i] = -1;
 
-    assert(fd_buffereds[i] >= 0);
+    ceph_assert(fd_buffereds[i] >= 0);
     VOID_TEMP_FAILURE_RETRY(::close(fd_buffereds[i]));
     fd_buffereds[i] = -1;
   }
@@ -530,54 +558,70 @@ void KernelDevice::_aio_stop()
   if (aio) {
     dout(10) << __func__ << dendl;
     aio_stop = true;
+
+    IOContext wakeup_ctx(cct, nullptr, false);
+    bufferlist bl;
+    aio_read(0, block_size, &bl, &wakeup_ctx);
+    aio_submit(&wakeup_ctx);
+
     aio_thread.join();
+
+    if (cct->_conf->bdev_debug_aio) {
+      for (auto& i: wakeup_ctx.running_aios) {
+	debug_aio_unlink(i);
+      }
+    }
+
     aio_stop = false;
     io_queue->shutdown();
   }
 }
 
-void KernelDevice::_discard_start()
+void KernelDevice::_discard_update_threads(bool discard_stop)
 {
-  uint64_t num = cct->_conf.get_val<uint64_t>("bdev_async_discard_threads");
-  dout(10) << __func__ << " starting " << num << " threads" << dendl;
-
   std::unique_lock l(discard_lock);
 
-  target_discard_threads = num;
-  discard_threads.reserve(num);
-  for(uint64_t i = 0; i < num; i++)
-  {
-    // All threads created with the same name
-    discard_threads.emplace_back(new DiscardThread(this, i));
-    discard_threads.back()->create("bstore_discard");
+  uint64_t oldcount = discard_threads.size();
+  uint64_t newcount = cct->_conf.get_val<uint64_t>("bdev_async_discard_threads");
+  if (!cct->_conf.get_val<bool>("bdev_enable_discard") || !support_discard || discard_stop) {
+    newcount = 0;
   }
 
-  dout(10) << __func__ << " started " << num << " threads" << dendl;
+  // Increase? Spawn now, it's quick
+  if (newcount > oldcount) {
+    dout(10) << __func__ << " starting " << (newcount - oldcount) << " additional discard threads" << dendl;
+    discard_threads.reserve(newcount);
+    for(uint64_t i = oldcount; i < newcount; i++)
+    {
+      // All threads created with the same name
+      discard_threads.emplace_back(new DiscardThread(this));
+      discard_threads.back()->create("bstore_discard");
+    }
+  // Decrease? Signal threads after telling them to stop
+  } else if (newcount < oldcount) {
+    std::vector<DiscardThread*> discard_threads_to_stop;
+    dout(10) << __func__ << " stopping " << (oldcount - newcount) << " existing discard threads" << dendl;
+
+    // Signal the last threads to quit, and stop tracking them
+    for(uint64_t i = oldcount; i > newcount; i--) {
+      discard_threads[i-1]->stop = true;
+      discard_threads_to_stop.push_back(discard_threads[i-1]);
+    }
+    discard_cond.notify_all();
+    discard_threads.resize(newcount);
+    l.unlock();
+    for (auto t : discard_threads_to_stop) {
+      t->join();
+      delete t;
+    }
+  }
+  logger->set(l_blk_kernel_discard_threads, discard_threads.size());
 }
 
 void KernelDevice::_discard_stop()
 {
   dout(10) << __func__ << dendl;
-
-  // Signal threads to stop, then wait for them to join
-  {
-    std::unique_lock l(discard_lock);
-    while (discard_threads.empty()) {
-      discard_cond.wait(l);
-    }
-
-    for(auto &t : discard_threads) {
-      t->stop = true;
-    }
-
-    discard_cond.notify_all();
-  }
-
-  // Threads are shared pointers and are cleaned up for us
-  for(auto &t : discard_threads)
-    t->join();
-  discard_threads.clear();
-
+  _discard_update_threads(true);
   dout(10) << __func__ << " stopped" << dendl;
 }
 
@@ -592,6 +636,7 @@ void KernelDevice::discard_drain()
   dout(10) << __func__ << dendl;
   std::unique_lock l(discard_lock);
   while (!discard_queued.empty() || (discard_running > 0)) {
+    need_notify = true;
     discard_cond.wait(l);
   }
 }
@@ -737,9 +782,9 @@ void KernelDevice::swap_discard_queued(interval_set<uint64_t>& other)
   discard_queued.swap(other);
 }
 
-void KernelDevice::_discard_thread(uint64_t tid)
+void KernelDevice::_discard_thread(DiscardThread* thr)
 {
-  dout(10) << __func__ << " thread " << tid << " start" << dendl;
+  dout(10) << __func__ << " thread " << thr << " start" << dendl;
 
   // Thread-local list of processing discards
   interval_set<uint64_t> discard_processing;
@@ -747,32 +792,45 @@ void KernelDevice::_discard_thread(uint64_t tid)
   std::unique_lock l(discard_lock);
   discard_cond.notify_all();
 
-  // Keeps the shared pointer around until erased from the vector
-  // and until we leave this function
-  auto thr = discard_threads[tid];
-
   while (true) {
     ceph_assert(discard_processing.empty());
     if (discard_queued.empty()) {
       if (thr->stop)
 	break;
       dout(20) << __func__ << " sleep" << dendl;
-      discard_cond.notify_all(); // for the thread trying to drain...
+      if (need_notify) {
+        discard_cond.notify_all(); // for the thread trying to drain...
+        need_notify = false;
+      }
       discard_cond.wait(l);
       dout(20) << __func__ << " wake" << dendl;
     } else {
+      // If there are non-stopped discard threads and we have been requested
+      // to stop, do so now. Otherwise, we need to proceed because
+      // discard_queued is non-empty and at least one thread is needed to
+      // drain it.
+      if (thr->stop && !discard_threads.empty())
+        break;
+
+      if (cct->_conf->bdev_debug_discard_sleep > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(cct->_conf->bdev_debug_discard_sleep));
+
       // Limit local processing to MAX_LOCAL_DISCARD items.
       // This will allow threads to work in parallel
       //      instead of a single thread taking over the whole discard_queued.
       // It will also allow threads to finish in a timely manner.
       constexpr unsigned MAX_LOCAL_DISCARD = 32;
       unsigned count = 0;
-      for (auto p = discard_queued.begin();
-	   p != discard_queued.end() && count < MAX_LOCAL_DISCARD;
-	   ++p, ++count) {
-	discard_processing.insert(p.get_start(), p.get_len());
-	discard_queued.erase(p);
+      size_t bytes_discarded = 0;
+      for (auto it = discard_queued.begin();
+           it != discard_queued.end() && count < MAX_LOCAL_DISCARD;
+           ++count) {
+        discard_processing.insert(it.get_start(), it.get_len());
+	bytes_discarded += it.get_len();
+        it = discard_queued.erase(it);
       }
+      discard_queue_bytes -= bytes_discarded;
+      discard_queue_length = discard_queued.num_intervals();
 
       // there are multiple active threads -> must use a counter instead of a flag
       discard_running ++;
@@ -781,6 +839,7 @@ void KernelDevice::_discard_thread(uint64_t tid)
       for (auto p = discard_processing.begin(); p != discard_processing.end(); ++p) {
         _discard(p.get_start(), p.get_len());
       }
+      logger->inc(l_blk_kernel_device_discard_op, discard_processing.num_intervals());
 
       discard_callback(discard_callback_priv, static_cast<void*>(&discard_processing));
       discard_processing.clear();
@@ -790,35 +849,60 @@ void KernelDevice::_discard_thread(uint64_t tid)
     }
   }
 
-  dout(10) << __func__ << " thread " << tid << " finish" << dendl;
+  dout(10) << __func__ << " thread " << thr << " finish" << dendl;
 }
 
 // this is private and is expected that the caller checks that discard
 // threads are running via _discard_started()
-void KernelDevice::_queue_discard(interval_set<uint64_t> &to_release)
+bool KernelDevice::_queue_discard(interval_set<uint64_t> &to_release)
 {
   if (to_release.empty())
-    return;
+    return false;
+
+  auto max_pending = cct->_conf->bdev_async_discard_max_pending;
 
   std::lock_guard l(discard_lock);
+
+  if (max_pending > 0 && discard_queued.num_intervals() >= max_pending) {
+    discard_cond.notify_one();
+    return false;
+  }
+
+  if(discard_queue_bytes >= cct->_conf->bdev_discard_max_bytes) {
+    discard_cond.notify_one();
+    return false;
+  }
+
   discard_queued.insert(to_release);
+
+  size_t discarded_bytes = 0;
+  for(auto p = to_release.begin(); p != to_release.end(); ++p){
+    discarded_bytes += p.get_len();
+  }
+  discard_queue_bytes += discarded_bytes;
+
+  discard_queue_length = discard_queued.num_intervals();
+
   discard_cond.notify_one();
+  return true;
 }
 
 // return true only if discard was queued, so caller won't have to do
 // alloc->release, otherwise return false
-bool KernelDevice::try_discard(interval_set<uint64_t> &to_release, bool async)
+bool KernelDevice::try_discard(interval_set<uint64_t> &to_release,
+                               bool async,
+                               bool force)
 {
-  if (!support_discard || !cct->_conf->bdev_enable_discard)
+  if (!support_discard || !(force || cct->_conf->bdev_enable_discard))
     return false;
 
   if (async && _discard_started()) {
-    _queue_discard(to_release);
-    return true;
+    return _queue_discard(to_release);
   } else {
     for (auto p = to_release.begin(); p != to_release.end(); ++p) {
       _discard(p.get_start(), p.get_len());
     }
+    logger->inc(l_blk_kernel_device_discard_op, to_release.num_intervals());
   }
   return false;
 }
@@ -924,11 +1008,15 @@ void KernelDevice::aio_submit(IOContext *ioc)
   }
 
   void *priv = static_cast<void*>(ioc);
+  int retry_max = cct->_conf->bdev_aio_submit_retry_max;
+  int initial_delay_us = cct->_conf->bdev_aio_submit_retry_initial_delay_us;
+  dout(20) << __func__
+	   << " bdev_aio_submit_retry_max " << retry_max
+	   << " bdev_aio_submit_retry_initial_delay_us " << initial_delay_us
+	   << dendl;
   int r, retries = 0;
-  // num of pending aios should not overflow when passed to submit_batch()
-  assert(pending <= std::numeric_limits<uint16_t>::max());
   r = io_queue->submit_batch(ioc->running_aios.begin(), e,
-			     pending, priv, &retries);
+			     priv, &retries, retry_max, initial_delay_us);
 
   if (retries)
     derr << __func__ << " retries " << retries << dendl;
@@ -1130,10 +1218,23 @@ int KernelDevice::_discard(uint64_t offset, uint64_t len)
 	       << dendl;
     return 0;
   }
-  dout(10) << __func__
-	   << " 0x" << std::hex << offset << "~" << len << std::dec
-	   << dendl;
-  r = BlkDev{fd_directs[WRITE_LIFE_NOT_SET]}.discard((int64_t)offset, (int64_t)len);
+  uint64_t max_len = cct->_conf->bdev_max_discard_length;
+  if (max_len) {
+    while (len > 0 && r == 0) {
+      auto l = std::min(max_len, len);
+      dout(10) << __func__
+               << " 0x" << std::hex << offset << "~" << l << std::dec
+               << dendl;
+      r = BlkDev{fd_directs[WRITE_LIFE_NOT_SET]}.discard((int64_t)offset, (int64_t)l);
+      offset += l;
+      len -= l;
+    }
+  } else {
+    dout(10) << __func__
+             << " 0x" << std::hex << offset << "~" << len << std::dec
+             << dendl;
+    r = BlkDev{fd_directs[WRITE_LIFE_NOT_SET]}.discard((int64_t)offset, (int64_t)len);
+  }
   return r;
 }
 
@@ -1325,6 +1426,7 @@ int KernelDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
 	 << " since " << start1 << ", timeout is "
 	 << age
 	 << "s" << dendl;
+    add_stalled_read_event();
   }
   if (r < 0) {
     if (ioc->allow_eio && is_expected_ioerr(-errno)) {
@@ -1398,6 +1500,7 @@ int KernelDevice::direct_read_unaligned(uint64_t off, uint64_t len, char *buf)
 	 << " since " << start1 << ", timeout is "
 	 << age
 	 << "s" << dendl;
+    add_stalled_read_event();
   }
 
   if (r < 0) {
@@ -1461,6 +1564,7 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
            << " (buffered) since " << start1 << ", timeout is "
 	   << age
 	   << "s" << dendl;
+      add_stalled_read_event();
     }
   } else {
     //direct and aligned read
@@ -1471,6 +1575,7 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
            << " (direct) since " << start1 << ", timeout is "
 	   << age
 	   << "s" << dendl;
+      add_stalled_read_event();
     }
     if (r < 0) {
       r = -errno;
@@ -1507,56 +1612,19 @@ int KernelDevice::invalidate_cache(uint64_t off, uint64_t len)
   return r;
 }
 
-const char** KernelDevice::get_tracked_conf_keys() const
+std::vector<std::string> KernelDevice::get_tracked_keys()
+    const noexcept
 {
-  static const char* KEYS[] = {
-    "bdev_async_discard_threads",
-    NULL
+  return {
+    "bdev_async_discard_threads"s,
+    "bdev_enable_discard"s
   };
-  return KEYS;
 }
 
 void KernelDevice::handle_conf_change(const ConfigProxy& conf,
 			     const std::set <std::string> &changed)
 {
-  if (changed.count("bdev_async_discard_threads")) {
-    std::unique_lock l(discard_lock);
-
-    uint64_t oldval = target_discard_threads;
-    uint64_t newval = cct->_conf.get_val<uint64_t>("bdev_async_discard_threads");
-
-    target_discard_threads = newval;
-
-    // Increase? Spawn now, it's quick
-    if (newval > oldval) {
-      dout(10) << __func__ << " starting " << (newval - oldval) << " additional discard threads" << dendl;
-      discard_threads.reserve(target_discard_threads);
-      for(uint64_t i = oldval; i < newval; i++)
-      {
-        // All threads created with the same name
-        discard_threads.emplace_back(new DiscardThread(this, i));
-        discard_threads.back()->create("bstore_discard");
-      }
-    } else {
-      // Decrease? Signal threads after telling them to stop
-      dout(10) << __func__ << " stopping " << (oldval - newval) << " existing discard threads" << dendl;
-
-      // Decreasing to zero is exactly the same as disabling async discard.
-      // Signal all threads to stop
-      if(newval == 0) {
-        _discard_stop();
-      } else {
-        // Signal the last threads to quit, and stop tracking them
-        for(uint64_t i = oldval - 1; i >= newval; i--)
-        {
-          // Also detach the thread so we no longer need to join
-          discard_threads[i]->stop = true;
-          discard_threads[i]->detach();
-          discard_threads.erase(discard_threads.begin() + i);
-        }
-      }
-
-      discard_cond.notify_all();
-    }
+  if (changed.count("bdev_async_discard_threads") || changed.count("bdev_enable_discard")) {
+    _discard_update_threads();
   }
 }

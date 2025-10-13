@@ -1,19 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/compat.h"
-#include "common/ceph_context.h"
-#include "common/config.h"
 #include "common/snap_types.h"
 #include "common/Clock.h"
 #include "common/bit_vector.hpp"
-#include "include/encoding.h"
-#include "include/types.h"
-#include "include/rados/librados.h"
+#include "include/rados/librados.hpp"
 #include "include/rbd/object_map_types.h"
 #include "include/rbd_types.h"
 #include "include/stringify.h"
-#include "cls/rbd/cls_rbd.h"
 #include "cls/rbd/cls_rbd_client.h"
 #include "cls/rbd/cls_rbd_types.h"
 #include "librbd/Types.h"
@@ -31,8 +26,6 @@ using cls::rbd::MIRROR_PEER_DIRECTION_RX;
 using cls::rbd::MIRROR_PEER_DIRECTION_TX;
 using cls::rbd::MIRROR_PEER_DIRECTION_RX_TX;
 using ::librbd::ParentImageInfo;
-using ceph::encode;
-using ceph::decode;
 
 static int snapshot_add(librados::IoCtx *ioctx, const std::string &oid,
                         uint64_t snap_id, const std::string &snap_name) {
@@ -1606,7 +1599,9 @@ TEST_F(TestClsRbd, mirror) {
   ASSERT_EQ(-ENOENT, mirror_peer_list(&ioctx, &peers));
 
   std::string uuid;
+  std::string remote_ns;
   ASSERT_EQ(-ENOENT, mirror_uuid_get(&ioctx, &uuid));
+  ASSERT_EQ(-ENOENT, mirror_remote_namespace_get(&ioctx, &remote_ns));
   ASSERT_EQ(-EINVAL, mirror_peer_add(&ioctx, {"uuid1", MIRROR_PEER_DIRECTION_RX,
                                               "siteA", "client",
                                               "mirror uuid"}));
@@ -1622,11 +1617,16 @@ TEST_F(TestClsRbd, mirror) {
   ASSERT_EQ(0, mirror_uuid_get(&ioctx, &uuid));
   ASSERT_EQ("mirror-uuid", uuid);
 
+  ASSERT_EQ(0, mirror_remote_namespace_set(&ioctx, "remote-ns"));
+  ASSERT_EQ(0, mirror_remote_namespace_get(&ioctx, &remote_ns));
+  ASSERT_EQ("remote-ns", remote_ns);
+
   ASSERT_EQ(0, mirror_mode_set(&ioctx, cls::rbd::MIRROR_MODE_IMAGE));
   ASSERT_EQ(0, mirror_mode_get(&ioctx, &mirror_mode));
   ASSERT_EQ(cls::rbd::MIRROR_MODE_IMAGE, mirror_mode);
 
   ASSERT_EQ(-EINVAL, mirror_uuid_set(&ioctx, "new-mirror-uuid"));
+  ASSERT_EQ(-EINVAL, mirror_remote_namespace_set(&ioctx, "new-remote-ns"));
 
   ASSERT_EQ(0, mirror_mode_set(&ioctx, cls::rbd::MIRROR_MODE_POOL));
   ASSERT_EQ(0, mirror_mode_get(&ioctx, &mirror_mode));
@@ -1726,6 +1726,7 @@ TEST_F(TestClsRbd, mirror) {
   ASSERT_EQ(0, mirror_mode_get(&ioctx, &mirror_mode));
   ASSERT_EQ(cls::rbd::MIRROR_MODE_DISABLED, mirror_mode);
   ASSERT_EQ(-ENOENT, mirror_uuid_get(&ioctx, &uuid));
+  ASSERT_EQ(-ENOENT, mirror_remote_namespace_get(&ioctx, &remote_ns));
 }
 
 TEST_F(TestClsRbd, mirror_image) {
@@ -2148,7 +2149,7 @@ TEST_F(TestClsRbd, mirror_image_map)
 {
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-  ioctx.remove(RBD_MIRRORING);
+  ioctx.remove(RBD_MIRROR_LEADER);
 
   std::map<std::string, cls::rbd::MirrorImageMap> image_mapping;
   ASSERT_EQ(-ENOENT, mirror_image_map_list(&ioctx, "", 0, &image_mapping));
@@ -2169,7 +2170,7 @@ TEST_F(TestClsRbd, mirror_image_map)
 
       mirror_image_map_update(&op, global_image_id, mirror_image_map);
     }
-    ASSERT_EQ(0, ioctx.operate(RBD_MIRRORING, &op));
+    ASSERT_EQ(0, ioctx.operate(RBD_MIRROR_LEADER, &op));
   }
 
   ASSERT_EQ(0, mirror_image_map_list(&ioctx, "", 1000, &image_mapping));
@@ -2195,7 +2196,7 @@ TEST_F(TestClsRbd, mirror_image_map)
   librados::ObjectWriteOperation op;
   mirror_image_map_remove(&op, "1");
   mirror_image_map_update(&op, "10", expected_mirror_image_map);
-  ASSERT_EQ(0, ioctx.operate(RBD_MIRRORING, &op));
+  ASSERT_EQ(0, ioctx.operate(RBD_MIRROR_LEADER, &op));
 
   ASSERT_EQ(0, mirror_image_map_list(&ioctx, "0", 1, &image_mapping));
   ASSERT_EQ(1U, image_mapping.size());
@@ -2676,12 +2677,12 @@ TEST_F(TestClsRbd, group_snap_set) {
 
   set<string> keys;
   ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(3U, keys.size());
 
   auto it = keys.begin();
-  ASSERT_EQ(1U, keys.size());
-
-  string snap_key = "snapshot_" + stringify(snap.id);
-  ASSERT_EQ(snap_key, *it);
+  ASSERT_EQ("snap_max_order", *it++);
+  ASSERT_EQ("snap_order_" + snap.id, *it++);
+  ASSERT_EQ("snapshot_" + snap.id, *it);
 }
 
 TEST_F(TestClsRbd, group_snap_list) {
@@ -2692,18 +2693,56 @@ TEST_F(TestClsRbd, group_snap_list) {
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
   string snap_id1 = "snap_id1";
-  cls::rbd::GroupSnapshot snap1 = {snap_id1, "test_snapshot1", cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  cls::rbd::GroupSnapshot snap1 = {snap_id1, "test_snapshot1",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
   ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap1));
 
+  string snap_id0 = "snap_id0";
+  cls::rbd::GroupSnapshot snap0 = {snap_id0, "test_snapshot0",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap0));
+
   string snap_id2 = "snap_id2";
-  cls::rbd::GroupSnapshot snap2 = {snap_id2, "test_snapshot2", cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  cls::rbd::GroupSnapshot snap2 = {snap_id2, "test_snapshot2",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
   ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap2));
 
   std::vector<cls::rbd::GroupSnapshot> snapshots;
-  ASSERT_EQ(0, group_snap_list(&ioctx, group_id, cls::rbd::GroupSnapshot(), 10, &snapshots));
-  ASSERT_EQ(2U, snapshots.size());
-  ASSERT_EQ(snap_id1, snapshots[0].id);
-  ASSERT_EQ(snap_id2, snapshots[1].id);
+  ASSERT_EQ(0, group_snap_list(&ioctx, group_id, cls::rbd::GroupSnapshot(),
+                               10, &snapshots));
+  ASSERT_EQ(3U, snapshots.size());
+
+  ASSERT_EQ(snap_id0, snapshots[0].id);
+  ASSERT_EQ(snap_id1, snapshots[1].id);
+  ASSERT_EQ(snap_id2, snapshots[2].id);
+
+  std::map<std::string, uint64_t> snap_orders;
+  ASSERT_EQ(0, group_snap_list_order(&ioctx, group_id, "", 10, &snap_orders));
+  ASSERT_EQ(3U, snap_orders.size());
+
+  ASSERT_EQ(1, snap_orders[snap_id1]);
+  ASSERT_EQ(2, snap_orders[snap_id0]);
+  ASSERT_EQ(3, snap_orders[snap_id2]);
+
+  ASSERT_EQ(0, group_snap_remove(&ioctx, group_id, snap_id2));
+
+  ASSERT_EQ(0, group_snap_list_order(&ioctx, group_id, "", 10, &snap_orders));
+  ASSERT_EQ(2U, snap_orders.size());
+
+  ASSERT_EQ(1, snap_orders[snap_id1]);
+  ASSERT_EQ(2, snap_orders[snap_id0]);
+
+  string snap_id4 = "snap_id4";
+  cls::rbd::GroupSnapshot snap4 = {snap_id4, "test_snapshot4",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap4));
+
+  ASSERT_EQ(0, group_snap_list_order(&ioctx, group_id, "", 10, &snap_orders));
+  ASSERT_EQ(3U, snap_orders.size());
+
+  ASSERT_EQ(1, snap_orders[snap_id1]);
+  ASSERT_EQ(2, snap_orders[snap_id0]);
+  ASSERT_EQ(4, snap_orders[snap_id4]);
 }
 
 static std::string hexify(int v) {
@@ -2738,7 +2777,6 @@ TEST_F(TestClsRbd, group_snap_list_max_return) {
   }
 
   cls::rbd::GroupSnapshot last_snap = *snapshots.rbegin();
-
   ASSERT_EQ(0, group_snap_list(&ioctx, group_id, last_snap, 10, &snapshots));
   ASSERT_EQ(5U, snapshots.size());
   for (int i = 10; i < 15; ++i) {
@@ -2775,7 +2813,6 @@ TEST_F(TestClsRbd, group_snap_list_max_read) {
 
 TEST_F(TestClsRbd, group_snap_remove) {
   librados::IoCtx ioctx;
-
   ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
 
   string group_id = "group_id_snap_remove";
@@ -2787,12 +2824,12 @@ TEST_F(TestClsRbd, group_snap_remove) {
 
   set<string> keys;
   ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(3U, keys.size());
 
   auto it = keys.begin();
-  ASSERT_EQ(1U, keys.size());
-
-  string snap_key = "snapshot_" + stringify(snap.id);
-  ASSERT_EQ(snap_key, *it);
+  ASSERT_EQ("snap_max_order", *it++);
+  ASSERT_EQ("snap_order_" + snap.id, *it++);
+  ASSERT_EQ("snapshot_" + snap.id, *it);
 
   // Remove the snapshot
 
@@ -2800,7 +2837,40 @@ TEST_F(TestClsRbd, group_snap_remove) {
 
   ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
 
-  ASSERT_EQ(0U, keys.size());
+  ASSERT_EQ(1U, keys.size());
+  ASSERT_EQ("snap_max_order", *keys.begin());
+}
+
+TEST_F(TestClsRbd, group_snap_remove_without_order) {
+  librados::IoCtx ioctx;
+  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+
+  string group_id = "group_id_snap_remove_without_order";
+  ASSERT_EQ(0, ioctx.create(group_id, true));
+
+  string snap_id = "snap_id";
+  cls::rbd::GroupSnapshot snap = {snap_id, "test_snapshot",
+                                  cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap));
+
+  // Simulate an older snapshot by removing the order key
+  set<string> keys = {"snap_order_" + snap.id};
+  ASSERT_EQ(0, ioctx.omap_rm_keys(group_id, keys));
+
+  ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(2U, keys.size());
+
+  auto it = keys.begin();
+  ASSERT_EQ("snap_max_order", *it++);
+  ASSERT_EQ("snapshot_" + snap.id, *it);
+
+  // Remove the snapshot
+  ASSERT_EQ(0, group_snap_remove(&ioctx, group_id, snap_id));
+
+  ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(1U, keys.size());
+
+  ASSERT_EQ("snap_max_order", *keys.begin());
 }
 
 TEST_F(TestClsRbd, group_snap_get_by_id) {

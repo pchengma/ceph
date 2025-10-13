@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_CRYPTO_LOAD_REQUEST_H
 #define CEPH_LIBRBD_CRYPTO_LOAD_REQUEST_H
@@ -44,7 +44,7 @@ private:
     Context* m_on_finish;
 
     size_t m_format_idx;
-    bool m_is_current_format_cloned;
+    bool m_is_current_format_assumed;
     std::vector<EncryptionFormat> m_formats;
     I* m_current_image_ctx;
     std::string m_detected_format_name;

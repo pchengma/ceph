@@ -1,12 +1,16 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
-#include <include/compat.h>
+#ifdef _WIN32
+#include "include/compat.h" // for cpu_set_t
+#endif
+
 #include <sched.h>
-#include <ostream>
+#include <cstddef> // for size_t
 #include <set>
+#include <string>
 
 int parse_cpu_set_list(const char *s,
 		       size_t *cpu_set_size,

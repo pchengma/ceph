@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -15,20 +15,21 @@
 
 #include "common/Formatter.h"
 #include "rgw_formats.h"
-#include "rgw_metadata.h"
 #include "rgw_sal_fwd.h"
 
 #define RGW_USER_ANON_ID "anonymous"
 
-#define SECRET_KEY_LEN 40
-#define PUBLIC_ID_LEN 20
-#define RAND_SUBUSER_LEN 5
+constexpr auto SECRET_KEY_LEN=40;
+constexpr auto PUBLIC_ID_LEN=20;
+constexpr auto RAND_SUBUSER_LEN=5;
 
-#define XMLNS_AWS_S3 "http://s3.amazonaws.com/doc/2006-03-01/"
+constexpr auto XMLNS_AWS_S3 = "http://s3.amazonaws.com/doc/2006-03-01/";
 
 class RGWUserCtl;
 class RGWBucketCtl;
 class RGWUserBuckets;
+class RGWMetadataHandler;
+class RGWSI_User;
 
 // generate a random secret access key of SECRET_KEY_LEN=40
 void rgw_generate_secret_key(CephContext* cct,
@@ -59,10 +60,12 @@ struct RGWUID
   void dump(Formatter *f) const {
     f->dump_string("user_id", id);
   }
-  static void generate_test_instances(std::list<RGWUID*>& o) {
-    o.push_back(new RGWUID);
-    o.push_back(new RGWUID);
-    o.back()->id = "test:tester";
+  static std::list<RGWUID> generate_test_instances() {
+    std::list<RGWUID> o;
+    o.emplace_back();
+    o.emplace_back();
+    o.back().id = "test:tester";
+    return o;
   }
 };
 WRITE_CLASS_ENCODER(RGWUID)
@@ -728,43 +731,6 @@ public:
 		    optional_yield y);
 };
 
-struct RGWUserCompleteInfo {
-  RGWUserInfo info;
-  std::map<std::string, bufferlist> attrs;
-  bool has_attrs{false};
-
-  void dump(Formatter * const f) const {
-    info.dump(f);
-    encode_json("attrs", attrs, f);
-  }
-
-  void decode_json(JSONObj *obj) {
-    decode_json_obj(info, obj);
-    has_attrs = JSONDecoder::decode_json("attrs", attrs, obj);
-  }
-};
-
-class RGWUserMetadataObject : public RGWMetadataObject {
-  RGWUserCompleteInfo uci;
-public:
-  RGWUserMetadataObject() {}
-  RGWUserMetadataObject(const RGWUserCompleteInfo& _uci, const obj_version& v, real_time m)
-      : uci(_uci) {
-    objv = v;
-    mtime = m;
-  }
-
-  void dump(Formatter *f) const override {
-    uci.dump(f);
-  }
-
-  RGWUserCompleteInfo& get_uci() {
-    return uci;
-  }
-};
-
-class RGWUserMetadataHandler;
-
 class RGWUserCtl
 {
   struct Svc {
@@ -776,13 +742,8 @@ class RGWUserCtl
     RGWBucketCtl *bucket{nullptr};
   } ctl;
 
-  RGWUserMetadataHandler *umhandler;
-  RGWSI_MetaBackend_Handler *be_handler{nullptr};
-  
 public:
-  RGWUserCtl(RGWSI_Zone *zone_svc,
-             RGWSI_User *user_svc,
-             RGWUserMetadataHandler *_umhandler);
+  RGWUserCtl(RGWSI_Zone *zone_svc, RGWSI_User *user_svc);
 
   void init(RGWBucketCtl *bucket_ctl) {
     ctl.bucket = bucket_ctl;
@@ -894,7 +855,6 @@ public:
                   const RemoveParams& params = {});
 };
 
-class RGWUserMetaHandlerAllocator {
-public:
-  static RGWMetadataHandler *alloc(RGWSI_User *user_svc);
-};
+// user metadata handler factory
+auto create_user_metadata_handler(RGWSI_User *user_svc)
+    -> std::unique_ptr<RGWMetadataHandler>;

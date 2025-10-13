@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -50,6 +51,7 @@
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/ReadResult.h"
 #include <algorithm>
+#include <shared_mutex> // for std::shared_lock
 #include <string>
 #include <utility>
 #include <vector>
@@ -263,10 +265,30 @@ void group_info_cpp_to_c(const librbd::group_info_t &cpp_info,
   c_info->pool = cpp_info.pool;
 }
 
-void group_snap_info_cpp_to_c(const librbd::group_snap_info_t &cpp_info,
+void group_snap_info_cpp_to_c(const librbd::group_snap_info2_t &cpp_info,
 			      rbd_group_snap_info_t *c_info) {
   c_info->name = strdup(cpp_info.name.c_str());
   c_info->state = cpp_info.state;
+}
+
+void group_snap_info2_cpp_to_c(const librbd::group_snap_info2_t &cpp_info,
+                               rbd_group_snap_info2_t *c_info) {
+  c_info->id = strdup(cpp_info.id.c_str());
+  c_info->name = strdup(cpp_info.name.c_str());
+  c_info->image_snap_name = strdup(cpp_info.image_snap_name.c_str());
+  c_info->state = cpp_info.state;
+  c_info->namespace_type = cpp_info.namespace_type;
+  c_info->image_snaps_count = cpp_info.image_snaps.size();
+  c_info->image_snaps = static_cast<rbd_group_image_snap_info_t*>(calloc(
+    cpp_info.image_snaps.size(), sizeof(rbd_group_image_snap_info_t)));
+  size_t i = 0;
+  for (const auto& cpp_image_snap : cpp_info.image_snaps) {
+    c_info->image_snaps[i].image_name = strdup(
+      cpp_image_snap.image_name.c_str());
+    c_info->image_snaps[i].pool_id = cpp_image_snap.pool_id;
+    c_info->image_snaps[i].snap_id = cpp_image_snap.snap_id;
+    i++;
+  }
 }
 
 void mirror_image_info_cpp_to_c(const librbd::mirror_image_info_t &cpp_info,
@@ -1082,6 +1104,18 @@ namespace librbd {
     return librbd::api::Mirror<>::mode_set(io_ctx, mirror_mode);
   }
 
+  int RBD::mirror_remote_namespace_get(IoCtx& io_ctx,
+                                       std::string* remote_namespace) {
+    return librbd::api::Mirror<>::remote_namespace_get(io_ctx,
+                                                       remote_namespace);
+  }
+
+  int RBD::mirror_remote_namespace_set(IoCtx& io_ctx,
+                                       const std::string& remote_namespace) {
+    return librbd::api::Mirror<>::remote_namespace_set(io_ctx,
+                                                       remote_namespace);
+  }
+
   int RBD::mirror_uuid_get(IoCtx& io_ctx, std::string* mirror_uuid) {
     return librbd::api::Mirror<>::uuid_get(io_ctx, mirror_uuid);
   }
@@ -1392,8 +1426,9 @@ namespace librbd {
     tracepoint(librbd, group_snap_create_enter,
                group_ioctx.get_pool_name().c_str(),
 	       group_ioctx.get_id(), group_name, snap_name);
+    auto flags = librbd::util::get_default_snap_create_flags(group_ioctx);
     int r = librbd::api::Group<>::snap_create(group_ioctx, group_name,
-                                              snap_name, 0);
+                                              snap_name, flags);
     tracepoint(librbd, group_snap_create_exit, r);
     return r;
   }
@@ -1436,9 +1471,34 @@ namespace librbd {
       return -ERANGE;
     }
 
-    int r = librbd::api::Group<>::snap_list(group_ioctx, group_name, snaps);
+    std::vector<group_snap_info2_t> snaps2;
+    int r = librbd::api::Group<>::snap_list(group_ioctx, group_name, true,
+                                            false, &snaps2);
+
+    for (const auto& snap : snaps2) {
+      snaps->push_back(
+        group_snap_info_t {
+          snap.name,
+          snap.state
+        });
+    }
+
     tracepoint(librbd, group_snap_list_exit, r);
     return r;
+  }
+
+  int RBD::group_snap_list2(IoCtx& group_ioctx, const char *group_name,
+                            std::vector<group_snap_info2_t> *snaps)
+  {
+    return librbd::api::Group<>::snap_list(group_ioctx, group_name, true,
+                                           false, snaps);
+  }
+
+  int RBD::group_snap_get_info(IoCtx& group_ioctx, const char *group_name,
+                               const char *snap_name,
+                               group_snap_info2_t *group_snap) {
+    return librbd::api::Group<>::snap_get_info(group_ioctx, group_name,
+                                               snap_name, group_snap);
   }
 
   int RBD::group_snap_rename(IoCtx& group_ioctx, const char *group_name,
@@ -1647,8 +1707,8 @@ namespace librbd {
       ImageCtx *ictx = (ImageCtx *)ctx;
       tracepoint(librbd, close_image_enter, ictx, ictx->name.c_str(), ictx->id.c_str());
 
+      ctx = NULL;  // before initiating close
       r = ictx->state->close();
-      ctx = NULL;
 
       tracepoint(librbd, close_image_exit, r);
     }
@@ -1664,9 +1724,9 @@ namespace librbd {
     ImageCtx *ictx = (ImageCtx *)ctx;
     tracepoint(librbd, aio_close_image_enter, ictx, ictx->name.c_str(), ictx->id.c_str(), c->pc);
 
+    ctx = NULL;  // before initiating close
     ictx->state->close(new C_AioCompletion(ictx, librbd::io::AIO_TYPE_CLOSE,
                                            get_aio_completion(c)));
-    ctx = NULL;
 
     tracepoint(librbd, aio_close_image_exit, 0);
     return 0;
@@ -2630,9 +2690,13 @@ namespace librbd {
     tracepoint(librbd, diff_iterate_enter, ictx, ictx->name.c_str(),
                ictx->snap_name.c_str(), ictx->read_only, fromsnapname, ofs, len,
                true, false);
-    int r = librbd::api::DiffIterate<>::diff_iterate(ictx,
-						     cls::rbd::UserSnapshotNamespace(),
-						     fromsnapname, ofs,
+    uint64_t from_snap_id = 0;
+    if (fromsnapname != nullptr) {
+      std::shared_lock image_locker{ictx->image_lock};
+      from_snap_id = ictx->get_snap_id(cls::rbd::UserSnapshotNamespace(),
+                                       fromsnapname);
+    }
+    int r = librbd::api::DiffIterate<>::diff_iterate(ictx, from_snap_id, ofs,
                                                      len, true, false, cb, arg);
     tracepoint(librbd, diff_iterate_exit, r);
     return r;
@@ -2646,13 +2710,34 @@ namespace librbd {
     tracepoint(librbd, diff_iterate_enter, ictx, ictx->name.c_str(),
               ictx->snap_name.c_str(), ictx->read_only, fromsnapname, ofs, len,
               include_parent, whole_object);
-    int r = librbd::api::DiffIterate<>::diff_iterate(ictx,
-						     cls::rbd::UserSnapshotNamespace(),
-						     fromsnapname, ofs,
-                                                     len, include_parent,
+    uint64_t from_snap_id = 0;
+    if (fromsnapname != nullptr) {
+      std::shared_lock image_locker{ictx->image_lock};
+      from_snap_id = ictx->get_snap_id(cls::rbd::UserSnapshotNamespace(),
+                                       fromsnapname);
+    }
+    int r = librbd::api::DiffIterate<>::diff_iterate(ictx, from_snap_id,
+                                                     ofs, len, include_parent,
                                                      whole_object, cb, arg);
     tracepoint(librbd, diff_iterate_exit, r);
     return r;
+  }
+
+  int Image::diff_iterate3(uint64_t from_snap_id,
+                           uint64_t ofs, uint64_t len, uint32_t flags,
+                           int (*cb)(uint64_t, size_t, int, void *), void *arg)
+  {
+    if ((flags & ~(RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT |
+                   RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT)) != 0) {
+      return -EINVAL;
+    }
+
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    bool include_parent = flags & RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT;
+    bool whole_object = flags & RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT;
+    return librbd::api::DiffIterate<>::diff_iterate(ictx, from_snap_id,
+                                                    ofs, len, include_parent,
+                                                    whole_object, cb, arg);
   }
 
   ssize_t Image::write(uint64_t ofs, size_t len, bufferlist& bl)
@@ -3351,6 +3436,37 @@ extern "C" int rbd_mirror_mode_set(rados_ioctx_t p,
   librados::IoCtx io_ctx;
   librados::IoCtx::from_rados_ioctx_t(p, io_ctx);
   return librbd::api::Mirror<>::mode_set(io_ctx, mirror_mode);
+}
+
+extern "C" int rbd_mirror_remote_namespace_get(rados_ioctx_t p,
+                                               char *remote_namespace,
+                                               size_t *max_len) {
+  librados::IoCtx io_ctx;
+  librados::IoCtx::from_rados_ioctx_t(p, io_ctx);
+
+  std::string remote_namespace_str;
+  int r = librbd::api::Mirror<>::remote_namespace_get(io_ctx,
+                                                      &remote_namespace_str);
+  if (r < 0) {
+    return r;
+  }
+
+  auto total_len = remote_namespace_str.size() + 1;
+  if (*max_len < total_len) {
+    *max_len = total_len;
+    return -ERANGE;
+  }
+  *max_len = total_len;
+
+  strcpy(remote_namespace, remote_namespace_str.c_str());
+  return 0;
+}
+
+extern "C" int rbd_mirror_remote_namespace_set(rados_ioctx_t p,
+                                               const char *remote_namespace) {
+  librados::IoCtx io_ctx;
+  librados::IoCtx::from_rados_ioctx_t(p, io_ctx);
+  return librbd::api::Mirror<>::remote_namespace_set(io_ctx, remote_namespace);
 }
 
 extern "C" int rbd_mirror_uuid_get(rados_ioctx_t p,
@@ -6093,10 +6209,14 @@ extern "C" int rbd_diff_iterate(rbd_image_t image,
   tracepoint(librbd, diff_iterate_enter, ictx, ictx->name.c_str(),
              ictx->snap_name.c_str(), ictx->read_only, fromsnapname, ofs, len,
              true, false);
-  int r = librbd::api::DiffIterate<>::diff_iterate(ictx,
-						   cls::rbd::UserSnapshotNamespace(),
-						   fromsnapname, ofs, len,
-                                                   true, false, cb, arg);
+  uint64_t from_snap_id = 0;
+  if (fromsnapname != nullptr) {
+    std::shared_lock image_locker{ictx->image_lock};
+    from_snap_id = ictx->get_snap_id(cls::rbd::UserSnapshotNamespace(),
+                                     fromsnapname);
+  }
+  int r = librbd::api::DiffIterate<>::diff_iterate(ictx, from_snap_id, ofs,
+                                                   len, true, false, cb, arg);
   tracepoint(librbd, diff_iterate_exit, r);
   return r;
 }
@@ -6111,13 +6231,35 @@ extern "C" int rbd_diff_iterate2(rbd_image_t image, const char *fromsnapname,
   tracepoint(librbd, diff_iterate_enter, ictx, ictx->name.c_str(),
             ictx->snap_name.c_str(), ictx->read_only, fromsnapname, ofs, len,
             include_parent != 0, whole_object != 0);
-  int r = librbd::api::DiffIterate<>::diff_iterate(ictx,
-						   cls::rbd::UserSnapshotNamespace(),
-						   fromsnapname, ofs, len,
-                                                   include_parent, whole_object,
-                                                   cb, arg);
+  uint64_t from_snap_id = 0;
+  if (fromsnapname != nullptr) {
+    std::shared_lock image_locker{ictx->image_lock};
+    from_snap_id = ictx->get_snap_id(cls::rbd::UserSnapshotNamespace(),
+                                     fromsnapname);
+  }
+  int r = librbd::api::DiffIterate<>::diff_iterate(ictx, from_snap_id,
+                                                   ofs, len, include_parent,
+                                                   whole_object, cb, arg);
   tracepoint(librbd, diff_iterate_exit, r);
   return r;
+}
+
+extern "C" int rbd_diff_iterate3(rbd_image_t image, uint64_t from_snap_id,
+                                 uint64_t ofs, uint64_t len, uint32_t flags,
+                                 int (*cb)(uint64_t, size_t, int, void *),
+                                 void *arg)
+{
+  if ((flags & ~(RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT |
+                 RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT)) != 0) {
+    return -EINVAL;
+  }
+
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  bool include_parent = flags & RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT;
+  bool whole_object = flags & RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT;
+  return librbd::api::DiffIterate<>::diff_iterate(ictx, from_snap_id,
+                                                  ofs, len, include_parent,
+                                                  whole_object, cb, arg);
 }
 
 extern "C" ssize_t rbd_write(rbd_image_t image, uint64_t ofs, size_t len,
@@ -7164,8 +7306,9 @@ extern "C" int rbd_group_snap_create(rados_ioctx_t group_p,
              group_ioctx.get_pool_name().c_str(),
 	     group_ioctx.get_id(), group_name, snap_name);
 
+  auto flags = librbd::util::get_default_snap_create_flags(group_ioctx);
   int r = librbd::api::Group<>::snap_create(group_ioctx, group_name,
-                                            snap_name, 0);
+                                            snap_name, flags);
   tracepoint(librbd, group_snap_create_exit, r);
 
   return r;
@@ -7230,6 +7373,34 @@ extern "C" int rbd_group_snap_rename(rados_ioctx_t group_p,
   return r;
 }
 
+extern "C" int rbd_group_snap_get_info(
+    rados_ioctx_t group_p, const char *group_name, const char *snap_name,
+    rbd_group_snap_info2_t *group_snap)
+{
+  librados::IoCtx group_ioctx;
+  librados::IoCtx::from_rados_ioctx_t(group_p, group_ioctx);
+
+  librbd::group_snap_info2_t cpp_group_snap;
+  int r = librbd::api::Group<>::snap_get_info(group_ioctx, group_name,
+                                              snap_name, &cpp_group_snap);
+  if (r < 0) {
+    return r;
+  }
+  group_snap_info2_cpp_to_c(cpp_group_snap, group_snap);
+  return 0;
+}
+
+extern "C" void rbd_group_snap_get_info_cleanup(
+    rbd_group_snap_info2_t *group_snap) {
+  free(group_snap->id);
+  free(group_snap->name);
+  free(group_snap->image_snap_name);
+  for (size_t i = 0; i < group_snap->image_snaps_count; ++i) {
+    free(group_snap->image_snaps[i].image_name);
+  }
+  free(group_snap->image_snaps);
+}
+
 extern "C" int rbd_group_snap_list(rados_ioctx_t group_p,
                                    const char *group_name,
                                    rbd_group_snap_info_t *snaps,
@@ -7251,8 +7422,9 @@ extern "C" int rbd_group_snap_list(rados_ioctx_t group_p,
     return -ERANGE;
   }
 
-  std::vector<librbd::group_snap_info_t> cpp_snaps;
-  int r = librbd::api::Group<>::snap_list(group_ioctx, group_name, &cpp_snaps);
+  std::vector<librbd::group_snap_info2_t> cpp_snaps;
+  int r = librbd::api::Group<>::snap_list(group_ioctx, group_name, true, false,
+                                          &cpp_snaps);
 
   if (r == -ENOENT) {
     *snaps_size = 0;
@@ -7291,6 +7463,41 @@ extern "C" int rbd_group_snap_list_cleanup(rbd_group_snap_info_t *snaps,
     free(snaps[i].name);
   }
   return 0;
+}
+
+extern "C" int rbd_group_snap_list2(rados_ioctx_t group_p,
+                                    const char *group_name,
+                                    rbd_group_snap_info2_t *snaps,
+                                    size_t *snaps_size)
+{
+  librados::IoCtx group_ioctx;
+  librados::IoCtx::from_rados_ioctx_t(group_p, group_ioctx);
+
+  std::vector<librbd::group_snap_info2_t> cpp_snaps;
+  int r = librbd::api::Group<>::snap_list(group_ioctx, group_name, true, false,
+                                          &cpp_snaps);
+  if (r < 0) {
+    return r;
+  }
+
+  if (*snaps_size < cpp_snaps.size()) {
+    *snaps_size = cpp_snaps.size();
+    return -ERANGE;
+  }
+
+  for (size_t i = 0; i < cpp_snaps.size(); ++i) {
+    group_snap_info2_cpp_to_c(cpp_snaps[i], &snaps[i]);
+  }
+
+  *snaps_size = cpp_snaps.size();
+  return 0;
+}
+
+extern "C" void rbd_group_snap_list2_cleanup(rbd_group_snap_info2_t *snaps,
+                                             size_t len) {
+  for (size_t i = 0; i < len; ++i) {
+    rbd_group_snap_get_info_cleanup(&snaps[i]);
+  }
 }
 
 extern "C" int rbd_group_snap_rollback(rados_ioctx_t group_p,

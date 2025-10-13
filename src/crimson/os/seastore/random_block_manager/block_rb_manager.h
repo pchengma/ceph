@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -38,12 +38,12 @@ public:
    * Ondisk layout (TODO)
    *
    * ---------------------------------------------------------------------------
-   * | rbm_metadata_header_t | metadatas |        ...      |    data blocks    |
+   * | rbm_superblock_t | metadatas |        ...      |    data blocks    |
    * ---------------------------------------------------------------------------
    */
 
   read_ertr::future<> read(paddr_t addr, bufferptr &buffer) final;
-  write_ertr::future<> write(paddr_t addr, bufferptr &buf) final;
+  write_ertr::future<> write(paddr_t addr, bufferptr buf) final;
   open_ertr::future<> open() final;
   close_ertr::future<> close() final;
 
@@ -126,6 +126,8 @@ public:
   size_t get_journal_size() const final {
     return device->get_journal_size();
   }
+
+  bool check_valid_range(rbm_abs_addr paddr, bufferptr &bptr);
 
 #ifdef UNIT_TESTS_BUILT
   void prefill_fragmented_device() final;

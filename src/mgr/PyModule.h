@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -51,7 +52,6 @@ class PyModule
   mutable ceph::mutex lock = ceph::make_mutex("PyModule::lock");
 private:
   const std::string module_name;
-  std::string get_site_packages();
   int load_subclass_of(const char* class_name, PyObject** py_class);
 
   // Did the MgrMap identify this module as one that should run?
@@ -162,9 +162,9 @@ public:
   }
 
   const std::string &get_name() const {
-    std::lock_guard l(lock) ; return module_name;
+    return module_name;
   }
-  const std::string &get_error_string() const {
+  std::string get_error_string() const {
     std::lock_guard l(lock) ; return error_string;
   }
   bool get_can_run() const {

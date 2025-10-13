@@ -1,5 +1,6 @@
 add_library(mgr_cap_obj OBJECT
   MgrCap.cc)
+target_link_libraries(mgr_cap_obj legacy-option-headers)
 
 if(WITH_MGR)
   set(mgr_srcs
@@ -43,7 +44,7 @@ if(WITH_MGR)
   target_include_directories(ceph-mgr PRIVATE
     $<TARGET_PROPERTY:RocksDB::RocksDB,INTERFACE_INCLUDE_DIRECTORIES>)
   target_link_libraries(ceph-mgr
-    osdc client heap_profiler
+    osdc heap_profiler
     global-static ceph-common
     Boost::python${MGR_PYTHON_VERSION_MAJOR}${MGR_PYTHON_VERSION_MINOR}
     Python3::Python

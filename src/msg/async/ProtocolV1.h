@@ -1,11 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef _MSG_ASYNC_PROTOCOL_V1_
 #define _MSG_ASYNC_PROTOCOL_V1_
 
 #include "Protocol.h"
+#include "AsyncConnection.h"
 
+struct AuthSessionHandler;
 class ProtocolV1;
 using CtPtr = Ct<ProtocolV1>*;
 
@@ -112,7 +114,12 @@ protected:
     bool is_prepared {false};
   };
   // priority queue for outbound msgs
-  std::map<int, std::list<out_q_entry_t>> out_q;
+
+  /**
+   * A queue for each priority value, highest priority first.
+   */
+  std::map<int, std::list<out_q_entry_t>, std::greater<int>> out_q;
+
   bool keepalive;
   bool write_in_progress = false;
 
@@ -229,6 +236,8 @@ public:
   virtual void read_event() override;
   virtual void write_event() override;
   virtual bool is_queued() override;
+
+  virtual void dump(Formatter *f) override;
 
   // Client Protocol
 private:

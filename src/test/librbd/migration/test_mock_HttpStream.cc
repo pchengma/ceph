@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -184,6 +184,37 @@ TEST_F(TestMockMigrationHttpStream, Read) {
   mock_http_stream.read({{0, 128}, {256, 64}}, &bl, &ctx2);
   ASSERT_EQ(192, ctx2.wait());
   ASSERT_EQ(expect_bl, bl);
+
+  C_SaferCond ctx3;
+  mock_http_stream.close(&ctx3);
+  ASSERT_EQ(0, ctx3.wait());
+}
+
+TEST_F(TestMockMigrationHttpStream, ListSparseExtents) {
+  MockTestImageCtx mock_image_ctx(*m_image_ctx);
+
+  InSequence seq;
+
+  auto mock_http_client = new MockHttpClient();
+  expect_open(*mock_http_client, 0);
+  expect_close(*mock_http_client, 0);
+
+  MockHttpStream mock_http_stream(&mock_image_ctx, json_object);
+
+  C_SaferCond ctx1;
+  mock_http_stream.open(&ctx1);
+  ASSERT_EQ(0, ctx1.wait());
+
+  C_SaferCond ctx2;
+  io::SparseExtents sparse_extents;
+  mock_http_stream.list_sparse_extents({{0, 128}, {256, 64}}, &sparse_extents,
+                                       &ctx2);
+  ASSERT_EQ(0, ctx2.wait());
+
+  io::SparseExtents expected_sparse_extents;
+  expected_sparse_extents.insert(0, 128, {io::SPARSE_EXTENT_STATE_DATA, 128});
+  expected_sparse_extents.insert(256, 64, {io::SPARSE_EXTENT_STATE_DATA, 64});
+  ASSERT_EQ(expected_sparse_extents, sparse_extents);
 
   C_SaferCond ctx3;
   mock_http_stream.close(&ctx3);

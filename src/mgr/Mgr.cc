@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,10 +15,10 @@
 #include <Python.h>
 
 #include "osdc/Objecter.h"
-#include "client/Client.h"
 #include "common/errno.h"
 #include "mon/MonClient.h"
 #include "include/stringify.h"
+#include "include/str_map.h"
 #include "global/global_context.h"
 #include "global/signal_handler.h"
 
@@ -26,17 +27,21 @@
 #  include "include/libcephsqlite.h"
 #endif
 
-#include "mgr/MgrContext.h"
-
-#include "DaemonServer.h"
-#include "messages/MMgrDigest.h"
+#include "mds/FSMap.h"
 #include "messages/MCommand.h"
 #include "messages/MCommandReply.h"
-#include "messages/MLog.h"
-#include "messages/MServiceMap.h"
+#include "messages/MFSMap.h"
 #include "messages/MKVData.h"
+#include "messages/MLog.h"
+#include "messages/MMgrDigest.h"
+#include "messages/MServiceMap.h"
+
+#include "MgrContext.h"
+#include "DaemonServer.h"
 #include "PyModule.h"
 #include "Mgr.h"
+
+#include <sstream>
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mgr
@@ -52,10 +57,9 @@ using std::string;
 Mgr::Mgr(MonClient *monc_, const MgrMap& mgrmap,
          PyModuleRegistry *py_module_registry_,
 	 Messenger *clientm_, Objecter *objecter_,
-	 Client* client_, LogChannelRef clog_, LogChannelRef audit_clog_) :
+	 LogChannelRef clog_, LogChannelRef audit_clog_) :
   monc(monc_),
   objecter(objecter_),
-  client(client_),
   client_messenger(clientm_),
   finisher(g_ceph_context, "Mgr", "mgr-fin"),
   digest_received(false),
@@ -113,7 +117,7 @@ void MetadataUpdate::finish(int r)
 
       if (daemon_state.exists(key)) {
         DaemonStatePtr state = daemon_state.get(key);
-	map<string,string> m;
+	std::map<string,string> m;
 	{
 	  std::lock_guard l(state->lock);
 	  state->hostname = daemon_meta.at("hostname").get_str();
@@ -141,7 +145,7 @@ void MetadataUpdate::finish(int r)
         }
         daemon_meta.erase("hostname");
 
-	map<string,string> m;
+	std::map<string,string> m;
         for (const auto &[key, val] : daemon_meta) {
           m.emplace(key, val.get_str());
         }
@@ -330,7 +334,7 @@ void Mgr::init()
        ++p) {
     string devid = p->first.substr(7);
     dout(10) << "  updating " << devid << dendl;
-    map<string,string> meta;
+    std::map<string,string> meta;
     ostringstream ss;
     int r = get_json_str_map(p->second, ss, &meta, false);
     if (r < 0) {
@@ -349,7 +353,7 @@ void Mgr::init()
   py_module_registry->active_start(
     daemon_state, cluster_state,
     pre_init_store, mon_allows_kv_sub,
-    *monc, clog, audit_clog, *objecter, *client,
+    *monc, clog, audit_clog, *objecter,
     finisher, server);
 
   cluster_state.final_init();
@@ -449,7 +453,7 @@ void Mgr::load_all_metadata()
     daemon_meta.erase("name");
     daemon_meta.erase("hostname");
 
-    map<string,string> m;
+    std::map<string,string> m;
     for (const auto &[key, val] : daemon_meta) {
       m.emplace(key, val.get_str());
     }
@@ -474,7 +478,7 @@ void Mgr::load_all_metadata()
     osd_metadata.erase("id");
     osd_metadata.erase("hostname");
 
-    map<string,string> m;
+    std::map<string,string> m;
     for (const auto &i : osd_metadata) {
       m[i.first] = i.second.get_str();
     }
@@ -498,7 +502,7 @@ void Mgr::handle_osd_map()
   cluster_state.with_osdmap_and_pgmap([this, &names_exist](const OSDMap &osd_map,
 							   const PGMap &pg_map) {
     for (int osd_id = 0; osd_id < osd_map.get_max_osd(); ++osd_id) {
-      if (!osd_map.exists(osd_id) || (osd_map.is_out(osd_id) && osd_map.is_down(osd_id))) {
+      if (!osd_map.exists(osd_id)) {
         continue;
       }
 
@@ -510,9 +514,22 @@ void Mgr::handle_osd_map()
       if (daemon_state.is_updating(k)) {
         continue;
       }
+        
+      DaemonStatePtr daemon = daemon_state.get(k);
+        
+      if (daemon) {
+        bool clear_metrics = false;
+        clear_metrics |= (osd_map.is_out(osd_id) && osd_map.is_down(osd_id));
+        clear_metrics |= osd_map.is_destroyed(osd_id);
+        if (clear_metrics) {
+          // clear any health metrics for an OSD that is (out and down) or destroyed
+          std::lock_guard l(daemon->lock);
+          daemon->daemon_health_metrics.clear();
+        }
+      }
 
       bool update_meta = false;
-      if (daemon_state.exists(k)) {
+      if (daemon) {
         if (osd_map.get_up_from(osd_id) == osd_map.get_epoch()) {
           dout(4) << "Mgr::handle_osd_map: osd." << osd_id
 		  << " joined cluster at " << "e" << osd_map.get_epoch()
@@ -578,7 +595,7 @@ void Mgr::handle_mon_map()
   daemon_state.cull("mon", names_exist);
 }
 
-bool Mgr::ms_dispatch2(const ref_t<Message>& m)
+Dispatcher::dispatch_result_t Mgr::ms_dispatch2(const ref_t<Message>& m)
 {
   dout(10) << *m << dendl;
   std::lock_guard l(lock);
@@ -586,16 +603,16 @@ bool Mgr::ms_dispatch2(const ref_t<Message>& m)
   switch (m->get_type()) {
     case MSG_MGR_DIGEST:
       handle_mgr_digest(ref_cast<MMgrDigest>(m));
-      break;
+      return Dispatcher::HANDLED();
     case CEPH_MSG_MON_MAP:
       /* MonClient passthrough of MonMap to us */
       handle_mon_map(); /* use monc's monmap */
       py_module_registry->notify_all("mon_map", "");
-      break;
+      return Dispatcher::ACKNOWLEDGED();
     case CEPH_MSG_FS_MAP:
       handle_fs_map(ref_cast<MFSMap>(m));
       py_module_registry->notify_all("fs_map", "");
-      return false; // I shall let this pass through for Client
+      return Dispatcher::ACKNOWLEDGED();
     case CEPH_MSG_OSD_MAP:
       handle_osd_map();
       py_module_registry->notify_all("osd_map", "");
@@ -603,14 +620,14 @@ bool Mgr::ms_dispatch2(const ref_t<Message>& m)
       // Continuous subscribe, so that we can generate notifications
       // for our MgrPyModules
       objecter->maybe_request_map();
-      break;
+      return Dispatcher::ACKNOWLEDGED();
     case MSG_SERVICE_MAP:
       handle_service_map(ref_cast<MServiceMap>(m));
       //no users: py_module_registry->notify_all("service_map", "");
-      break;
+      return Dispatcher::ACKNOWLEDGED();
     case MSG_LOG:
       handle_log(ref_cast<MLog>(m));
-      break;
+      return Dispatcher::HANDLED();
     case MSG_KV_DATA:
       {
 	auto msg = ref_cast<MKVData>(m);
@@ -647,12 +664,10 @@ bool Mgr::ms_dispatch2(const ref_t<Message>& m)
 	  }
 	}
       }
-      break;
-
+      return Dispatcher::HANDLED();
     default:
-      return false;
+      return Dispatcher::UNHANDLED();
   }
-  return true;
 }
 
 
@@ -733,7 +748,7 @@ bool Mgr::got_mgr_map(const MgrMap& m)
   std::lock_guard l(lock);
   dout(10) << m << dendl;
 
-  set<string> old_modules;
+  std::set<string> old_modules;
   cluster_state.with_mgrmap([&](const MgrMap& m) {
       old_modules = m.modules;
     });

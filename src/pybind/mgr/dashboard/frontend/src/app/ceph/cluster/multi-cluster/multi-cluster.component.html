@@ -39,7 +39,7 @@
 </ng-template>
 
 <ng-template #nametpl>
-  <div class="datatable-body-cell-label">
+  <div cdstabledata>
     <span title="{{cluster}}">
       <a href="#">
         {{cluster}}
@@ -66,6 +66,25 @@
   <div class="container-fluid h-100 p-4"
        *ngIf="isMultiCluster && managedByConfig['MANAGED_BY_CLUSTERS'].length === 0; else emptyCluster">
     <ng-container *ngIf="!loading; else loadingTpl">
+      <cd-alert-panel type="error"
+                      spacingClass="mb-3"
+                      [showTitle]="false"
+                      size="slim"
+                      *ngIf="prometheusConnectionErrors.length > 0"
+                      (dismissed)="onDismissed()"
+                      [dismissible]="true"
+                      i18n>
+      <div>
+        <p><strong>Could not retrieve metrics from the following clusters:</strong></p>
+        <div *ngFor="let cluster of prometheusConnectionErrors">
+          <p>
+            <strong>Cluster Name:</strong> {{ cluster['cluster_alias'] }}<br>
+            <strong>Cluster ID:</strong> {{ cluster['cluster_name'] }}<br>
+            <strong>Issue:</strong> {{ cluster.reconnectionError ? cluster.reconnectionError : 'Security configuration error' }}<br>
+          </p>
+        </div>
+      </div>
+      </cd-alert-panel>
       <cd-alert-panel type="info"
                       spacingClass="mb-3"
                       [showTitle]="false"
@@ -266,3 +285,10 @@
     </ng-container>
   </div>
 </ng-container>
+
+<ng-template #clusterUsageTpl
+             let-row="data.row">
+  <cd-usage-bar [total]="row.total_capacity"
+                [used]="row.used_capacity">
+  </cd-usage-bar>
+</ng-template>

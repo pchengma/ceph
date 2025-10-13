@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string.h>
 
@@ -133,7 +133,7 @@ void LCFilter_S3::dump_xml(Formatter *f) const
     }
   }
   if (has_size_gt()) {
-    encode_xml("ObjectSizeGreaterThanw", size_gt, f);
+    encode_xml("ObjectSizeGreaterThan", size_gt, f);
   }
   if (has_size_lt()) {
     encode_xml("ObjectSizeLessThan", size_lt, f);

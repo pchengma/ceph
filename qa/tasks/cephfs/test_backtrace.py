@@ -5,8 +5,8 @@ from tasks.cephfs.filesystem import ObjectNotFound
 class TestBacktrace(CephFSTestCase):
     def test_backtrace(self):
         """
-        That the 'parent' 'layout' and 'symlink' xattrs on the head objects of files
-        are updated correctly.
+        That the 'parent', 'layout', 'symlink' and 'remote_inode' xattrs on the
+        head objects of files are updated correctly.
         """
 
         old_data_pool_name = self.fs.get_data_pool_name()
@@ -35,6 +35,33 @@ class TestBacktrace(CephFSTestCase):
         self.assertEqual(symlink, {
             "s" : "./file1",
             })
+
+        # Disabling referent_inodes fs option should not create referent inode  and
+        # and therefore no 'remote_inode' xattr on hardlink creation
+        self.fs.set_allow_referent_inodes(False);
+        self.mount_a.run_shell(["mkdir", "hardlink_dir0"])
+        self.mount_a.run_shell(["touch", "hardlink_dir0/file1"])
+        self.mount_a.run_shell(["ln", "hardlink_dir0/file1", "hardlink_dir0/hl_file1"])
+        self.fs.mds_asok(["flush", "journal"])
+
+        file1_ino = self.mount_a.path_to_ino("hardlink_dir0/file1", follow_symlinks=False)
+        file1_inode_dump = self.fs.mds_asok(['dump', 'inode', hex(file1_ino)])
+        self.assertListEqual(file1_inode_dump['referent_inodes'], [])
+
+        # Enabling referent_inodes fs option should store 'remote_inode' xattr
+        # on hardlink creation
+        self.fs.set_allow_referent_inodes(True);
+        self.mount_a.run_shell(["mkdir", "hardlink_dir"])
+        self.mount_a.run_shell(["touch", "hardlink_dir/file1"])
+        self.mount_a.run_shell(["ln", "hardlink_dir/file1", "hardlink_dir/hl_file1"])
+        self.fs.mds_asok(["flush", "journal"])
+
+        file1_ino = self.mount_a.path_to_ino("hardlink_dir/file1", follow_symlinks=False)
+        file1_inode_dump = self.fs.mds_asok(['dump', 'inode', hex(file1_ino)])
+        referent_ino = file1_inode_dump["referent_inodes"][0]
+
+        remote_inode_xattr = self.fs.read_remote_inode(referent_ino)
+        self.assertEqual(remote_inode_xattr['val'], file1_ino)
 
         # Create a file for subsequent checks
         self.mount_a.run_shell(["mkdir", "parent_a"])
@@ -100,3 +127,29 @@ class TestBacktrace(CephFSTestCase):
         # we don't update the layout in all the old pools whenever it changes
         old_pool_layout = self.fs.read_layout(file_ino, pool=old_data_pool_name)
         self.assertEqual(old_pool_layout['object_size'], 4194304)
+
+    def test_backtrace_flush_on_deleted_data_pool(self):
+        """
+        that the MDS does not go read-only when handling backtrace update errors
+        when backtrace updates are batched and flushed to RADOS (during journal trim)
+        and some of the pool have been removed.
+        """
+        data_pool = self.fs.get_data_pool_name()
+        extra_data_pool_name_1 = data_pool + '_extra1'
+        self.fs.add_data_pool(extra_data_pool_name_1)
+
+        self.mount_a.run_shell(["mkdir", "dir_x"])
+        self.mount_a.setfattr("dir_x", "ceph.dir.layout.pool", extra_data_pool_name_1)
+        self.mount_a.run_shell(["touch", "dir_x/file_x"])
+        self.fs.flush()
+
+        extra_data_pool_name_2 = data_pool + '_extra2'
+        self.fs.add_data_pool(extra_data_pool_name_2)
+        self.mount_a.setfattr("dir_x/file_x", "ceph.file.layout.pool", extra_data_pool_name_2)
+        self.mount_a.run_shell(["setfattr", "-x", "ceph.dir.layout", "dir_x"])
+        self.run_ceph_cmd("fs", "rm_data_pool", self.fs.name, extra_data_pool_name_1)
+        self.fs.flush()
+
+        # quick test to check if the mds has handled backtrace update failure
+        # on the deleted data pool without going read-only.
+        self.mount_a.run_shell(["mkdir", "dir_y"])

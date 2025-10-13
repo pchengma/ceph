@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,9 @@
 #ifndef OPREQUEST_H_
 #define OPREQUEST_H_
 
+#include "msg/Message.h"
+#include "msg/MessageRef.h"
+#include "msg/msg_types.h"
 #include "common/TrackedOp.h"
 #include "common/tracer.h"
 /**
@@ -32,7 +36,7 @@ private:
   entity_inst_t req_src_inst;
   uint8_t hit_flag_points;
   uint8_t latest_flag_point;
-  const char* last_event_detail = nullptr;
+  std::string last_event_detail;
 
   static const uint8_t flag_started =              1 << 0;
   static const uint8_t flag_queued_for_module =    1 << 1;
@@ -49,7 +53,6 @@ protected:
 
 public:
   ~MgrOpRequest() override {
-    request->put();
   }
 
   template<class T>

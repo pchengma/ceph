@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "tools/rbd/ArgumentTypes.h"
 #include "tools/rbd/Shell.h"
@@ -86,8 +86,8 @@ int execute(const po::variables_map &vm,
 }
 
 Shell::Action action(
-  {"rename"}, {"mv"}, "Rename image within pool.", "", &get_arguments,
-  &execute);
+  {"rename"}, {"mv"}, "Rename an image within its pool or namespace.", "",
+  &get_arguments, &execute);
 
 } // namespace rename
 } // namespace action

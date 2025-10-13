@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,16 +21,15 @@
 
 #include "include/ceph_assert.h"
 #include "include/common_fwd.h"
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include <seastar/util/log.hh>
 #include "crimson/common/log.h"
 #include "crimson/common/config_proxy.h"
+#include <sstream>
 #else
 #include "global/global_context.h"
 #include "common/ceph_context.h"
 #include "common/config.h"
-#include "common/likely.h"
-#include "common/Clock.h"
 #include "log/Log.h"
 #endif
 
@@ -139,7 +139,7 @@ struct is_dynamic<dynamic_marker_t<T>> : public std::true_type {};
 // generic macros
 #define dout_prefix *_dout
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #define dout_impl(cct, sub, v)                                          \
   do {                                                                  \
     if (crimson::common::local_conf()->subsys.should_gather(sub, v)) {  \
@@ -190,7 +190,7 @@ struct is_dynamic<dynamic_marker_t<T>> : public std::true_type {};
     _dout_cct->_log->submit_entry(std::move(_dout_e));                  \
   }                                                                     \
   } while (0)
-#endif	// WITH_SEASTAR
+#endif	// WITH_CRIMSON
 
 #define lsubdout(cct, sub, v)  dout_impl(cct, ceph_subsys_##sub, v) dout_prefix
 #define ldout(cct, v)  dout_impl(cct, dout_subsys, v) dout_prefix

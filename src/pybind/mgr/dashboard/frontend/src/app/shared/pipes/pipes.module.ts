@@ -22,12 +22,10 @@ import { IscsiBackstorePipe } from './iscsi-backstore.pipe';
 import { JoinPipe } from './join.pipe';
 import { LogPriorityPipe } from './log-priority.pipe';
 import { MapPipe } from './map.pipe';
-import { MdsSummaryPipe } from './mds-summary.pipe';
 import { MgrSummaryPipe } from './mgr-summary.pipe';
 import { MillisecondsPipe } from './milliseconds.pipe';
 import { NotAvailablePipe } from './not-available.pipe';
 import { OrdinalPipe } from './ordinal.pipe';
-import { OsdSummaryPipe } from './osd-summary.pipe';
 import { RbdConfigurationSourcePipe } from './rbd-configuration-source.pipe';
 import { RelativeDatePipe } from './relative-date.pipe';
 import { RoundPipe } from './round.pipe';
@@ -39,6 +37,9 @@ import { OctalToHumanReadablePipe } from './octal-to-human-readable.pipe';
 import { PathPipe } from './path.pipe';
 import { PluralizePipe } from './pluralize.pipe';
 import { XmlPipe } from './xml.pipe';
+import { MbpersecondPipe } from './mbpersecond.pipe';
+import { PipeFunctionPipe } from './pipe-function.pipe';
+import { DimlessBinaryPerMinutePipe } from './dimless-binary-per-minute.pipe';
 
 @NgModule({
   imports: [CommonModule],
@@ -75,12 +76,13 @@ import { XmlPipe } from './xml.pipe';
     SearchHighlightPipe,
     HealthIconPipe,
     MgrSummaryPipe,
-    MdsSummaryPipe,
-    OsdSummaryPipe,
     OctalToHumanReadablePipe,
     PathPipe,
     PluralizePipe,
-    XmlPipe
+    XmlPipe,
+    MbpersecondPipe,
+    PipeFunctionPipe,
+    DimlessBinaryPerMinutePipe
   ],
   exports: [
     ArrayPipe,
@@ -115,12 +117,13 @@ import { XmlPipe } from './xml.pipe';
     SearchHighlightPipe,
     HealthIconPipe,
     MgrSummaryPipe,
-    MdsSummaryPipe,
-    OsdSummaryPipe,
     OctalToHumanReadablePipe,
     PathPipe,
     PluralizePipe,
-    XmlPipe
+    XmlPipe,
+    MbpersecondPipe,
+    PipeFunctionPipe,
+    DimlessBinaryPerMinutePipe
   ],
   providers: [
     ArrayPipe,
@@ -150,9 +153,9 @@ import { XmlPipe } from './xml.pipe';
     SanitizeHtmlPipe,
     HealthIconPipe,
     MgrSummaryPipe,
-    MdsSummaryPipe,
-    OsdSummaryPipe,
-    OctalToHumanReadablePipe
+    OctalToHumanReadablePipe,
+    MbpersecondPipe,
+    DimlessBinaryPerMinutePipe
   ]
 })
 export class PipesModule {}

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_MIGRATION_IMAGE_DISPATCH_H
 #define CEPH_LIBRBD_MIGRATION_IMAGE_DISPATCH_H
@@ -86,6 +86,8 @@ public:
 
 private:
   ImageCtxT* m_image_ctx;
+
+  // empty (nullptr) for native format
   std::unique_ptr<FormatInterface> m_format;
 
   void fail_io(int r, io::AioCompletion* aio_comp,

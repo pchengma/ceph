@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,7 +21,7 @@
 #include "messages/MMDSOp.h"
 
 class MMDSPeerRequest final : public MMDSOp {
-  static constexpr int HEAD_VERSION = 1;
+  static constexpr int HEAD_VERSION = 2;
   static constexpr int COMPAT_VERSION = 1;
 public:
   static constexpr int OP_XLOCK =       1;
@@ -129,6 +130,7 @@ public:
   ceph::buffer::list srci_snapbl;
   ceph::buffer::list desti_snapbl;
 
+  inodeno_t referent_ino; //referent inode
 public:
   metareqid_t get_reqid() const { return reqid; }
   __u32 get_attempt() const { return attempt; }
@@ -194,6 +196,7 @@ public:
     encode(srci_snapbl, payload);
     encode(desti_snapbl, payload);
     encode(alternate_name, payload);
+    encode(referent_ino, payload);
   }
   void decode_payload() override {
     using ceph::decode;
@@ -216,6 +219,8 @@ public:
     decode(srci_snapbl, p);
     decode(desti_snapbl, p);
     decode(alternate_name, p);
+    if (header.version >= 2)
+      decode(referent_ino, p);
   }
 
   std::string_view get_type_name() const override { return "peer_request"; }

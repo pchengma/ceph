@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,13 @@
 #define MAPCACHER_H
 
 #include "include/Context.h"
+#include "include/expected.hpp"
 #include "common/sharedptr_registry.hpp"
+
+#include <boost/optional.hpp>
+
+#include <map>
+#include <set>
 
 namespace MapCacher {
 /**
@@ -129,6 +136,50 @@ public:
     ceph_abort(); // not reachable
     return -EINVAL;
   } ///< @return error value, 0 on success, -ENOENT if no more entries
+
+  /// Fetch first key/value std::pair after specified key
+  struct PosAndData {
+    K last_key;
+    V data;
+  };
+  using MaybePosAndData = tl::expected<PosAndData, int>;
+
+  MaybePosAndData get_1st_after_key(
+      K key  ///< [in] key after which to get next
+  )
+  {
+    ceph_assert(driver);
+    while (true) {
+      std::pair<K, boost::optional<V>> cached;
+      bool got_cached = in_progress.get_next(key, &cached);
+
+      ///\todo a driver->get_next() that returns an expected<K, V> would be nice
+      bool got_store{false};
+      std::pair<K, V> store;
+      int r = driver->get_next(key, &store);
+      if (r < 0 && r != -ENOENT) {
+        return tl::unexpected(r);
+      } else if (r == 0) {
+	got_store = true;
+      }
+
+      if (!got_cached && !got_store) {
+        return tl::unexpected(-ENOENT);
+      } else if (got_cached && (!got_store || store.first >= cached.first)) {
+	if (cached.second) {
+	  return PosAndData{cached.first, *cached.second};
+	} else {
+	  key = cached.first;
+	  continue;  // value was cached as removed, recurse
+	}
+      } else {
+	return PosAndData{store.first, store.second};
+      }
+    }
+    ceph_abort();  // not reachable
+    return tl::unexpected(-EINVAL);
+  }
+
 
   /// Adds operation setting keys to Transaction
   void set_keys(

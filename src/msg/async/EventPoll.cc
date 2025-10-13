@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,7 @@
 
 #include "common/errno.h"
 #include "EventPoll.h"
+#include "Timeout.h"
 
 #include <unistd.h>
 #define dout_subsys ceph_subsys_ms
@@ -161,11 +163,9 @@ int PollDriver::event_wait(std::vector<FiredFileEvent> &fired_events,
 			  struct timeval *tvp) {
   int retval, numevents = 0;
 #ifdef _WIN32
-  retval = WSAPoll(pfds, max_pfds,
-		      tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
+  retval = WSAPoll(pfds, max_pfds, timeout_to_milliseconds(tvp));
 #else
-  retval = poll(pfds, max_pfds,
-		      tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
+  retval = poll(pfds, max_pfds, timeout_to_milliseconds(tvp));
 #endif
   if (retval > 0) {
     for (int j = 0; j < max_pfds; j++) {

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,6 +20,8 @@
 #include "include/rbd/librbd.hpp"
 #include "include/event_type.h"
 #include "include/err.h"
+#include "include/intarith.h" // for round_up_to()
+#include "include/rados.h" // for EBLOCKLISTED
 #include "common/ceph_mutex.h"
 #include "json_spirit/json_spirit.h"
 #include "test/librados/crimson_utils.h"
@@ -6990,199 +6993,6 @@ TEST_F(TestLibRBD, ListChildren)
   rados_ioctx_destroy(ioctx2);
 }
 
-TEST_F(TestLibRBD, ListChildrenTiered)
-{
-  SKIP_IF_CRIMSON();
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
-
-  librbd::RBD rbd;
-  string pool_name1 = create_pool(true);
-  string pool_name2 = create_pool(true);
-  string pool_name3 = create_pool(true);
-  ASSERT_NE("", pool_name1);
-  ASSERT_NE("", pool_name2);
-  ASSERT_NE("", pool_name3);
-
-  std::string cmdstr = "{\"prefix\": \"osd tier add\", \"pool\": \"" +
-     pool_name1 + "\", \"tierpool\":\"" + pool_name3 + "\", \"force_nonempty\":\"\"}";
-  char *cmd[1];
-  cmd[0] = (char *)cmdstr.c_str();
-  ASSERT_EQ(0, rados_mon_command(_cluster, (const char **)cmd, 1, "", 0, NULL, 0, NULL, 0));
-
-  cmdstr = "{\"prefix\": \"osd tier cache-mode\", \"pool\": \"" +
-     pool_name3 + "\", \"mode\":\"writeback\"}";
-  cmd[0] = (char *)cmdstr.c_str();
-  ASSERT_EQ(0, rados_mon_command(_cluster, (const char **)cmd, 1, "", 0, NULL, 0, NULL, 0));
-
-  cmdstr = "{\"prefix\": \"osd tier set-overlay\", \"pool\": \"" +
-     pool_name1 + "\", \"overlaypool\":\"" + pool_name3 + "\"}";
-  cmd[0] = (char *)cmdstr.c_str();
-  ASSERT_EQ(0, rados_mon_command(_cluster, (const char **)cmd, 1, "", 0, NULL, 0, NULL, 0));
-
-  EXPECT_EQ(0, rados_wait_for_latest_osdmap(_cluster));
-
-  string parent_name = get_temp_image_name();
-  string child_name1 = get_temp_image_name();
-  string child_name2 = get_temp_image_name();
-  string child_name3 = get_temp_image_name();
-  string child_name4 = get_temp_image_name();
-
-  char child_id1[4096];
-  char child_id2[4096];
-  char child_id3[4096];
-  char child_id4[4096];
-
-  rbd_image_t image1;
-  rbd_image_t image2;
-  rbd_image_t image3;
-  rbd_image_t image4;
-
-  rados_ioctx_t ioctx1, ioctx2;
-  rados_ioctx_create(_cluster, pool_name1.c_str(), &ioctx1);
-  rados_ioctx_create(_cluster, pool_name2.c_str(), &ioctx2);
-
-  bool old_format;
-  uint64_t features;
-  rbd_image_t parent;
-  int order = 0;
-
-  ASSERT_EQ(0, get_features(&old_format, &features));
-  ASSERT_FALSE(old_format);
-
-  // make a parent to clone from
-  ASSERT_EQ(0, create_image_full(ioctx1, parent_name.c_str(), 4<<20, &order,
-				 false, features));
-  ASSERT_EQ(0, rbd_open(ioctx1, parent_name.c_str(), &parent, NULL));
-  // create a snapshot, reopen as the parent we're interested in
-  ASSERT_EQ(0, rbd_snap_create(parent, "parent_snap"));
-  ASSERT_EQ(0, rbd_snap_set(parent, "parent_snap"));
-  ASSERT_EQ(0, rbd_snap_protect(parent, "parent_snap"));
-
-  ASSERT_EQ(0, rbd_close(parent));
-  ASSERT_EQ(0, rbd_open(ioctx1, parent_name.c_str(), &parent, "parent_snap"));
-
-  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "parent_snap",
-                           ioctx2, child_name1.c_str(), features, &order));
-  ASSERT_EQ(0, rbd_open(ioctx2, child_name1.c_str(), &image1, NULL));
-  ASSERT_EQ(0, rbd_get_id(image1, child_id1, sizeof(child_id1)));
-  test_list_children(parent, 1, pool_name2.c_str(), child_name1.c_str());
-  test_list_children2(parent, 1,
-                      child_id1, pool_name2.c_str(), child_name1.c_str(), false);
-
-  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "parent_snap",
-                           ioctx1, child_name2.c_str(), features, &order));
-  ASSERT_EQ(0, rbd_open(ioctx1, child_name2.c_str(), &image2, NULL));
-  ASSERT_EQ(0, rbd_get_id(image2, child_id2, sizeof(child_id2)));
-  test_list_children(parent, 2, pool_name2.c_str(), child_name1.c_str(),
-		     pool_name1.c_str(), child_name2.c_str());
-  test_list_children2(parent, 2,
-                      child_id1, pool_name2.c_str(), child_name1.c_str(), false,
-                      child_id2, pool_name1.c_str(), child_name2.c_str(), false);
-
-  // read from the cache to populate it
-  rbd_image_t tier_image;
-  ASSERT_EQ(0, rbd_open(ioctx1, child_name2.c_str(), &tier_image, NULL));
-  size_t len = 4 * 1024 * 1024;
-  char* buf = (char*)malloc(len);
-  ssize_t size = rbd_read(tier_image, 0, len, buf);
-  ASSERT_GT(size, 0);
-  free(buf);
-  ASSERT_EQ(0, rbd_close(tier_image));
-
-  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "parent_snap",
-                           ioctx2, child_name3.c_str(), features, &order));
-  ASSERT_EQ(0, rbd_open(ioctx2, child_name3.c_str(), &image3, NULL));
-  ASSERT_EQ(0, rbd_get_id(image3, child_id3, sizeof(child_id3)));
-  test_list_children(parent, 3, pool_name2.c_str(), child_name1.c_str(),
-		     pool_name1.c_str(), child_name2.c_str(),
-		     pool_name2.c_str(), child_name3.c_str());
-  test_list_children2(parent, 3,
-                      child_id1, pool_name2.c_str(), child_name1.c_str(), false,
-                      child_id2, pool_name1.c_str(), child_name2.c_str(), false,
-                      child_id3, pool_name2.c_str(), child_name3.c_str(), false);
-
-  librados::IoCtx ioctx3;
-  ASSERT_EQ(0, _rados.ioctx_create(pool_name2.c_str(), ioctx3));
-  ASSERT_EQ(0, rbd_close(image3));
-  ASSERT_EQ(0, rbd.trash_move(ioctx3, child_name3.c_str(), 0));
-  test_list_children(parent, 2, pool_name2.c_str(), child_name1.c_str(),
-		     pool_name1.c_str(), child_name2.c_str());
-  test_list_children2(parent, 3,
-                      child_id1, pool_name2.c_str(), child_name1.c_str(), false,
-                      child_id2, pool_name1.c_str(), child_name2.c_str(), false,
-                      child_id3, pool_name2.c_str(), child_name3.c_str(), true);
-
-  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "parent_snap",
-                           ioctx2, child_name4.c_str(), features, &order));
-  ASSERT_EQ(0, rbd_open(ioctx2, child_name4.c_str(), &image4, NULL));
-  ASSERT_EQ(0, rbd_get_id(image4, child_id4, sizeof(child_id4)));
-  test_list_children(parent, 3, pool_name2.c_str(), child_name1.c_str(),
-		     pool_name1.c_str(), child_name2.c_str(),
-		     pool_name2.c_str(), child_name4.c_str());
-  test_list_children2(parent, 4,
-                      child_id1, pool_name2.c_str(), child_name1.c_str(), false,
-                      child_id2, pool_name1.c_str(), child_name2.c_str(), false,
-                      child_id3, pool_name2.c_str(), child_name3.c_str(), true,
-                      child_id4, pool_name2.c_str(), child_name4.c_str(), false);
-
-  ASSERT_EQ(0, rbd.trash_restore(ioctx3, child_id3, ""));
-  test_list_children(parent, 4, pool_name2.c_str(), child_name1.c_str(),
-		     pool_name1.c_str(), child_name2.c_str(),
-		     pool_name2.c_str(), child_name3.c_str(),
-		     pool_name2.c_str(), child_name4.c_str());
-  test_list_children2(parent, 4,
-                      child_id1, pool_name2.c_str(), child_name1.c_str(), false,
-                      child_id2, pool_name1.c_str(), child_name2.c_str(), false,
-                      child_id3, pool_name2.c_str(), child_name3.c_str(), false,
-                      child_id4, pool_name2.c_str(), child_name4.c_str(), false);
-
-  ASSERT_EQ(0, rbd_close(image1));
-  ASSERT_EQ(0, rbd_remove(ioctx2, child_name1.c_str()));
-  test_list_children(parent, 3,
-		     pool_name1.c_str(), child_name2.c_str(),
-		     pool_name2.c_str(), child_name3.c_str(),
-		     pool_name2.c_str(), child_name4.c_str());
-  test_list_children2(parent, 3,
-                     child_id2, pool_name1.c_str(), child_name2.c_str(), false,
-                     child_id3, pool_name2.c_str(), child_name3.c_str(), false,
-                     child_id4, pool_name2.c_str(), child_name4.c_str(), false);
-
-  ASSERT_EQ(0, rbd_remove(ioctx2, child_name3.c_str()));
-  test_list_children(parent, 2,
-		     pool_name1.c_str(), child_name2.c_str(),
-		     pool_name2.c_str(), child_name4.c_str());
-  test_list_children2(parent, 2,
-                     child_id2, pool_name1.c_str(), child_name2.c_str(), false,
-                     child_id4, pool_name2.c_str(), child_name4.c_str(), false);
-
-  ASSERT_EQ(0, rbd_close(image4));
-  ASSERT_EQ(0, rbd_remove(ioctx2, child_name4.c_str()));
-  test_list_children(parent, 1,
-		     pool_name1.c_str(), child_name2.c_str());
-  test_list_children2(parent, 1,
-                      child_id2, pool_name1.c_str(), child_name2.c_str(), false);
-
-  ASSERT_EQ(0, rbd_close(image2));
-  ASSERT_EQ(0, rbd_remove(ioctx1, child_name2.c_str()));
-  test_list_children(parent, 0);
-  test_list_children2(parent, 0);
-
-  ASSERT_EQ(0, rbd_snap_unprotect(parent, "parent_snap"));
-  ASSERT_EQ(0, rbd_snap_remove(parent, "parent_snap"));
-  ASSERT_EQ(0, rbd_close(parent));
-  ASSERT_EQ(0, rbd_remove(ioctx1, parent_name.c_str()));
-  rados_ioctx_destroy(ioctx1);
-  rados_ioctx_destroy(ioctx2);
-  cmdstr = "{\"prefix\": \"osd tier remove-overlay\", \"pool\": \"" +
-     pool_name1 + "\"}";
-  cmd[0] = (char *)cmdstr.c_str();
-  ASSERT_EQ(0, rados_mon_command(_cluster, (const char **)cmd, 1, "", 0, NULL, 0, NULL, 0));
-  cmdstr = "{\"prefix\": \"osd tier remove\", \"pool\": \"" +
-     pool_name1 + "\", \"tierpool\":\"" + pool_name3 + "\"}";
-  cmd[0] = (char *)cmdstr.c_str();
-  ASSERT_EQ(0, rados_mon_command(_cluster, (const char **)cmd, 1, "", 0, NULL, 0, NULL, 0));
-}
-
 TEST_F(TestLibRBD, LockingPP)
 {
   librados::IoCtx ioctx;
@@ -11338,6 +11148,13 @@ TEST_F(TestLibRBD, CreateWithMirrorEnabled) {
   librbd::Image parent_image;
   ASSERT_EQ(0, rbd.open(ioctx, parent_image, parent_name.c_str(), NULL));
 
+  librbd::mirror_image_info_t mirror_image_info;
+  ASSERT_EQ(0, parent_image.mirror_image_get_info(&mirror_image_info,
+                                                  sizeof(mirror_image_info)));
+  ASSERT_EQ(RBD_MIRROR_IMAGE_ENABLED, mirror_image_info.state);
+  ASSERT_NE("", mirror_image_info.global_id);
+  ASSERT_EQ(true, mirror_image_info.primary);
+
   librbd::mirror_image_mode_t mirror_image_mode;
   ASSERT_EQ(0, parent_image.mirror_image_get_mode(&mirror_image_mode));
   ASSERT_EQ(RBD_MIRROR_IMAGE_MODE_SNAPSHOT, mirror_image_mode);
@@ -11358,6 +11175,14 @@ TEST_F(TestLibRBD, CreateWithMirrorEnabled) {
   ASSERT_EQ(0, child_image.mirror_image_disable(true));
   ASSERT_EQ(0, parent_image.mirror_image_disable(true));
   ASSERT_EQ(0, rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_DISABLED));
+
+  ASSERT_EQ(0, parent_image.mirror_image_get_info(&mirror_image_info,
+                                                  sizeof(mirror_image_info)));
+  ASSERT_EQ(RBD_MIRROR_IMAGE_DISABLED, mirror_image_info.state);
+  ASSERT_EQ("", mirror_image_info.global_id);
+  ASSERT_EQ(false, mirror_image_info.primary);
+
+  ASSERT_EQ(-EINVAL, parent_image.mirror_image_get_mode(&mirror_image_mode));
 }
 
 TEST_F(TestLibRBD, FlushCacheWithCopyupOnExternalSnapshot) {
@@ -11550,7 +11375,6 @@ TEST_F(TestLibRBD, ExclusiveLock)
 
 TEST_F(TestLibRBD, BreakLock)
 {
-  SKIP_IF_CRIMSON();
   REQUIRE_FEATURE(RBD_FEATURE_EXCLUSIVE_LOCK);
   REQUIRE(!is_rbd_pwl_enabled((CephContext *)_rados.cct()));
 
@@ -13112,7 +12936,6 @@ TEST_F(TestLibRBD, QuiesceWatchPP)
 
 TEST_F(TestLibRBD, QuiesceWatchError)
 {
-  SKIP_IF_CRIMSON();
   librbd::RBD rbd;
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -13471,7 +13294,6 @@ TEST_F(TestLibRBD, WriteZeroesThickProvision) {
 
 TEST_F(TestLibRBD, ConcurrentOperations)
 {
-  SKIP_IF_CRIMSON();
   REQUIRE_FEATURE(RBD_FEATURE_EXCLUSIVE_LOCK);
 
   librbd::RBD rbd;
@@ -13625,6 +13447,171 @@ TEST_F(TestLibRBD, ConcurrentOperations)
   ioctx.close();
 }
 
+TEST_F(TestLibRBD, FormatAndCloneFormatOptions)
+{
+  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
+
+  librados::IoCtx ioctx;
+  ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
+
+  librbd::ImageOptions opts_with_0;
+  ASSERT_EQ(0, opts_with_0.set(RBD_IMAGE_OPTION_FORMAT, 0));
+  librbd::ImageOptions opts_with_1;
+  ASSERT_EQ(0, opts_with_1.set(RBD_IMAGE_OPTION_FORMAT, 1));
+  librbd::ImageOptions opts_with_2;
+  ASSERT_EQ(0, opts_with_2.set(RBD_IMAGE_OPTION_FORMAT, 2));
+  librbd::ImageOptions opts_with_3;
+  ASSERT_EQ(0, opts_with_3.set(RBD_IMAGE_OPTION_FORMAT, 3));
+
+  uint64_t features;
+  ASSERT_TRUE(get_features(&features));
+  ASSERT_EQ(0, opts_with_2.set(RBD_IMAGE_OPTION_FEATURES, features));
+
+  // create
+  librbd::RBD rbd;
+  std::string name1 = get_temp_image_name();
+  std::string name2 = get_temp_image_name();
+  auto do_create = [&rbd, &ioctx](const auto& name, const auto& opts) {
+    auto mod_opts = opts;
+    return rbd.create4(ioctx, name.c_str(), 2 << 20, mod_opts);
+  };
+  ASSERT_EQ(-EINVAL, do_create(name1, opts_with_0));
+  ASSERT_EQ(-EINVAL, do_create(name1, opts_with_3));
+  ASSERT_EQ(0, do_create(name1, opts_with_1));
+  auto verify_format_1 = [&rbd, &ioctx](const auto& name) {
+    librbd::Image image;
+    ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), NULL));
+    uint8_t old_format;
+    ASSERT_EQ(0, image.old_format(&old_format));
+    ASSERT_TRUE(old_format);
+  };
+  ASSERT_NO_FATAL_FAILURE(verify_format_1(name1));
+  ASSERT_EQ(0, do_create(name2, opts_with_2));
+  auto verify_format_2 = [&rbd, &ioctx](const auto& name) {
+    librbd::Image image;
+    ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), NULL));
+    uint8_t old_format;
+    ASSERT_EQ(0, image.old_format(&old_format));
+    ASSERT_FALSE(old_format);
+  };
+  ASSERT_NO_FATAL_FAILURE(verify_format_2(name2));
+
+  {
+    librbd::Image image;
+    ASSERT_EQ(0, rbd.open(ioctx, image, name2.c_str(), NULL));
+    ASSERT_EQ(0, image.snap_create("parent_snap"));
+    ASSERT_EQ(0, image.snap_protect("parent_snap"));
+  }
+
+  // clone
+  std::string clone_name1 = get_temp_image_name();
+  std::string clone_name2 = get_temp_image_name();
+  auto do_clone = [&rbd, &ioctx, &name2](const auto& clone_name,
+                                         const auto& opts) {
+    auto mod_opts = opts;
+    return rbd.clone3(ioctx, name2.c_str(), "parent_snap", ioctx,
+                      clone_name.c_str(), mod_opts);
+  };
+  ASSERT_EQ(-EINVAL, do_clone(clone_name1, opts_with_0));
+  ASSERT_EQ(-EINVAL, do_clone(clone_name1, opts_with_1));
+  ASSERT_EQ(-EINVAL, do_clone(clone_name1, opts_with_3));
+  // if RBD_IMAGE_OPTION_CLONE_FORMAT isn't set, rbd_default_clone_format
+  // config option kicks in -- we aren't interested in its behavior here
+  ASSERT_EQ(0, do_clone(clone_name1, opts_with_2));
+  ASSERT_EQ(0, rbd.remove(ioctx, clone_name1.c_str()));
+
+  auto clone_opts_with_0 = opts_with_2;
+  ASSERT_EQ(0, clone_opts_with_0.set(RBD_IMAGE_OPTION_CLONE_FORMAT, 0));
+  auto clone_opts_with_1 = opts_with_2;
+  ASSERT_EQ(0, clone_opts_with_1.set(RBD_IMAGE_OPTION_CLONE_FORMAT, 1));
+  auto clone_opts_with_2 = opts_with_2;
+  ASSERT_EQ(0, clone_opts_with_2.set(RBD_IMAGE_OPTION_CLONE_FORMAT, 2));
+  auto clone_opts_with_3 = opts_with_2;
+  ASSERT_EQ(0, clone_opts_with_3.set(RBD_IMAGE_OPTION_CLONE_FORMAT, 3));
+
+  ASSERT_EQ(-EINVAL, do_clone(clone_name1, clone_opts_with_0));
+  ASSERT_EQ(-EINVAL, do_clone(clone_name1, clone_opts_with_3));
+  ASSERT_EQ(0, do_clone(clone_name1, clone_opts_with_1));
+  {
+    librbd::Image image;
+    ASSERT_EQ(0, rbd.open(ioctx, image, clone_name1.c_str(), NULL));
+    uint64_t op_features;
+    ASSERT_EQ(0, image.get_op_features(&op_features));
+    ASSERT_EQ(op_features, 0);
+  }
+  ASSERT_EQ(0, do_clone(clone_name2, clone_opts_with_2));
+  {
+    librbd::Image image;
+    ASSERT_EQ(0, rbd.open(ioctx, image, clone_name2.c_str(), NULL));
+    uint64_t op_features;
+    ASSERT_EQ(0, image.get_op_features(&op_features));
+    ASSERT_EQ(op_features, RBD_OPERATION_FEATURE_CLONE_CHILD);
+  }
+
+  librbd::Image image;
+  ASSERT_EQ(0, rbd.open(ioctx, image, name1.c_str(), NULL));
+
+  // copy
+  std::string copy_name1 = get_temp_image_name();
+  std::string copy_name2 = get_temp_image_name();
+  auto do_copy = [&image, &ioctx](const auto& copy_name, const auto& opts) {
+    auto mod_opts = opts;
+    return image.copy3(ioctx, copy_name.c_str(), mod_opts);
+  };
+  ASSERT_EQ(-EINVAL, do_copy(copy_name1, opts_with_0));
+  ASSERT_EQ(-EINVAL, do_copy(copy_name1, opts_with_3));
+  ASSERT_EQ(0, do_copy(copy_name1, opts_with_1));
+  ASSERT_NO_FATAL_FAILURE(verify_format_1(copy_name1));
+  ASSERT_EQ(0, do_copy(copy_name2, opts_with_2));
+  ASSERT_NO_FATAL_FAILURE(verify_format_2(copy_name2));
+
+  // deep copy
+  std::string deep_copy_name = get_temp_image_name();
+  auto do_deep_copy = [&image, &ioctx, &deep_copy_name](const auto& opts) {
+    auto mod_opts = opts;
+    return image.deep_copy(ioctx, deep_copy_name.c_str(), mod_opts);
+  };
+  ASSERT_EQ(-EINVAL, do_deep_copy(opts_with_0));
+  ASSERT_EQ(-EINVAL, do_deep_copy(opts_with_1));
+  ASSERT_EQ(-EINVAL, do_deep_copy(opts_with_3));
+  ASSERT_EQ(0, do_deep_copy(opts_with_2));
+  ASSERT_NO_FATAL_FAILURE(verify_format_2(deep_copy_name));
+
+  ASSERT_EQ(0, image.close());
+
+  // migration
+  std::string migrate_name = get_temp_image_name();
+  auto do_migrate = [&rbd, &ioctx, &name1, &migrate_name](const auto& opts) {
+    auto mod_opts = opts;
+    return rbd.migration_prepare(ioctx, name1.c_str(), ioctx,
+                                 migrate_name.c_str(), mod_opts);
+  };
+  ASSERT_EQ(-EINVAL, do_migrate(opts_with_0));
+  ASSERT_EQ(-EINVAL, do_migrate(opts_with_1));
+  ASSERT_EQ(-EINVAL, do_migrate(opts_with_3));
+  ASSERT_EQ(0, do_migrate(opts_with_2));
+  ASSERT_NO_FATAL_FAILURE(verify_format_2(migrate_name));
+
+  // import-only migration
+  std::string source_spec = R"({
+    "type": "native",
+    "pool_name": ")" + m_pool_name + R"(",
+    "image_name": ")" + name2 + R"(",
+    "snap_name": "parent_snap"
+})";
+  std::string import_name = get_temp_image_name();
+  auto do_migrate_import = [&rbd, &ioctx, &source_spec, &import_name](
+      const auto& opts) {
+    auto mod_opts = opts;
+    return rbd.migration_prepare_import(source_spec.c_str(), ioctx,
+                                        import_name.c_str(), mod_opts);
+  };
+  ASSERT_EQ(-EINVAL, do_migrate_import(opts_with_0));
+  ASSERT_EQ(-EINVAL, do_migrate_import(opts_with_1));
+  ASSERT_EQ(-EINVAL, do_migrate_import(opts_with_3));
+  ASSERT_EQ(0, do_migrate_import(opts_with_2));
+  ASSERT_NO_FATAL_FAILURE(verify_format_2(import_name));
+}
 
 // poorman's ceph_assert()
 namespace ceph {

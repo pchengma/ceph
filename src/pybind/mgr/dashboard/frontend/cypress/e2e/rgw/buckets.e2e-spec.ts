@@ -28,12 +28,7 @@ describe('RGW buckets page', () => {
     });
 
     it('should delete bucket', () => {
-      buckets.delete(bucket_name);
-    });
-
-    it('should check default encryption is SSE-S3', () => {
-      buckets.navigateTo('create');
-      buckets.checkForDefaultEncryption();
+      buckets.delete(bucket_name, null, null, true, false, false, true);
     });
 
     it('should create bucket with object locking enabled', () => {
@@ -46,7 +41,7 @@ describe('RGW buckets page', () => {
       buckets.edit(bucket_name, BucketsPageHelper.USERS[1], true);
       buckets.getDataTables().should('contain.text', BucketsPageHelper.USERS[1]);
 
-      buckets.delete(bucket_name);
+      buckets.delete(bucket_name, null, null, true, false, false, true);
     });
   });
 
@@ -60,7 +55,7 @@ describe('RGW buckets page', () => {
       buckets.create(bucket_name, BucketsPageHelper.USERS[0]);
       buckets.testInvalidEdit(bucket_name);
       buckets.navigateTo();
-      buckets.delete(bucket_name);
+      buckets.delete(bucket_name, null, null, true, false, false, true);
     });
   });
 });

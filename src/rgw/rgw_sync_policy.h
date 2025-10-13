@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 /*
  * Ceph - scalable distributed file system
@@ -240,10 +240,12 @@ struct rgw_sync_pipe_filter {
   bool is_subset_of(const rgw_sync_pipe_filter& f) const;
 
   bool has_tags() const;
+  bool has_prefix() const;
   bool check_tag(const std::string& s) const;
   bool check_tag(const std::string& k, const std::string& v) const;
   bool check_tags(const std::vector<std::string>& tags) const;
   bool check_tags(const RGWObjTags::tag_map_t& tags) const;
+  bool check_prefix(const std::string& obj_name) const;
 };
 WRITE_CLASS_ENCODER(rgw_sync_pipe_filter)
 
@@ -340,7 +342,7 @@ struct rgw_sync_pipe_params {
     MODE_USER = 1,
   } mode{MODE_SYSTEM};
   int32_t priority{0};
-  rgw_user user;
+  std::optional<rgw_user> user;
 
   void encode(bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
@@ -348,7 +350,7 @@ struct rgw_sync_pipe_params {
     encode(dest, bl);
     encode(priority, bl);
     encode((uint8_t)mode, bl);
-    encode(user, bl);
+    encode(user.value_or(rgw_user()), bl);
     ENCODE_FINISH(bl);
   }
 
@@ -360,7 +362,13 @@ struct rgw_sync_pipe_params {
     uint8_t m;
     decode(m, bl);
     mode = (Mode)m;
-    decode(user, bl);
+    { // decode user
+      rgw_user _user;
+      decode(_user, bl);
+      if (!_user.empty()) {
+        user = _user;
+      }
+    }
     DECODE_FINISH(bl);
   }
 
@@ -667,11 +675,34 @@ struct rgw_sync_policy_info {
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<rgw_sync_policy_info*>& o);
+  static std::list<rgw_sync_policy_info> generate_test_instances();
   void decode_json(JSONObj *obj);
 
   bool empty() const {
     return groups.empty();
+  }
+
+  bool is_directional() const {
+    for (auto& item : groups) {
+      auto& group = item.second;
+      if (!group.data_flow.directional.empty()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool has_filter() const {
+    for (auto& item : groups) {
+      auto& group = item.second;
+      for (auto& p : group.pipes) {
+        auto& filter = p.params.source.filter;
+        if (filter.has_prefix() || filter.has_tags()) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   void get_potential_related_buckets(const rgw_bucket& bucket,

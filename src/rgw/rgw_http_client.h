@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -64,6 +64,7 @@ protected:
   param_vec_t headers;
 
   long  req_timeout{0L};
+  long  req_connect_timeout{0L};
 
   void init();
 
@@ -151,9 +152,15 @@ public:
     req_timeout = timeout;
   }
 
-  int process(optional_yield y);
+  // set request for connect phase timeout in seconds. 
+  // ensures wrong url hits don't stay alive post this limit
+  void set_req_connect_timeout(long connect_timeout) {
+    req_connect_timeout = connect_timeout;
+  }
 
-  int wait(optional_yield y);
+  int process(const DoutPrefixProvider* dpp, optional_yield y);
+
+  int wait(const DoutPrefixProvider* dpp, optional_yield y);
   void cancel();
   bool is_done();
 
@@ -349,5 +356,6 @@ class RGWHTTP
 {
 public:
   static int send(RGWHTTPClient *req);
-  static int process(RGWHTTPClient *req, optional_yield y);
+  static int process(const DoutPrefixProvider* dpp, RGWHTTPClient *req,
+                     optional_yield y);
 };

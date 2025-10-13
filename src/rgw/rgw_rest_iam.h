@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -31,9 +31,9 @@ std::string iam_group_arn(const RGWGroupInfo& info);
 int forward_iam_request_to_master(const DoutPrefixProvider* dpp,
                                   const rgw::SiteConfig& site,
                                   const RGWUserInfo& user,
-                                  bufferlist& indata,
-                                  RGWXMLDecoder::XMLParser& parser,
-                                  req_info& req, optional_yield y);
+                                  bufferlist& indata, RGWXMLParser& parser,
+                                  const req_info& req, rgw_err& err,
+                                  optional_yield y);
 
 /// Perform an atomic read-modify-write operation on the given user metadata.
 /// Racing writes are detected here as ECANCELED errors, where we reload the
@@ -83,7 +83,7 @@ int retry_raced_role_write(const DoutPrefixProvider* dpp, optional_yield y,
   int r = f();
   for (int i = 0; i < 10 && r == -ECANCELED; ++i) {
     role->get_objv_tracker().clear();
-    r = role->get_by_id(dpp, y);
+    r = role->load_by_id(dpp, y);
     if (r >= 0) {
       r = f();
     }

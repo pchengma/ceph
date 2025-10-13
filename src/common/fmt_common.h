@@ -1,8 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #pragma once
 
+#include <fmt/base.h>
 #include <optional>
+#include <type_traits>
 
 /**
  * \file default fmtlib formatters for specifically-tagged types
@@ -17,8 +20,13 @@
  * such classes in Crimson.
  */
 
-template <typename T>
-concept has_formatter = fmt::has_formatter<T, fmt::format_context>::value;
+#if FMT_VERSION < 110000
+// TODO: drop me once fmt v11 is required
+namespace fmt {
+  template <typename T, typename Char = char>
+  concept formattable = is_formattable<std::remove_reference_t<T>, Char>::value>;
+}
+#endif
 
 /**
  * Tagging classes that provide support for default fmtlib formatting,
@@ -38,11 +46,19 @@ template<class T>
 concept has_alt_fmt_print = requires(T t) {
   { t.alt_fmt_print(bool{}) } -> std::same_as<std::string>;
 };
+#if FMT_VERSION >= 110000
+template<class T>
+concept has_fmt_print_ctx = requires(
+  T t, fmt::buffered_context<char> &ctx) {
+  { t.fmt_print_ctx(ctx) } -> std::same_as<decltype(ctx.out())>;
+};
+#else
 template<class T>
 concept has_fmt_print_ctx = requires(
   T t, fmt::buffer_context<char> &ctx) {
   { t.fmt_print_ctx(ctx) } -> std::same_as<decltype(ctx.out())>;
 };
+#endif
 
 namespace fmt {
 

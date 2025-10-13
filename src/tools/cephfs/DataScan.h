@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,6 +17,7 @@
 #include "MDSUtility.h"
 #include "include/rados/librados.hpp"
 
+struct inode_backtrace_t;
 class InodeStore;
 class MDSTable;
 
@@ -153,8 +155,9 @@ class MetadataTool
   void build_file_dentry(
     inodeno_t ino, uint64_t file_size, time_t file_mtime,
     const file_layout_t &layout,
-    InodeStore *out,
-    std::string symlink);
+    std::string symlink,
+    inodeno_t remote_inode,
+    InodeStore *out);
 
   /**
    * Construct a synthetic InodeStore for a directory

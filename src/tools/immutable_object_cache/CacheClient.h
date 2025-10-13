@@ -1,10 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CACHE_CACHE_CLIENT_H
 #define CEPH_CACHE_CACHE_CLIENT_H
 
 #include <atomic>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/algorithm/string.hpp>
@@ -58,7 +59,7 @@ class CacheClient {
  private:
   CephContext* m_cct;
   boost::asio::io_context m_io_service;
-  boost::asio::io_context::work m_io_service_work;
+  boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_io_service_work;
   stream_protocol::socket m_dm_socket;
   stream_protocol::endpoint m_ep;
   std::shared_ptr<std::thread> m_io_thread;
@@ -67,7 +68,7 @@ class CacheClient {
   uint64_t m_worker_thread_num;
   boost::asio::io_context* m_worker;
   std::vector<std::thread*> m_worker_threads;
-  boost::asio::io_context::work* m_worker_io_service_work;
+  boost::asio::executor_work_guard<boost::asio::io_context::executor_type>* m_worker_io_service_work;
 
   std::atomic<bool> m_writing;
   std::atomic<bool> m_reading;

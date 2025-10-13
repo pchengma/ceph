@@ -8,6 +8,7 @@ describe('cd-notification classes', () => {
       grafana: { create: false, delete: false, read: false, update: false },
       hosts: { create: false, delete: false, read: false, update: false },
       iscsi: { create: false, delete: false, read: false, update: false },
+      nvmeof: { create: false, delete: false, read: false, update: false },
       log: { create: false, delete: false, read: false, update: false },
       manager: { create: false, delete: false, read: false, update: false },
       monitor: { create: false, delete: false, read: false, update: false },
@@ -18,7 +19,8 @@ describe('cd-notification classes', () => {
       rbdImage: { create: false, delete: false, read: false, update: false },
       rbdMirroring: { create: false, delete: false, read: false, update: false },
       rgw: { create: false, delete: false, read: false, update: false },
-      user: { create: false, delete: false, read: false, update: false }
+      user: { create: false, delete: false, read: false, update: false },
+      smb: { create: false, delete: false, read: false, update: false }
     });
   });
 
@@ -29,6 +31,7 @@ describe('cd-notification classes', () => {
       grafana: ['create', 'read', 'update', 'delete'],
       hosts: ['create', 'read', 'update', 'delete'],
       iscsi: ['create', 'read', 'update', 'delete'],
+      'nvme-of': ['create', 'read', 'update', 'delete'],
       log: ['create', 'read', 'update', 'delete'],
       manager: ['create', 'read', 'update', 'delete'],
       monitor: ['create', 'read', 'update', 'delete'],
@@ -38,7 +41,8 @@ describe('cd-notification classes', () => {
       'rbd-image': ['create', 'read', 'update', 'delete'],
       'rbd-mirroring': ['create', 'read', 'update', 'delete'],
       rgw: ['create', 'read', 'update', 'delete'],
-      user: ['create', 'read', 'update', 'delete']
+      user: ['create', 'read', 'update', 'delete'],
+      smb: ['create', 'read', 'update', 'delete']
     };
     expect(new Permissions(fullyGranted)).toEqual({
       cephfs: { create: true, delete: true, read: true, update: true },
@@ -46,6 +50,7 @@ describe('cd-notification classes', () => {
       grafana: { create: true, delete: true, read: true, update: true },
       hosts: { create: true, delete: true, read: true, update: true },
       iscsi: { create: true, delete: true, read: true, update: true },
+      nvmeof: { create: true, delete: true, read: true, update: true },
       log: { create: true, delete: true, read: true, update: true },
       manager: { create: true, delete: true, read: true, update: true },
       monitor: { create: true, delete: true, read: true, update: true },
@@ -56,7 +61,8 @@ describe('cd-notification classes', () => {
       rbdImage: { create: true, delete: true, read: true, update: true },
       rbdMirroring: { create: true, delete: true, read: true, update: true },
       rgw: { create: true, delete: true, read: true, update: true },
-      user: { create: true, delete: true, read: true, update: true }
+      user: { create: true, delete: true, read: true, update: true },
+      smb: { create: true, delete: true, read: true, update: true }
     });
   });
 });

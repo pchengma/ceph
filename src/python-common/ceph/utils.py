@@ -30,7 +30,8 @@ def datetime_to_str(dt: datetime.datetime) -> str:
         ISO 8601 (timezone=UTC).
     """
     return dt.astimezone(tz=datetime.timezone.utc).strftime(
-        '%Y-%m-%dT%H:%M:%S.%fZ')
+        '%Y-%m-%dT%H:%M:%S.%fZ'
+    )
 
 
 def str_to_datetime(string: str) -> datetime.datetime:
@@ -50,7 +51,7 @@ def str_to_datetime(string: str) -> datetime.datetime:
     """
     fmts = [
         '%Y-%m-%dT%H:%M:%S.%f',
-        '%Y-%m-%dT%H:%M:%S.%f%z'
+        '%Y-%m-%dT%H:%M:%S.%f%z',
     ]
 
     # In *all* cases, the 9 digit second precision is too much for
@@ -74,8 +75,11 @@ def str_to_datetime(string: str) -> datetime.datetime:
         except ValueError:
             pass
 
-    raise ValueError("Time data {} does not match one of the formats {}".format(
-        string, str(fmts)))
+    raise ValueError(
+        "Time data {} does not match one of the formats {}".format(
+            string, str(fmts)
+        )
+    )
 
 
 def parse_timedelta(delta: str) -> Optional[datetime.timedelta]:
@@ -101,13 +105,15 @@ def parse_timedelta(delta: str) -> Optional[datetime.timedelta]:
     :return: The `datetime.timedelta` object or `None` in case of
         a parsing error.
     """
-    parts = re.match(r'(?P<seconds>-?\d+)s|'
-                     r'(?P<minutes>-?\d+)m|'
-                     r'(?P<hours>-?\d+)h|'
-                     r'(?P<days>-?\d+)d|'
-                     r'(?P<weeks>-?\d+)w$',
-                     delta,
-                     re.IGNORECASE)
+    parts = re.match(
+        r'(?P<seconds>-?\d+)s|'
+        r'(?P<minutes>-?\d+)m|'
+        r'(?P<hours>-?\d+)h|'
+        r'(?P<days>-?\d+)d|'
+        r'(?P<weeks>-?\d+)w$',
+        delta,
+        re.IGNORECASE,
+    )
     if not parts:
         return None
     parts = parts.groupdict()
@@ -130,17 +136,18 @@ def is_hex(s: str, strict: bool = True) -> bool:
     return True
 
 
-def http_req(hostname: str = '',
-             port: str = '443',
-             method: Optional[str] = None,
-             headers: MutableMapping[str, str] = {},
-             data: Optional[str] = None,
-             endpoint: str = '/',
-             scheme: str = 'https',
-             ssl_verify: bool = False,
-             timeout: Optional[int] = None,
-             ssl_ctx: Optional[Any] = None) -> Tuple[Any, Any, Any]:
-
+def http_req(
+    hostname: str = '',
+    port: str = '443',
+    method: Optional[str] = None,
+    headers: MutableMapping[str, str] = {},
+    data: Optional[str] = None,
+    endpoint: str = '/',
+    scheme: str = 'https',
+    ssl_verify: bool = False,
+    timeout: Optional[int] = None,
+    ssl_ctx: Optional[Any] = None,
+) -> Tuple[Any, Any, Any]:
     if not ssl_ctx:
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         if not ssl_verify:
@@ -167,3 +174,18 @@ def http_req(hostname: str = '',
         log.error(e)
         # handle error here if needed
         raise
+
+
+_TRUE_VALS = {'y', 'yes', 't', 'true', 'on', '1'}
+_FALSE_VALS = {'n', 'no', 'f', 'false', 'off', '0'}
+
+
+def strtobool(value: str) -> bool:
+    """Convert a string to a boolean value.
+    Based on a simlilar function once available at distutils.util.strtobool.
+    """
+    if value.lower() in _TRUE_VALS:
+        return True
+    if value.lower() in _FALSE_VALS:
+        return False
+    raise ValueError(f'invalid truth value {value!r}')

@@ -1,6 +1,7 @@
 
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,17 +16,13 @@
 #ifndef MGR_CLIENT_H_
 #define MGR_CLIENT_H_
 
-#include <boost/variant.hpp>
-
 #include "msg/Connection.h"
 #include "msg/Dispatcher.h"
 #include "mon/MgrMap.h"
 #include "mgr/DaemonHealthMetric.h"
 
-#include "messages/MMgrReport.h"
 #include "mgr/MetricTypes.h"
 
-#include "common/perf_counters.h"
 #include "common/Timer.h"
 #include "common/CommandTable.h"
 
@@ -120,7 +117,7 @@ public:
 
   void set_mgr_optional(bool optional_) {mgr_optional = optional_;}
 
-  bool ms_dispatch2(const ceph::ref_t<Message>& m) override;
+  Dispatcher::dispatch_result_t ms_dispatch2(const ceph::ref_t<Message>& m) override;
   bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}
   bool ms_handle_refused(Connection *con) override;

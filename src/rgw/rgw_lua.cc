@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <lua.hpp>
 #include "services/svc_zone.h"
@@ -56,7 +56,8 @@ std::string to_string(context ctx)
 
 bool verify(const std::string& script, std::string& err_msg) 
 {
-  lua_state_guard lguard(0, nullptr); // no memory limit, sice we don't execute the script
+  // no memory and runtime limit, since we don't execute the script
+  lua_state_guard lguard(0, 0, nullptr);
   auto L = lguard.get();
   try {
     open_standard_libs(L);

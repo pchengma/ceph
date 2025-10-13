@@ -22,17 +22,17 @@ class FSCryptTestCase(CephFSTestCase):
 
         self.mount_a.run_shell_payload("sudo fscrypt --help")
         self.mount_a.run_shell_payload("sudo fscrypt setup --help")
-        self.mount_a.run_shell_payload("sudo fscrypt setup --force --quiet")
-        self.mount_a.run_shell_payload("sudo fscrypt status")
-        self.mount_a.run_shell_payload(f"sudo fscrypt setup --quiet {self.mount_a.hostfs_mntpt}")
-        self.mount_a.run_shell_payload("sudo fscrypt status")
+        self.mount_a.run_shell_payload("sudo fscrypt setup --force --verbose")
+        self.mount_a.run_shell_payload("sudo fscrypt status --verbose")
+        self.mount_a.run_shell_payload(f"sudo fscrypt setup {self.mount_a.hostfs_mntpt} --verbose")
+        self.mount_a.run_shell_payload("sudo fscrypt status --verbose")
         self.mount_a.run_shell_payload(f"sudo dd if=/dev/urandom of={self.key_file} bs=32 count=1")
         self.mount_a.run_shell_payload(f"mkdir -p {self.path}")
-        self.mount_a.run_shell_payload(f"sudo fscrypt encrypt --quiet --source=raw_key --name={self.protector} --no-recovery --skip-unlock --key={self.key_file} {self.path}")
-        self.mount_a.run_shell_payload(f"sudo fscrypt unlock --quiet --key=/tmp/key {self.path}")
+        self.mount_a.run_shell_payload(f"sudo fscrypt encrypt --verbose --source=raw_key --name={self.protector} --no-recovery --skip-unlock --key={self.key_file} {self.path}")
+        self.mount_a.run_shell_payload(f"sudo fscrypt unlock --verbose --key=/tmp/key {self.path}")
 
     def tearDown(self):
-        self.mount_a.run_shell_payload(f"sudo fscrypt purge --force --quiet {self.mount_a.hostfs_mntpt}")
+        self.mount_a.run_shell_payload(f"sudo fscrypt purge --force --verbose {self.mount_a.hostfs_mntpt}")
 
         super().tearDown()
 
@@ -83,9 +83,11 @@ class TestFSCryptRecovery(FSCryptTestCase):
         self.fs.set_joinable()
         self.fs.wait_for_daemons()
 
+        # load all inodes into cache (may be cleared by journal reset)
+        self.mount_a.run_shell_payload(f"cd {self.path} && find")
+
         verify_alternate_name()
 
-        self.mount_a.run_shell_payload(f"cd {self.path} && find")
         self.mount_a.run_shell_payload(f"cd {self.path} && stat {file}")
 
 

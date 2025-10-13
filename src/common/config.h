@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,7 @@
 #ifndef CEPH_CONFIG_H
 #define CEPH_CONFIG_H
 
+#include <iosfwd>
 #include <map>
 #include <variant>
 #include <boost/container/small_vector.hpp>
@@ -38,6 +40,8 @@ enum {
 };
 
 extern const char *ceph_conf_level_name(int level);
+
+extern const char *CEPH_CONF_FILE_DEFAULT;
 
 /** This class represents the current Ceph configuration.
  *
@@ -89,7 +93,7 @@ public:
   /*
    * Mapping from legacy config option names to class members
    */
-  std::map<std::string_view, member_ptr_t> legacy_values;
+  static const std::map<std::string_view, member_ptr_t> legacy_values;
 
   /**
    * The configuration schema, in the form of Option objects describing

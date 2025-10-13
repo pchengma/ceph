@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,9 +19,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 
 #include "auth/Auth.h"
-#include "include/buffer.h"
+#include "include/buffer_fwd.h"
 
 namespace ceph::math {
 
@@ -86,6 +88,8 @@ struct TxHandler {
   // Generates authentication signature and returns bufferlist crafted
   // basing on plaintext from preceding call to _update().
   virtual ceph::bufferlist authenticated_encrypt_final() = 0;
+
+  virtual std::string_view cipher_name() const = 0;
 };
 
 class RxHandler {
@@ -109,6 +113,8 @@ public:
   // for overall decryption sequence.
   // Throws on integrity/authenticity checks
   virtual void authenticated_decrypt_update_final(ceph::bufferlist& bl) = 0;
+
+  virtual std::string_view cipher_name() const = 0;
 };
 
 struct rxtx_t {

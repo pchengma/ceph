@@ -1,11 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/os/seastore/transaction_manager.h"
 #include "crimson/os/seastore/collection_manager.h"
+#include "crimson/os/seastore/logical_child_node.h"
 
 namespace crimson::os::seastore::collection_manager {
 struct coll_context_t {
@@ -90,14 +91,15 @@ WRITE_CLASS_DENC(crimson::os::seastore::collection_manager::delta_buffer_t)
 
 namespace crimson::os::seastore::collection_manager {
 
-struct CollectionNode
-  : LogicalCachedExtent {
+struct CollectionNode : LogicalChildNode {
   using CollectionNodeRef = TCachedExtentRef<CollectionNode>;
 
   explicit CollectionNode(ceph::bufferptr &&ptr)
-    : LogicalCachedExtent(std::move(ptr)) {}
+    : LogicalChildNode(std::move(ptr)) {}
+  explicit CollectionNode(extent_len_t length)
+    : LogicalChildNode(length) {}
   explicit CollectionNode(const CollectionNode &other)
-    : LogicalCachedExtent(other),
+    : LogicalChildNode(other),
       decoded(other.decoded) {}
 
   static constexpr extent_types_t type = extent_types_t::COLL_BLOCK;

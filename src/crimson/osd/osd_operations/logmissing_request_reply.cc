@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "logmissing_request_reply.h"
 
@@ -21,7 +21,7 @@ namespace crimson::osd {
 LogMissingRequestReply::LogMissingRequestReply(
   crimson::net::ConnectionRef&& conn,
   Ref<MOSDPGUpdateLogMissingReply> &&req)
-  : l_conn{std::move(conn)},
+  : RemoteOperation{std::move(conn)},
     req{std::move(req)}
 {}
 
@@ -56,11 +56,6 @@ PerShardPipeline &LogMissingRequestReply::get_pershard_pipeline(
   return shard_services.get_replicated_request_pipeline();
 }
 
-ClientRequest::PGPipeline &LogMissingRequestReply::client_pp(PG &pg)
-{
-  return pg.request_pg_pipeline;
-}
-
 seastar::future<> LogMissingRequestReply::with_pg(
   ShardServices &shard_services, Ref<PG> pg)
 {
@@ -75,7 +70,7 @@ seastar::future<> LogMissingRequestReply::with_pg(
     });
   }, [](std::exception_ptr) {
     return seastar::now();
-  }, pg).finally([this, ref=std::move(ref)] {
+  }, pg, pg->get_osdmap_epoch()).finally([this, ref=std::move(ref)] {
     logger().debug("{}: exit", *this);
     handle.exit();
   });

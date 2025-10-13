@@ -10,6 +10,13 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { By } from '@angular/platform-browser';
 import { OrchestratorService } from '~/app/shared/api/orchestrator.service';
 import { of } from 'rxjs';
+import {
+  CheckboxModule,
+  ComboBoxModule,
+  GridModule,
+  InputModule,
+  SelectModule
+} from 'carbon-components-angular';
 
 describe('CephfsVolumeFormComponent', () => {
   let component: CephfsVolumeFormComponent;
@@ -24,7 +31,12 @@ describe('CephfsVolumeFormComponent', () => {
       HttpClientTestingModule,
       RouterTestingModule,
       ReactiveFormsModule,
-      ToastrModule.forRoot()
+      ToastrModule.forRoot(),
+      GridModule,
+      InputModule,
+      SelectModule,
+      ComboBoxModule,
+      CheckboxModule
     ],
     declarations: [CephfsVolumeFormComponent]
   });

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  *  CEPH messenger engine
  *
@@ -132,7 +133,8 @@ static void put_ceph_context(void)
     Formatter* f;
 
     f = Formatter::create("json-pretty");
-    g_ceph_context->get_perfcounters_collection()->dump_formatted(f, false, false);
+    g_ceph_context->get_perfcounters_collection()->dump_formatted(
+	f, false, select_labeled_t::unlabeled);
     ostr << ">>>>>>>>>>>>> PERFCOUNTERS BEGIN <<<<<<<<<<<<" << std::endl;
     f->flush(ostr);
     ostr << ">>>>>>>>>>>>>  PERFCOUNTERS END  <<<<<<<<<<<<" << std::endl;
@@ -271,8 +273,8 @@ public:
   bool ms_handle_refused(Connection *con) override {
     return false;
   }
-  int ms_handle_fast_authentication(Connection *con) override {
-    return 1;
+  bool ms_handle_fast_authentication(Connection *con) override {
+    return true;
   }
 };
 

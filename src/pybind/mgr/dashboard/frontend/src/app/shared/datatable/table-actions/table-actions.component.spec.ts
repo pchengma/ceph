@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { NgxPipeFunctionModule } from 'ngx-pipe-function';
+import { PipesModule } from '~/app/shared/pipes/pipes.module';
 
 import { ComponentsModule } from '~/app/shared/components/components.module';
 import { CdTableAction } from '~/app/shared/models/cd-table-action';
@@ -23,7 +23,7 @@ describe('TableActionsComponent', () => {
 
   configureTestBed({
     declarations: [TableActionsComponent],
-    imports: [ComponentsModule, NgxPipeFunctionModule, RouterTestingModule]
+    imports: [ComponentsModule, PipesModule, RouterTestingModule]
   });
 
   beforeEach(() => {
@@ -125,35 +125,75 @@ describe('TableActionsComponent', () => {
     expect(tableActions).toEqual({
       'create,update,delete': {
         actions: ['Add', 'Edit', 'Protect', 'Unprotect', 'Copy', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Edit', single: 'Edit', no: 'Add' }
+        primary: {
+          multiple: 'Add',
+          executing: 'Add',
+          single: 'Add',
+          no: 'Add'
+        }
       },
       'create,update': {
         actions: ['Add', 'Edit', 'Protect', 'Unprotect', 'Copy'],
-        primary: { multiple: 'Add', executing: 'Edit', single: 'Edit', no: 'Add' }
+        primary: {
+          multiple: 'Add',
+          executing: 'Add',
+          single: 'Add',
+          no: 'Add'
+        }
       },
       'create,delete': {
         actions: ['Add', 'Copy', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Copy', single: 'Copy', no: 'Add' }
+        primary: {
+          multiple: 'Add',
+          executing: 'Add',
+          single: 'Add',
+          no: 'Add'
+        }
       },
       create: {
         actions: ['Add', 'Copy'],
-        primary: { multiple: 'Add', executing: 'Copy', single: 'Copy', no: 'Add' }
+        primary: {
+          multiple: 'Add',
+          executing: 'Add',
+          single: 'Add',
+          no: 'Add'
+        }
       },
       'update,delete': {
         actions: ['Edit', 'Protect', 'Unprotect', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
         actions: ['Edit', 'Protect', 'Unprotect'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       delete: {
         actions: ['Delete'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        primary: {
+          multiple: 'Delete',
+          executing: 'Delete',
+          single: 'Delete',
+          no: 'Delete'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });

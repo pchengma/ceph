@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_kafka.h"
 #include "rgw_url.h"
@@ -10,18 +10,18 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <shared_mutex> // for std::shared_lock
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <boost/algorithm/string.hpp>
+#include <boost/functional/hash.hpp>
 #include <boost/lockfree/queue.hpp>
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/dout.h"
+#include "include/utime.h"
 
 #define dout_subsys ceph_subsys_rgw_notification
-
-// comparison operator between topic pointer and name
-bool operator==(const rd_kafka_topic_t* rkt, const std::string& name) {
-    return name == std::string_view(rd_kafka_topic_name(rkt)); 
-}
 
 // this is the inverse of rd_kafka_errno2err
 // see: https://github.com/confluentinc/librdkafka/blob/master/src/rdkafka.c
@@ -70,6 +70,47 @@ inline std::string status_to_string(int s) {
   }
 }
 
+connection_id_t::connection_id_t(
+    const std::string& _broker,
+    const std::string& _user,
+    const std::string& _password,
+    const boost::optional<const std::string&>& _ca_location,
+    const boost::optional<const std::string&>& _mechanism,
+    bool _ssl)
+    : broker(_broker), user(_user), password(_password), ssl(_ssl) {
+  if (_ca_location.has_value()) {
+    ca_location = _ca_location.get();
+  }
+  if (_mechanism.has_value()) {
+    mechanism = _mechanism.get();
+  }
+}
+
+// equality operator and hasher functor are needed
+// so that connection_id_t could be used as key in unordered_map
+bool operator==(const connection_id_t& lhs, const connection_id_t& rhs) {
+  return lhs.broker == rhs.broker && lhs.user == rhs.user &&
+         lhs.password == rhs.password && lhs.ca_location == rhs.ca_location &&
+         lhs.mechanism == rhs.mechanism && lhs.ssl == rhs.ssl;
+}
+
+struct connection_id_hasher {
+  std::size_t operator()(const connection_id_t& k) const {
+    std::size_t h = 0;
+    boost::hash_combine(h, k.broker);
+    boost::hash_combine(h, k.user);
+    boost::hash_combine(h, k.password);
+    boost::hash_combine(h, k.ca_location);
+    boost::hash_combine(h, k.mechanism);
+    boost::hash_combine(h, k.ssl);
+    return h;
+  }
+};
+
+std::string to_string(const connection_id_t& id) {
+  return id.broker + ":" + id.user;
+}
+
 // convert int status to errno - both RGW and librdkafka values
 inline int status_to_errno(int s) {
   if (s == 0) return 0;
@@ -99,9 +140,19 @@ struct reply_callback_with_tag_t {
 
 typedef std::vector<reply_callback_with_tag_t> CallbackList;
 
+
+
 struct connection_t {
   rd_kafka_t* producer = nullptr;
-  std::vector<rd_kafka_topic_t*> topics;
+
+  struct rd_kafka_topic_deleter {
+    void operator()(rd_kafka_topic_t* topic) {
+      rd_kafka_topic_destroy(topic);
+    }
+  };
+  using topic_ptr = std::unique_ptr<rd_kafka_topic_t, rd_kafka_topic_deleter>;
+  std::map<std::string, topic_ptr> topics;
+
   uint64_t delivery_tag = 1;
   int status = 0;
   CephContext* const cct;
@@ -126,7 +177,6 @@ struct connection_t {
     // wait for 500ms to try and handle pending callbacks
     rd_kafka_flush(producer, 500);
     // destroy all topics
-    std::for_each(topics.begin(), topics.end(), [](auto topic) {rd_kafka_topic_destroy(topic);});
     topics.clear();
     // destroy producer
     rd_kafka_destroy(producer);
@@ -165,8 +215,9 @@ void message_callback(rd_kafka_t* rk, const rd_kafka_message_t* rkmessage, void*
       ldout(conn->cct, 20) << "Kafka run: ack received with result=" << 
         rd_kafka_err2str(result) << dendl;
   } else {
-      ldout(conn->cct, 1) << "Kafka run: nack received with result=" << 
-        rd_kafka_err2str(result) << dendl;
+    ldout(conn->cct, 1) << "Kafka run: nack received with result="
+                        << rd_kafka_err2str(result)
+                        << " for broker: " << conn->broker << dendl;
   }
 
   if (!rkmessage->_private) {
@@ -327,18 +378,21 @@ conf_error:
 
 // struct used for holding messages in the message queue
 struct message_wrapper_t {
-  std::string conn_name; 
+  connection_id_t conn_id;
   std::string topic;
   std::string message;
   const reply_callback_t cb;
-  
-  message_wrapper_t(const std::string& _conn_name,
-      const std::string& _topic,
-      const std::string& _message,
-      reply_callback_t _cb) : conn_name(_conn_name), topic(_topic), message(_message), cb(_cb) {}
+
+  message_wrapper_t(const connection_id_t& _conn_id,
+                    const std::string& _topic,
+                    const std::string& _message,
+                    reply_callback_t _cb)
+      : conn_id(_conn_id), topic(_topic), message(_message), cb(_cb) {}
 };
 
-typedef std::unordered_map<std::string, connection_t_ptr> ConnectionList;
+typedef std::
+    unordered_map<connection_id_t, connection_t_ptr, connection_id_hasher>
+        ConnectionList;
 typedef boost::lockfree::queue<message_wrapper_t*, boost::lockfree::fixed_sized<true>> MessageQueue;
 
 class Manager {
@@ -361,7 +415,7 @@ private:
   // TODO use rd_kafka_produce_batch for better performance
   void publish_internal(message_wrapper_t* message) {
     const std::unique_ptr<message_wrapper_t> msg_deleter(message);
-    const auto conn_it = connections.find(message->conn_name);
+    const auto conn_it = connections.find(message->conn_id);
     if (conn_it == connections.end()) {
       ldout(cct, 1) << "Kafka publish: connection was deleted while message was in the queue" << dendl;
       if (message->cb) {
@@ -385,10 +439,9 @@ private:
     }
 
     // create a new topic unless it was already created
-    auto topic_it = std::find(conn->topics.begin(), conn->topics.end(), message->topic);
-    rd_kafka_topic_t* topic = nullptr;
+    auto topic_it = conn->topics.find(message->topic);
     if (topic_it == conn->topics.end()) {
-      topic = rd_kafka_topic_new(conn->producer, message->topic.c_str(), nullptr);
+      connection_t::topic_ptr topic(rd_kafka_topic_new(conn->producer, message->topic.c_str(), nullptr));
       if (!topic) {
         const auto err = rd_kafka_last_error();
         ldout(conn->cct, 1) << "Kafka publish: failed to create topic: " << message->topic << " error: " 
@@ -398,17 +451,15 @@ private:
         }
         return;
       }
-      // TODO use the topics list as an LRU cache
-      conn->topics.push_back(topic);
+      topic_it = conn->topics.emplace(message->topic, std::move(topic)).first;
       ldout(conn->cct, 20) << "Kafka publish: successfully created topic: " << message->topic << dendl;
     } else {
-        topic = *topic_it;
         ldout(conn->cct, 20) << "Kafka publish: reused existing topic: " << message->topic << dendl;
     }
 
     const auto tag = (message->cb == nullptr ? nullptr : new uint64_t(conn->delivery_tag++));
     const auto rc = rd_kafka_produce(
-            topic,
+            topic_it->second.get(),
             // TODO: non builtin partitioning
             RD_KAFKA_PARTITION_UA,
             // make a copy of the payload
@@ -425,7 +476,9 @@ private:
             tag);
     if (rc == -1) {
       const auto err = rd_kafka_last_error();
-      ldout(conn->cct, 1) << "Kafka publish: failed to produce: " << rd_kafka_err2str(err) << dendl;
+      ldout(conn->cct, 1) << "Kafka publish: failed to produce for topic: "
+                          << message->topic
+                          << ". with error: " << rd_kafka_err2str(err) << dendl;
       // immediatly invoke callback on error if needed
       if (message->cb) {
         message->cb(-rd_kafka_err2errno(err));
@@ -454,6 +507,7 @@ private:
   }
 
   void run() noexcept {
+    ceph_pthread_setname("kafka_manager");
     while (!stopped) {
 
       // publish all messages in the queue
@@ -526,12 +580,6 @@ public:
       // This is to prevent rehashing so that iterators are not invalidated 
       // when a new connection is added.
       connections.max_load_factor(10.0);
-      // give the runner thread a name for easier debugging
-      const char* thread_name = "kafka_manager";
-      if (const auto rc = ceph_pthread_setname(runner.native_handle(), thread_name); rc != 0) {
-        ldout(cct, 1) << "ERROR: failed to set kafka manager thread name to: " << thread_name
-          << ". error: " << rc << dendl;
-      }
   }
 
   // non copyable
@@ -544,14 +592,15 @@ public:
   }
 
   // connect to a broker, or reuse an existing connection if already connected
-  bool connect(std::string& broker,
-          const std::string& url, 
-          bool use_ssl,
-          bool verify_ssl,
-          boost::optional<const std::string&> ca_location,
-          boost::optional<const std::string&> mechanism,
-          boost::optional<const std::string&> topic_user_name,
-          boost::optional<const std::string&> topic_password) {
+  bool connect(connection_id_t& conn_id,
+               const std::string& url,
+               bool use_ssl,
+               bool verify_ssl,
+               boost::optional<const std::string&> ca_location,
+               boost::optional<const std::string&> mechanism,
+               boost::optional<const std::string&> topic_user_name,
+               boost::optional<const std::string&> topic_password,
+               boost::optional<const std::string&> brokers) {
     if (stopped) {
       ldout(cct, 1) << "Kafka connect: manager is stopped" << dendl;
       return false;
@@ -559,7 +608,8 @@ public:
 
     std::string user;
     std::string password;
-    if (!parse_url_authority(url, broker, user, password)) {
+    std::string broker_list;
+    if (!parse_url_authority(url, broker_list, user, password)) {
       // TODO: increment counter
       ldout(cct, 1) << "Kafka connect: URL parsing failed" << dendl;
       return false;
@@ -588,13 +638,22 @@ public:
       return false;
     }
 
+    if (brokers.has_value()) {
+      broker_list.append(",");
+      broker_list.append(brokers.get());
+    }
+
+    connection_id_t tmp_id(broker_list, user, password, ca_location, mechanism,
+                           use_ssl);
     std::lock_guard lock(connections_lock);
-    const auto it = connections.find(broker);
+    const auto it = connections.find(tmp_id);
     // note that ssl vs. non-ssl connection to the same host are two separate connections
     if (it != connections.end()) {
       // connection found - return even if non-ok
-      ldout(cct, 20) << "Kafka connect: connection found" << dendl;
-      return it->second.get();
+      ldout(cct, 20) << "Kafka connect: connection found: " << to_string(tmp_id)
+                     << dendl;
+      conn_id = std::move(tmp_id);
+      return true;
     }
 
     // connection not found, creating a new one
@@ -604,26 +663,30 @@ public:
       return false;
     }
 
-    auto conn = std::make_unique<connection_t>(cct, broker, use_ssl, verify_ssl, ca_location, user, password, mechanism);
+    auto conn = std::make_unique<connection_t>(cct, broker_list, use_ssl, verify_ssl, ca_location, user, password, mechanism);
     if (!new_producer(conn.get())) {
       ldout(cct, 10) << "Kafka connect: producer creation failed in new connection" << dendl;
       return false;
     }
     ++connection_count;
-    connections.emplace(broker, std::move(conn));
+    connections.emplace(tmp_id, std::move(conn));
 
-    ldout(cct, 10) << "Kafka connect: new connection is created. Total connections: " << connection_count << dendl;
+    ldout(cct, 10) << "Kafka connect: new connection is created: "
+                   << to_string(tmp_id)
+                   << " . Total connections: " << connection_count << dendl;
+    conn_id = std::move(tmp_id);
     return true;
   }
 
   // TODO publish with confirm is needed in "none" case as well, cb should be invoked publish is ok (no ack)
-  int publish(const std::string& conn_name, 
-    const std::string& topic,
-    const std::string& message) {
+  int publish(const connection_id_t& conn_id,
+              const std::string& topic,
+              const std::string& message) {
     if (stopped) {
       return -ESRCH;
     }
-    auto message_wrapper = std::make_unique<message_wrapper_t>(conn_name, topic, message, nullptr);
+    auto message_wrapper =
+        std::make_unique<message_wrapper_t>(conn_id, topic, message, nullptr);
     if (messages.push(message_wrapper.get())) {
       std::ignore = message_wrapper.release();
       ++queued;
@@ -631,15 +694,16 @@ public:
     }
     return -EBUSY;
   }
-  
-  int publish_with_confirm(const std::string& conn_name, 
-    const std::string& topic,
-    const std::string& message,
-    reply_callback_t cb) {
+
+  int publish_with_confirm(const connection_id_t& conn_id,
+                           const std::string& topic,
+                           const std::string& message,
+                           reply_callback_t cb) {
     if (stopped) {
       return -ESRCH;
     }
-    auto message_wrapper = std::make_unique<message_wrapper_t>(conn_name, topic, message, cb);
+    auto message_wrapper =
+        std::make_unique<message_wrapper_t>(conn_id, topic, message, cb);
     if (messages.push(message_wrapper.get())) {
       std::ignore = message_wrapper.release();
       ++queued;
@@ -710,31 +774,36 @@ void shutdown() {
   s_manager = nullptr;
 }
 
-bool connect(std::string& broker, const std::string& url, bool use_ssl, bool verify_ssl,
-        boost::optional<const std::string&> ca_location,
-        boost::optional<const std::string&> mechanism,
-        boost::optional<const std::string&> user_name,
-        boost::optional<const std::string&> password) {
+bool connect(connection_id_t& conn_id,
+             const std::string& url,
+             bool use_ssl,
+             bool verify_ssl,
+             boost::optional<const std::string&> ca_location,
+             boost::optional<const std::string&> mechanism,
+             boost::optional<const std::string&> user_name,
+             boost::optional<const std::string&> password,
+             boost::optional<const std::string&> brokers) {
   std::shared_lock lock(s_manager_mutex);
   if (!s_manager) return false;
-  return s_manager->connect(broker, url, use_ssl, verify_ssl, ca_location, mechanism, user_name, password);
+  return s_manager->connect(conn_id, url, use_ssl, verify_ssl, ca_location,
+                            mechanism, user_name, password, brokers);
 }
 
-int publish(const std::string& conn_name,
-    const std::string& topic,
-    const std::string& message) {
+int publish(const connection_id_t& conn_id,
+            const std::string& topic,
+            const std::string& message) {
   std::shared_lock lock(s_manager_mutex);
   if (!s_manager) return -ESRCH;
-  return s_manager->publish(conn_name, topic, message);
+  return s_manager->publish(conn_id, topic, message);
 }
 
-int publish_with_confirm(const std::string& conn_name,
-    const std::string& topic,
-    const std::string& message,
-    reply_callback_t cb) {
+int publish_with_confirm(const connection_id_t& conn_id,
+                         const std::string& topic,
+                         const std::string& message,
+                         reply_callback_t cb) {
   std::shared_lock lock(s_manager_mutex);
   if (!s_manager) return -ESRCH;
-  return s_manager->publish_with_confirm(conn_name, topic, message, cb);
+  return s_manager->publish_with_confirm(conn_id, topic, message, cb);
 }
 
 size_t get_connection_count() {

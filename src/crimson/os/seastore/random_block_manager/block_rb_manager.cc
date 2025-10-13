@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <sys/mman.h>
 #include <string.h>
@@ -115,39 +115,41 @@ BlockRBManager::open_ertr::future<> BlockRBManager::open()
   return open_ertr::now();
 }
 
-BlockRBManager::write_ertr::future<> BlockRBManager::write(
-  paddr_t paddr,
-  bufferptr &bptr)
-{
-  LOG_PREFIX(BlockRBManager::write);
-  ceph_assert(device);
-  rbm_abs_addr addr = convert_paddr_to_abs_addr(paddr);
+bool BlockRBManager::check_valid_range(rbm_abs_addr addr, bufferptr &bptr) {
+  LOG_PREFIX(BlockRBManager::check_valid_range);
   rbm_abs_addr start = device->get_shard_start();
   rbm_abs_addr end = device->get_shard_end();
   if (addr < start || addr + bptr.length() > end) {
     ERROR("out of range: start {}, end {}, addr {}, length {}",
       start, end, addr, bptr.length());
+    return false;
+  }
+  return true;
+}
+
+BlockRBManager::write_ertr::future<> BlockRBManager::write(
+  paddr_t paddr,
+  bufferptr bptr)
+{
+  ceph_assert(device);
+  ceph_assert(bptr.is_page_aligned());
+  rbm_abs_addr addr = convert_paddr_to_abs_addr(paddr);
+  if (!check_valid_range(addr, bptr)) {
     return crimson::ct_error::erange::make();
   }
-  bufferptr bp = bufferptr(ceph::buffer::create_page_aligned(bptr.length()));
-  bp.copy_in(0, bptr.length(), bptr.c_str());
   return device->write(
     addr,
-    std::move(bp));
+    bptr);
 }
 
 BlockRBManager::read_ertr::future<> BlockRBManager::read(
   paddr_t paddr,
   bufferptr &bptr)
 {
-  LOG_PREFIX(BlockRBManager::read);
   ceph_assert(device);
+  ceph_assert(bptr.is_page_aligned());
   rbm_abs_addr addr = convert_paddr_to_abs_addr(paddr);
-  rbm_abs_addr start = device->get_shard_start();
-  rbm_abs_addr end = device->get_shard_end();
-  if (addr < start || addr + bptr.length() > end) {
-    ERROR("out of range: start {}, end {}, addr {}, length {}",
-      start, end, addr, bptr.length());
+  if (!check_valid_range(addr, bptr)) {
     return crimson::ct_error::erange::make();
   }
   return device->read(
@@ -186,10 +188,10 @@ BlockRBManager::write_ertr::future<> BlockRBManager::write(
 void BlockRBManager::prefill_fragmented_device()
 {
   LOG_PREFIX(BlockRBManager::prefill_fragmented_device);
-  // the first 2 blocks must be allocated to lba root
+  // the first 3 blocks must be allocated to lba root
   // and backref root during mkfs
-  for (size_t block = get_block_size() * 2;
-      block <= get_size() - get_block_size() * 2;
+  for (size_t block = get_block_size() * 3;
+      block <= get_size() - get_block_size() * 3;
       block += get_block_size() * 2) {
     DEBUG("marking {}~{} used",
       get_start_rbm_addr() + block,
@@ -201,15 +203,17 @@ void BlockRBManager::prefill_fragmented_device()
 }
 #endif
 
-std::ostream &operator<<(std::ostream &out, const rbm_metadata_header_t &header)
+std::ostream &operator<<(std::ostream &out, const rbm_superblock_t &header)
 {
-  out << " rbm_metadata_header_t(size=" << header.size
+  out << " rbm_superblock_t(size=" << header.size
        << ", block_size=" << header.block_size
        << ", feature=" << header.feature
        << ", journal_size=" << header.journal_size
        << ", crc=" << header.crc
        << ", config=" << header.config
-       << ", shard_num=" << header.shard_num;
+       << ", shard_num=" << header.shard_num
+       << ", end_to_end_data_protection=" << header.is_end_to_end_data_protection()
+       << ", device_block_size=" << header.nvme_block_size;
   for (auto p : header.shard_infos) {
     out << p;
   }

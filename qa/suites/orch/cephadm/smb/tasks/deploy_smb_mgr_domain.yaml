@@ -14,9 +14,10 @@ overrides:
     log-only-match:
       - CEPHADM_
 tasks:
-- cephadm.deploy_samba_ad_dc:
+- smb.deploy_samba_ad_dc:
     role: host.b
 - cephadm:
+    single_host_defaults: true
 
 - cephadm.shell:
     host.a:
@@ -39,13 +40,14 @@ tasks:
           --domain-realm=domain1.sink.test
           --domain-join-user-pass=Administrator%Passw0rd
           --custom-dns={{ctx.samba_ad_dc_ip}}
+          --placement=count:1
       - cmd: ceph smb share create modtest1 share1 cephfs / --subvolume=smb/sv1
       - cmd: ceph smb share create modtest1 share2 cephfs / --subvolume=smb/sv2
 # Wait for the smb service to start
 - cephadm.wait_for_service:
     service: smb.modtest1
 # Check if shares exist
-- cephadm.exec:
+- template.exec:
     host.b:
       - sleep 30
       - "{{ctx.samba_client_container_cmd|join(' ')}} smbclient -U DOMAIN1\\\\ckent%1115Rose. //{{'host.a'|role_to_remote|attr('ip_address')}}/share1 -c ls"

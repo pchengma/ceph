@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/rbd_mirror/test_mock_fixture.h"
 #include "librbd/journal/TypeTraits.h"
@@ -364,7 +364,7 @@ public:
 
   void expect_is_linked(MockStateBuilder& mock_state_builder, bool is_linked) {
     EXPECT_CALL(mock_state_builder, is_linked())
-      .WillOnce(Return(is_linked));
+      .WillRepeatedly(Return(is_linked));
   }
 
   void expect_is_disconnected(MockStateBuilder& mock_state_builder,

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -44,7 +44,7 @@ private:
       scheduler_class
     };
   }
-  using do_recovery_ret_t = typename PhasedOperationT<T>::template interruptible_future<bool>;
+  using do_recovery_ret_t = typename PhasedOperationT<T>::template interruptible_future<seastar::stop_iteration>;
   virtual do_recovery_ret_t do_recovery() = 0;
   ShardServices &ss;
   const crimson::osd::scheduler::scheduler_class_t scheduler_class;
@@ -52,10 +52,9 @@ private:
 
 /// represent a recovery initiated for serving a client request
 ///
-/// unlike @c PglogBasedRecovery and @c BackfillRecovery,
-/// @c UrgentRecovery is not throttled by the scheduler. and it
-/// utilizes @c RecoveryBackend directly to recover the unreadable
-/// object.
+/// unlike @c PglogBasedRecovery, @c UrgentRecovery is not throttled
+/// by the scheduler. and it utilizes @c RecoveryBackend directly to
+/// recover the unreadable object.
 class UrgentRecovery final : public BackgroundRecoveryT<UrgentRecovery> {
 public:
   UrgentRecovery(
@@ -67,13 +66,12 @@ public:
   void print(std::ostream&) const final;
 
   std::tuple<
-    OperationThrottler::BlockingEvent,
     RecoveryBackend::RecoveryBlockingEvent
   > tracking_events;
 
 private:
   void dump_detail(Formatter* f) const final;
-  interruptible_future<bool> do_recovery() override;
+  interruptible_future<seastar::stop_iteration> do_recovery() override;
   const hobject_t soid;
   const eversion_t need;
 };
@@ -87,57 +85,28 @@ public:
     float delay = 0);
 
   std::tuple<
-    OperationThrottler::BlockingEvent,
     RecoveryBackend::RecoveryBlockingEvent
   > tracking_events;
 
+  void cancel() {
+    cancelled = true;
+  }
+
+  bool is_cancelled() const {
+    return cancelled;
+  }
+
+  epoch_t get_epoch_started() const {
+    return epoch_started;
+  }
 private:
-  interruptible_future<bool> do_recovery() override;
+  interruptible_future<seastar::stop_iteration> do_recovery() override;
+  bool cancelled = false;
 };
-
-class BackfillRecovery final : public BackgroundRecoveryT<BackfillRecovery> {
-public:
-
-  template <class EventT>
-  BackfillRecovery(
-    Ref<PG> pg,
-    ShardServices &ss,
-    epoch_t epoch_started,
-    const EventT& evt);
-
-  PipelineHandle& get_handle() { return handle; }
-
-  std::tuple<
-    OperationThrottler::BlockingEvent,
-    PGPeeringPipeline::Process::BlockingEvent
-  > tracking_events;
-
-private:
-  boost::intrusive_ptr<const boost::statechart::event_base> evt;
-  PipelineHandle handle;
-
-  static PGPeeringPipeline &peering_pp(PG &pg);
-  interruptible_future<bool> do_recovery() override;
-};
-
-template <class EventT>
-BackfillRecovery::BackfillRecovery(
-  Ref<PG> pg,
-  ShardServices &ss,
-  const epoch_t epoch_started,
-  const EventT& evt)
-  : BackgroundRecoveryT(
-      std::move(pg),
-      ss,
-      epoch_started,
-      crimson::osd::scheduler::scheduler_class_t::background_best_effort),
-    evt(evt.intrusive_from_this())
-{}
 
 }
 
 #if FMT_VERSION >= 90000
-template <> struct fmt::formatter<crimson::osd::BackfillRecovery> : fmt::ostream_formatter {};
 template <> struct fmt::formatter<crimson::osd::PglogBasedRecovery> : fmt::ostream_formatter {};
 template <> struct fmt::formatter<crimson::osd::UrgentRecovery> : fmt::ostream_formatter {};
 template <class T> struct fmt::formatter<crimson::osd::BackgroundRecoveryT<T>> : fmt::ostream_formatter {};

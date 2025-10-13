@@ -6,7 +6,7 @@ import { Subscription } from 'rxjs';
 
 import { IscsiService } from '~/app/shared/api/iscsi.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
 import { TableComponent } from '~/app/shared/datatable/table/table.component';
 import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
@@ -20,10 +20,10 @@ import { Task } from '~/app/shared/models/task';
 import { JoinPipe } from '~/app/shared/pipes/join.pipe';
 import { NotAvailablePipe } from '~/app/shared/pipes/not-available.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { TaskListService } from '~/app/shared/services/task-list.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 import { IscsiTargetDiscoveryModalComponent } from '../iscsi-target-discovery-modal/iscsi-target-discovery-modal.component';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 
 @Component({
   selector: 'cd-iscsi-target-list',
@@ -62,7 +62,7 @@ export class IscsiTargetListComponent extends ListWithDetails implements OnInit,
     private joinPipe: JoinPipe,
     private taskListService: TaskListService,
     private notAvailablePipe: NotAvailablePipe,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private taskWrapper: TaskWrapperService,
     public actionLabels: ActionLabelsI18n,
     protected ngZone: NgZone
@@ -223,7 +223,7 @@ export class IscsiTargetListComponent extends ListWithDetails implements OnInit,
   deleteIscsiTargetModal() {
     const target_iqn = this.selection.first().target_iqn;
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: $localize`iSCSI target`,
       itemNames: [target_iqn],
       submitActionObservable: () =>

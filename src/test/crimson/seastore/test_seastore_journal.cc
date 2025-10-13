@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/crimson/gtest_seastar.h"
 
@@ -32,7 +32,7 @@ struct record_validator_t {
     for (auto &&block : record.extents) {
       auto test = manager.read(
 	record_final_offset.add_relative(addr),
-	block.bl.length()).unsafe_get0();
+	block.bl.length()).unsafe_get();
       addr = addr.add_offset(block.bl.length());
       bufferlist bl;
       bl.push_back(test);
@@ -222,7 +222,7 @@ struct journal_test_t : seastar_test_suite_t, SegmentProvider, JournalTrimmer {
 	}
 	return Journal::replay_ertr::make_ready_future<
 	  std::pair<bool, CachedExtentRef>>(true, nullptr);
-      }).unsafe_get0();
+      }).unsafe_get();
     ASSERT_EQ(record_iter, records.end());
     for (auto &i : records) {
       i.validate(*segment_manager);
@@ -233,12 +233,17 @@ struct journal_test_t : seastar_test_suite_t, SegmentProvider, JournalTrimmer {
   auto submit_record(T&&... _record) {
     auto record{std::forward<T>(_record)...};
     records.push_back(record);
+    record_validator_t& back = records.back();
     OrderingHandle handle = get_dummy_ordering_handle();
-    auto [addr, _] = journal->submit_record(
+    journal->submit_record(
       std::move(record),
-      handle).unsafe_get0();
-    records.back().record_final_offset = addr;
-    return addr;
+      handle,
+      transaction_type_t::MUTATE,
+      [&back](auto locator) {
+        back.record_final_offset = locator.record_block_base;
+      }
+    ).unsafe_get();
+    return back.record_final_offset;
   }
 
   extent_t generate_extent(size_t blocks) {

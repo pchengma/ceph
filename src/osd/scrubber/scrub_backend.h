@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #pragma once
 
 // clang-format off
@@ -43,6 +44,7 @@
 #include <fmt/core.h>
 #include <fmt/format.h>
 
+#include <iosfwd>
 #include <string_view>
 
 #include "common/LogClient.h"
@@ -67,7 +69,7 @@ using digests_fixes_t = std::vector<std::pair<hobject_t, data_omap_digests_t>>;
 using shard_info_map_t = std::map<pg_shard_t, shard_info_wrapper>;
 using shard_to_scrubmap_t = std::map<pg_shard_t, ScrubMap>;
 
-using auth_peers_t = std::vector<std::pair<ScrubMap::object, pg_shard_t>>;
+using auth_peer_t = std::pair<ScrubMap::object, pg_shard_t>;
 
 using wrapped_err_t =
   std::variant<inconsistent_obj_wrapper, inconsistent_snapset_wrapper>;
@@ -114,7 +116,7 @@ struct objs_fix_list_t {
 struct shard_as_auth_t {
   // note: 'not_found' differs from 'not_usable' in that 'not_found'
   // does not carry an error message to be cluster-logged.
-  enum class usable_t : uint8_t { not_usable, not_found, usable };
+  enum class usable_t : uint8_t { not_usable, not_found, usable, not_usable_no_err };
 
   // the ctor used when the shard should not be considered as auth
   explicit shard_as_auth_t(std::string err_msg)
@@ -146,8 +148,9 @@ struct shard_as_auth_t {
   shard_as_auth_t(const object_info_t& anoi,
                   shard_to_scrubmap_t::iterator it,
                   std::string err_msg,
-                  std::optional<uint32_t> data_digest)
-      : possible_auth{usable_t::usable}
+                  std::optional<uint32_t> data_digest,
+                  bool nonprimary_ec)
+      : possible_auth{nonprimary_ec?usable_t::not_usable_no_err:usable_t::usable}
       , error_text{err_msg}
       , oi{anoi}
       , auth_iter{it}
@@ -160,13 +163,12 @@ struct shard_as_auth_t {
   object_info_t oi;
   shard_to_scrubmap_t::iterator auth_iter;
   std::optional<uint32_t> digest;
-  // when used for Crimson, we'll probably want to return 'digest_match' (and
-  // other in/out arguments) via this struct
 };
 
+namespace fmt {
 // the format specifier {D} is used to request debug output
 template <>
-struct fmt::formatter<shard_as_auth_t> {
+struct formatter<shard_as_auth_t> {
   template <typename ParseContext>
   constexpr auto parse(ParseContext& ctx)
   {
@@ -177,7 +179,7 @@ struct fmt::formatter<shard_as_auth_t> {
     return it;
   }
   template <typename FormatContext>
-  auto format(shard_as_auth_t const& as_auth, FormatContext& ctx)
+  auto format(shard_as_auth_t const& as_auth, FormatContext& ctx) const
   {
     if (debug_log) {
       // note: 'if' chain, as hard to consistently (on all compilers) avoid some
@@ -189,6 +191,11 @@ struct fmt::formatter<shard_as_auth_t> {
       }
       if (as_auth.possible_auth == shard_as_auth_t::usable_t::not_found) {
         return fmt::format_to(ctx.out(), "{{shard-not-found}}");
+      }
+      if (as_auth.possible_auth == shard_as_auth_t::usable_t::not_usable_no_err) {
+        return fmt::format_to(ctx.out(),
+                              "{{shard-not-usable-no-err:{}}}",
+                              as_auth.error_text);
       }
       return fmt::format_to(ctx.out(),
                             "{{shard-usable: soid:{} {{txt:{}}} }}",
@@ -208,9 +215,10 @@ struct fmt::formatter<shard_as_auth_t> {
 
   bool debug_log{false};
 };
+} // namespace fmt
 
 struct auth_selection_t {
-  shard_to_scrubmap_t::iterator auth;  ///< an iter into one of this_chunk->maps
+  shard_to_scrubmap_t::const_iterator auth;  ///< an iter into one of this_chunk->maps
   pg_shard_t auth_shard;               // set to auth->first
   object_info_t auth_oi;
   shard_info_map_t shard_map;
@@ -218,10 +226,12 @@ struct auth_selection_t {
   bool digest_match{true};        ///< do all (existing) digests match?
 };
 
+namespace fmt {
+
 // note: some scrub tests are sensitive to the specific format of
 // auth_selection_t listing in the logs
 template <>
-struct fmt::formatter<auth_selection_t> {
+struct formatter<auth_selection_t> {
   template <typename ParseContext>
   constexpr auto parse(ParseContext& ctx)
   {
@@ -229,7 +239,7 @@ struct fmt::formatter<auth_selection_t> {
   }
 
   template <typename FormatContext>
-  auto format(auth_selection_t const& aus, FormatContext& ctx)
+  auto format(auth_selection_t const& aus, FormatContext& ctx) const
   {
     return fmt::format_to(ctx.out(),
                           " {{AU-S: {}->{:x} OI({:x}:{}) {} dm:{}}} ",
@@ -241,6 +251,19 @@ struct fmt::formatter<auth_selection_t> {
                           aus.digest_match);
   }
 };
+} // namespace fmt
+
+
+/**
+ * the back-end data that is per-object
+ */
+struct object_scrub_data_t {
+  std::set<pg_shard_t> cur_missing;
+  std::set<pg_shard_t> cur_inconsistent;
+  bool fix_digest{false};
+};
+
+
 
 /**
  * the back-end data that is per-chunk
@@ -249,14 +272,14 @@ struct fmt::formatter<auth_selection_t> {
  */
 struct scrub_chunk_t {
 
-  explicit scrub_chunk_t(pg_shard_t i_am) { received_maps[i_am] = ScrubMap{}; }
+  explicit scrub_chunk_t(pg_shard_t i_am, uint32_t ec_digest_sz);
 
   /// the working set of scrub maps: the received maps, plus
   /// Primary's own map.
   std::map<pg_shard_t, ScrubMap> received_maps;
 
   /// a collection of all objs mentioned in the maps
-  std::set<hobject_t> authoritative_set;
+  std::set<hobject_t> all_chunk_objects;
 
   utime_t started{ceph_clock_now()};
 
@@ -270,11 +293,11 @@ struct scrub_chunk_t {
   /// shallow/deep error counters
   error_counters_t m_error_counts;
 
-  // these must be reset for each element:
+  // EC-related:
+  shard_id_map<bufferlist> m_ec_digest_map;
 
-  std::set<pg_shard_t> cur_missing;
-  std::set<pg_shard_t> cur_inconsistent;
-  bool fix_digest{false};
+  /// only one 'large OMAP' warning per chunk
+  bool m_large_omap_warning_issued{false};
 };
 
 
@@ -342,7 +365,11 @@ class ScrubBackend {
 
   const omap_stat_t& this_scrub_omapstats() const { return m_omap_stats; }
 
-  int authoritative_peers_count() const { return m_auth_peers.size(); };
+  /**
+   * the number of objects that have an authoritative peer selected for
+   * them (which equates with the number of damaged objects in this chunk)
+   */
+  int authoritative_peers_count() const { return m_auth_peer.size(); }
 
   std::ostream& logger_prefix(std::ostream* _dout, const ScrubBackend* t);
 
@@ -356,6 +383,7 @@ class ScrubBackend {
   const spg_t m_pg_id;
   std::vector<pg_shard_t> m_acting_but_me;  // primary only
   bool m_is_replicated{true};
+  bool m_is_optimized_ec{false};
   std::string_view m_mode_desc;
   std::string m_formatted_id;
   const PGPool& m_pool;
@@ -364,14 +392,16 @@ class ScrubBackend {
   /// collecting some scrub-session-wide omap stats
   omap_stat_t m_omap_stats;
 
-  /// Mapping from object with errors to good peers
-  std::map<hobject_t, auth_peers_t> m_auth_peers;
+  /// Mapping: object with errors -> the selected good peer
+  std::map<hobject_t, auth_peer_t> m_auth_peer;
+
+  // EC related:
+  /// size of the EC digest map, calculated based on the EC configuration
+  uint32_t m_ec_digest_map_size{0};
 
   // shorthands:
   ConfigProxy& m_conf;
   LoggerSinkSet& clog;
-
- private:
 
   struct auth_and_obj_errs_t {
     std::list<pg_shard_t> auth_list;
@@ -379,6 +409,9 @@ class ScrubBackend {
   };
 
   std::optional<scrub_chunk_t> this_chunk;
+
+  /// the data collected/processed re the specific object being scrubbed
+  object_scrub_data_t m_current_obj;
 
   /// Maps from objects with errors to missing peers
   HobjToShardSetMapping m_missing;  // used by scrub_process_inconsistent()
@@ -390,7 +423,7 @@ class ScrubBackend {
   ScrubMap m_cleaned_meta_map{};
 
   /// a reference to the primary map
-  ScrubMap& my_map();
+  const ScrubMap& my_map();
 
   /// shallow/deep error counters
   error_counters_t get_error_counts() const { return this_chunk->m_error_counts; }
@@ -398,7 +431,7 @@ class ScrubBackend {
   /**
    *  merge_to_authoritative_set() updates
    *   - this_chunk->maps[from] with the replicas' scrub-maps;
-   *   - this_chunk->authoritative_set as a union of all the maps' objects;
+   *   - this_chunk->all_chunk_objects as a union of all the maps' objects;
    */
   void merge_to_authoritative_set();
 
@@ -410,12 +443,18 @@ class ScrubBackend {
   /// might return error messages to be cluster-logged
   std::optional<std::string> compare_obj_in_maps(const hobject_t& ho);
 
-  void omap_checks();
+  /**
+   * add the OMAP stats for the handled object to the m_omap_stats info.
+   * Also warn if the object has large omap keys or values.
+   */
+  void collect_omap_stats(
+      const hobject_t& ho,
+      const ScrubMap::object& auth_object);
 
   std::optional<auth_and_obj_errs_t> for_empty_auth_list(
     std::list<pg_shard_t>&& auths,
     std::set<pg_shard_t>&& obj_errors,
-    shard_to_scrubmap_t::iterator auth,
+    shard_to_scrubmap_t::const_iterator auth,
     const hobject_t& ho,
     std::stringstream& errstream);
 
@@ -432,11 +471,14 @@ class ScrubBackend {
                            shard_info_wrapper& shard_result,
                            inconsistent_obj_wrapper& obj_result,
                            std::stringstream& errorstream,
-                           bool has_snapset);
+                           bool has_snapset,
+                           const pg_shard_t &shard);
 
-  void repair_object(const hobject_t& soid,
-                     const auth_peers_t& ok_peers,
-                     const std::set<pg_shard_t>& bad_peers);
+  void repair_object(
+      const hobject_t& soid,
+      pg_shard_t ok_shard,
+      const ScrubMap::object& ok_object_smap,
+      const std::set<pg_shard_t>& bad_peers);
 
   /**
    * An auxiliary used by select_auth_object() to test a specific shard
@@ -468,7 +510,7 @@ class ScrubBackend {
     std::stringstream& errstream);
 
   void inconsistents(const hobject_t& ho,
-                     ScrubMap::object& auth_object,
+                     const ScrubMap::object& auth_object,
                      object_info_t& auth_oi,  // consider moving to object
                      auth_and_obj_errs_t&& auth_n_errs,
                      std::stringstream& errstream);
@@ -482,7 +524,7 @@ class ScrubBackend {
   /**
    * Validate consistency of the object info and snap sets.
    */
-  void scrub_snapshot_metadata(ScrubMap& map);
+  void scrub_snapshot_metadata(ScrubMap& map, const pg_shard_t &srd);
 
   /**
    *  Updates the "global" (i.e. - not 'per-chunk') databases:
@@ -514,15 +556,19 @@ class ScrubBackend {
     Scrub::SnapMapReaderI& snaps_getter);
 
   // accessing the PG backend for this translation service
-  uint64_t logical_to_ondisk_size(uint64_t logical_size) const;
+  uint64_t logical_to_ondisk_size(uint64_t logical_size,
+                                 shard_id_t shard_id) const;
+  uint32_t generate_zero_buffer_crc(shard_id_t shard_id, int length) const;
 };
 
+namespace fmt {
+
 template <>
-struct fmt::formatter<data_omap_digests_t> {
+struct formatter<data_omap_digests_t> {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 
   template <typename FormatContext>
-  auto format(const data_omap_digests_t& dg, FormatContext& ctx)
+  auto format(const data_omap_digests_t& dg, FormatContext& ctx) const
   {
     // can't use value_or() due to different output types
     if (std::get<0>(dg).has_value()) {
@@ -539,7 +585,7 @@ struct fmt::formatter<data_omap_digests_t> {
 };
 
 template <>
-struct fmt::formatter<std::pair<hobject_t, data_omap_digests_t>> {
+struct formatter<std::pair<hobject_t, data_omap_digests_t>> {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 
   template <typename FormatContext>
@@ -552,3 +598,4 @@ struct fmt::formatter<std::pair<hobject_t, data_omap_digests_t>> {
 			  std::get<1>(x));
   }
 };
+} // namespace fmt

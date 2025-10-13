@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -78,6 +79,9 @@ class JournalTool : public MDSUtility
     // Backing store helpers
     void encode_fullbit_as_inode(
         const EMetaBlob::fullbit &fb,
+        bufferlist *out_bl);
+    void encode_remotebit_as_referent_inode(
+        const EMetaBlob::remotebit &rb,
         bufferlist *out_bl);
     int consume_inos(const std::set<inodeno_t> &inos);
 

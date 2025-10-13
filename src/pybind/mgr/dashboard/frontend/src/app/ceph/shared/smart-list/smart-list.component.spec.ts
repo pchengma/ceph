@@ -6,7 +6,7 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
-import { NgxPipeFunctionModule } from 'ngx-pipe-function';
+import { PipesModule } from '~/app/shared/pipes/pipes.module';
 import { of } from 'rxjs';
 
 import { OsdService } from '~/app/shared/api/osd.service';
@@ -112,7 +112,7 @@ describe('OsdSmartListComponent', () => {
       expect(alertPanel.attributes.title).toBe(panelTitle);
       expect(alertPanel.attributes.size).toBe(panelSize);
     } else {
-      const panelText = alertPanel.query(By.css('.alert-panel-text'));
+      const panelText = alertPanel.query(By.css('.cds--actionable-notification__content'));
       expect(panelText.nativeElement.textContent).toBe(panelTitle);
     }
   };
@@ -124,7 +124,7 @@ describe('OsdSmartListComponent', () => {
       SharedModule,
       HttpClientTestingModule,
       NgbNavModule,
-      NgxPipeFunctionModule
+      PipesModule
     ]
   });
 

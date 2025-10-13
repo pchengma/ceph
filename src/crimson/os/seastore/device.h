@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -137,6 +137,10 @@ public:
 
   virtual secondary_device_set_t& get_secondary_devices() = 0;
 
+  virtual bool is_end_to_end_data_protection() const {
+    return false;
+  }
+
   using close_ertr = crimson::errorator<
     crimson::ct_error::input_output_error>;
   virtual close_ertr::future<> close() = 0;
@@ -164,6 +168,11 @@ public:
   }
 };
 
+using check_create_device_ertr = Device::access_ertr;
+using check_create_device_ret = check_create_device_ertr::future<>;
+check_create_device_ret check_create_device(
+  const std::string path,
+  size_t size);
 }
 
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::device_spec_t)

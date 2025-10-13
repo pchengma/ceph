@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,6 +15,7 @@
 #include "mon/PGMap.h"
 #include "gtest/gtest.h"
 
+#include "common/TextTable.h"
 #include "include/stringify.h"
 
 using namespace std;
@@ -83,23 +85,20 @@ TEST(pgmap, dump_object_stat_sum_0)
   pool.tier_of = 0;
   PGMap::dump_object_stat_sum(tbl, nullptr, pool_stat, avail,
 			      pool.get_size(), verbose, true, true, &pool);
-  float copies_rate =
-    (static_cast<float>(sum.num_object_copies - sum.num_objects_degraded) /
-      sum.num_object_copies) * pool.get_size();
+
   float used_percent = (float)statfs.allocated /
     (statfs.allocated + avail) * 100;
-  uint64_t stored = statfs.data_stored / copies_rate;
 
   unsigned col = 0;
-  ASSERT_EQ(stringify(byte_u_t(stored)), tbl.get(0, col++));
-  ASSERT_EQ(stringify(byte_u_t(stored)), tbl.get(0, col++));
+  ASSERT_EQ(stringify(byte_u_t(statfs.data_stored/pool.get_size())), tbl.get(0, col++));
+  ASSERT_EQ(stringify(byte_u_t(statfs.data_stored/pool.get_size())), tbl.get(0, col++));
   ASSERT_EQ(stringify(byte_u_t(0)), tbl.get(0, col++));
   ASSERT_EQ(stringify(si_u_t(sum.num_objects)), tbl.get(0, col++));
   ASSERT_EQ(stringify(byte_u_t(statfs.allocated)), tbl.get(0, col++));
   ASSERT_EQ(stringify(byte_u_t(statfs.allocated)), tbl.get(0, col++));
   ASSERT_EQ(stringify(byte_u_t(0)), tbl.get(0, col++));
   ASSERT_EQ(percentify(used_percent), tbl.get(0, col++));
-  ASSERT_EQ(stringify(byte_u_t(avail/copies_rate)), tbl.get(0, col++));
+  ASSERT_EQ(stringify(byte_u_t(avail/pool.get_size())), tbl.get(0, col++));
   ASSERT_EQ(stringify(si_u_t(pool.quota_max_objects)), tbl.get(0, col++));
   ASSERT_EQ(stringify(byte_u_t(pool.quota_max_bytes)), tbl.get(0, col++));
   ASSERT_EQ(stringify(si_u_t(sum.num_objects_dirty)), tbl.get(0, col++));

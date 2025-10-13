@@ -28,6 +28,8 @@ class RGWCloudTier(Task):
               cloud_target_storage_class:
               cloud_retain_head_object:
               cloud_target_path:
+              cloud_allow_read_through:
+              cloud_read_through_restore_days:
               cloudtier_user:
                 cloud_secret:
                 cloud_access_key:
@@ -52,8 +54,6 @@ class RGWCloudTier(Task):
         clients = self.config.keys() # http://tracker.ceph.com/issues/20417
         for client in clients:
             client_config = self.config.get(client)
-            if client_config is None:
-                client_config = {}
 
             if client_config is not None:
                 log.info('client %s - cloudtier config is -----------------%s ', client, client_config)
@@ -64,6 +64,8 @@ class RGWCloudTier(Task):
                 cloud_target_path = client_config.get('cloud_target_path')
                 cloud_target_storage_class = client_config.get('cloud_target_storage_class')
                 cloud_retain_head_object = client_config.get('cloud_retain_head_object')
+                cloud_allow_read_through = client_config.get('cloud_allow_read_through')
+                cloud_read_through_restore_days = client_config.get('cloud_read_through_restore_days')
 
                 cloudtier_user = client_config.get('cloudtier_user')
                 cloud_access_key = cloudtier_user.get('cloud_access_key')
@@ -85,6 +87,10 @@ class RGWCloudTier(Task):
                     tier_config_params += ",target_path=" + cloud_target_path
                 if (cloud_target_storage_class != None):
                     tier_config_params += ",target_storage_class=" + cloud_target_storage_class
+                if (cloud_allow_read_through != None):
+                    tier_config_params += ",allow_read_through=" + cloud_allow_read_through
+                if (cloud_read_through_restore_days != None):
+                    tier_config_params += ",read_through_restore_days=" + cloud_read_through_restore_days
 
                 log.info('Configuring cloud-s3 tier storage class type = %s', cloud_storage_class)
 
@@ -110,13 +116,14 @@ class RGWCloudTier(Task):
 
                 log.info('Finished Configuring rgw cloudtier ...')
                 
-                cluster_name, daemon_type, client_id = teuthology.split_role(client)
-                client_with_id = daemon_type + '.' + client_id
-                self.ctx.daemons.get_daemon('rgw', client_with_id, cluster_name).restart()
-                log.info('restarted rgw daemon ...')
+        for client in clients:
+            cluster_name, daemon_type, client_id = teuthology.split_role(client)
+            client_with_id = daemon_type + '.' + client_id
+            self.ctx.daemons.get_daemon('rgw', client_with_id, cluster_name).restart()
+            log.info('restarted rgw daemon ...')
 
-                (remote,) = self.ctx.cluster.only(client).remotes.keys()
-                wait_for_radosgw(endpoint.url(), remote)
+            (remote,) = self.ctx.cluster.only(client).remotes.keys()
+            wait_for_radosgw(endpoint.url(), remote)
                 
 
 task = RGWCloudTier

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 /**
@@ -57,10 +57,17 @@ struct ScrubMachineListener {
   virtual PG* get_pg() const = 0;
 
   /**
-   * access the set of performance counters relevant to this scrub
+   * the OSD's performance counters interface ("logger")
+   */
+  virtual PerfCounters* get_osd_perf_counters() const = 0;
+
+  virtual const Scrub::ScrubCounterSet& get_unlabeled_counters() const = 0;
+
+  /**
+   * the set of labeled performance counters relevant to this scrub
    * (one of the four sets of counters maintained by the OSD)
    */
-  virtual PerfCounters& get_counters_set() const = 0;
+  virtual PerfCounters* get_labeled_counters() const = 0;
 
   using scrubber_callback_t = std::function<void(void)>;
   using scrubber_callback_cancel_token_t = Context*;
@@ -162,9 +169,12 @@ struct ScrubMachineListener {
   /// the part that actually finalizes a scrub
   virtual void scrub_finish() = 0;
 
-  /// notify the scrubber about a scrub failure
-  /// (note: temporary implementation)
-  virtual void penalize_next_scrub(Scrub::delay_cause_t cause) = 0;
+  /**
+   * The scrub session was aborted. We must restore the scheduling object
+   * that triggered the scrub back to the queue - but we may have to update
+   * it with changes requested (e.g. by an operator command).
+   */
+  virtual void on_mid_scrub_abort(Scrub::delay_cause_t cause) = 0;
 
   /**
    * Prepare a MOSDRepScrubMap message carrying the requested scrub map
@@ -247,6 +257,6 @@ struct ScrubMachineListener {
   /// delay next retry of this PG after a replica reservation failure
   virtual void flag_reservations_failure() = 0;
 
-  /// is this scrub more than just regular periodic scrub?
-  [[nodiscard]] virtual bool is_high_priority() const = 0;
+  /// is this scrub's urgency high enough, or must it reserve its replicas?
+  [[nodiscard]] virtual bool is_reservation_required() const = 0;
 };

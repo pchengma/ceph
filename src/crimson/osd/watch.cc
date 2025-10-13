@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <algorithm>
 
@@ -81,7 +81,7 @@ Watch::~Watch()
 seastar::future<> Watch::connect(crimson::net::ConnectionXcoreRef conn, bool)
 {
   if (this->conn == conn) {
-    logger().debug("conn={} already connected", conn);
+    logger().debug("conn={} already connected", *conn);
     return seastar::now();
   }
   timeout_timer.cancel();

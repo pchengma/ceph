@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <boost/iterator/counting_iterator.hpp>
 #include <numeric>
@@ -13,6 +13,14 @@
 
 struct errorator_test_t : public seastar_test_suite_t {
   using ertr = crimson::errorator<crimson::ct_error::invarg>;
+
+  ertr::future<> invarg_foo() {
+    return crimson::ct_error::invarg::make();
+  };
+
+  ertr::future<> clean_foo() {
+    return ertr::now();
+  };
 
   struct noncopyable_t {
     constexpr noncopyable_t() = default;
@@ -36,7 +44,7 @@ TEST_F(errorator_test_t, basic)
         return ertr::make_ready_future<seastar::stop_iteration>(
           seastar::stop_iteration::yes);
       }
-    }).unsafe_get0();
+    }).unsafe_get();
   });
 }
 
@@ -55,7 +63,7 @@ TEST_F(errorator_test_t, parallel_for_each)
 				       boost::make_counting_iterator(SIZE),
 				       0);
 	ASSERT_EQ(*sum, expected);
-      }).unsafe_get0();
+      }).unsafe_get();
   });
 }
 
@@ -67,7 +75,7 @@ TEST_F(errorator_test_t, non_copy_then)
     };
     return create_noncopyable().safe_then([](auto) {
       return ertr::now();
-    }).unsafe_get0();
+    }).unsafe_get();
   });
 }
 
@@ -82,6 +90,46 @@ TEST_F(errorator_test_t, test_futurization)
       return 42;
     }).safe_then([](int life) {
       return ertr::make_ready_future<int>(life);
-    }).unsafe_get0();
+    }).unsafe_get();
   });
+}
+
+TEST_F(errorator_test_t, no_handle_error)
+{
+  run_async([this] {
+    return clean_foo().handle_error(
+      crimson::ct_error::assert_all("unexpected error")
+    ).get();
+  });
+}
+
+TEST_F(errorator_test_t, handle_specific_error)
+{
+  int res = 0;
+  run_async([&res, this] {
+  return invarg_foo().handle_error(
+    crimson::ct_error::invarg::handle([&res] (const auto& ec) {
+      EXPECT_EQ(ec.value(), EINVAL);
+      res = 1;
+      return seastar::now();
+    }),
+    crimson::ct_error::assert_all("unexpected error")).get();
+  });
+  EXPECT_EQ(res, 1);
+}
+
+TEST_F(errorator_test_t, pass_further_error)
+{
+  int res = 0;
+  run_async([&res, this] {
+    return invarg_foo().handle_error(
+      ertr::pass_further{}
+    ).handle_error(
+      crimson::ct_error::invarg::handle([&res] (const auto& ec) {
+      res = 1;
+      return seastar::now();
+    }),
+    crimson::ct_error::assert_all("unexpected error")).get();
+  });
+  EXPECT_EQ(res, 1);
 }

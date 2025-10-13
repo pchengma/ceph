@@ -76,15 +76,21 @@ click on `New issue`_.
 .. _`jump to the Ceph project`: http://tracker.ceph.com/projects/ceph
 .. _`New issue`: http://tracker.ceph.com/projects/ceph/issues/new
 
+.. _ceph-slack:
+
 Slack
 -----
 
-Ceph's Slack is https://ceph-storage.slack.com/.
+.. _`Ceph's Slack`: https://join.slack.com/t/ceph-storage/shared_invite/zt-32hkefbs5-f6qZDZLd5U8CYj7drBTHFw
 
 .. _mailing-list:
 
 Mailing lists
 -------------
+
+Ceph developers and users discuss the project on `Ceph-related mailing lists`_.
+
+.. _`Ceph-related mailing lists`: https://ceph.com/en/community/connect
 
 Ceph Development Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -93,11 +99,9 @@ its interoperability with other technology, and the operations of the
 project itself.
 
 The email discussion list for Ceph development is open to all. Subscribe by
-sending a message to ``dev-request@ceph.io`` with the following line in the
-body of the message::
+completing the `sign-up form on dev.ceph.io`_.
 
-    subscribe ceph-devel
-
+.. _`sign-up form on dev.ceph.io`: https://lists.ceph.io/postorius/lists/dev.ceph.io
 
 Ceph Client Patch Review Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -106,19 +110,10 @@ for the Linux kernel Ceph client component. Note that this list used to
 be an all-encompassing list for developers. When searching the archives, 
 remember that this list contains the generic devel-ceph archives before mid-2018.
 
-Subscribe to the list covering the Linux kernel Ceph client component by sending
-a message to ``majordomo@vger.kernel.org`` with the following line in the body
-of the message::
+Subscribe to the list covering the Linux kernel Ceph client component by using
+the `sub link for ceph-devel in vger.kernel.org`_.
 
-    subscribe ceph-devel
-
-
-Other Ceph Mailing Lists
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-There are also `other Ceph-related mailing lists`_.
-
-.. _`other Ceph-related mailing lists`: https://ceph.com/irc/
+.. _`sub link for ceph-devel in vger.kernel.org`: https://subspace.kernel.org/vger.kernel.org.html
 
 .. _irc:
 
@@ -285,16 +280,13 @@ See :ref:`kubernetes-dev`
 Backporting
 -----------
 
-All bugfixes should be merged to the ``main`` branch before being
-backported. To flag a bugfix for backporting, make sure it has a
-`tracker issue`_ associated with it and set the ``Backport`` field to a
-comma-separated list of previous releases (e.g. "hammer,jewel") that you think
-need the backport.
-The rest (including the actual backporting) will be taken care of by the
-`Stable Releases and Backports`_ team.
+All bugfixes should be merged to the ``main`` branch before being backported.
+To flag a bugfix for backporting, make sure it has a `tracker issue`_
+associated with it and set the ``Backport`` field to a comma-separated list of
+previous releases (e.g. "hammer,jewel") that you think need the backport. You
+are responsible for the backporting of pull requests that you raise.
 
 .. _`tracker issue`: http://tracker.ceph.com/
-.. _`Stable Releases and Backports`: http://tracker.ceph.com/projects/ceph-releases/wiki
 
 Dependabot
 ----------

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,12 +16,14 @@
 #ifndef CEPH_COMMON_ADMIN_SOCKET_H
 #define CEPH_COMMON_ADMIN_SOCKET_H
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include "crimson/admin/admin_socket.h"
 #else
 
 #include <condition_variable>
+#include <list>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -30,6 +33,10 @@
 #include "common/admin_finisher.h"
 #include "common/ref.h"
 #include "common/cmdparse.h"
+
+#ifdef WIN32
+#include "include/win32/fs_compat.h" // for uid_t, gid_t
+#endif
 
 class MCommand;
 class MMonCommand;

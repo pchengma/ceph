@@ -130,11 +130,9 @@ class ServiceManager(ResourceManager):
             service_ids = [service_ids]
 
         completion_list = [
-            self.api.service_action('reload', service_type, service_name,
-                                    service_id)
-            for service_name, service_id in service_ids
+            self.api.service_action('restart', f'{service_type}.{service_id}')
+            for service_id in service_ids
         ]
-        self.api.orchestrator_wait(completion_list)
         for c in completion_list:
             raise_if_exception(c)
 
@@ -207,6 +205,36 @@ class HardwareManager(ResourceManager):
         return self.api.node_proxy_common(category, hostname=hostname)
 
 
+class CertStoreManager(ResourceManager):
+
+    @wait_api_result
+    def get_cert(self, entity: str, service_name: Optional[str] = None,
+                 hostname: Optional[str] = None,
+                 ignore_missing_exception: bool = False) -> str:
+        return self.api.cert_store_get_cert(entity, service_name, hostname,
+                                            no_exception_when_missing=ignore_missing_exception)
+
+    @wait_api_result
+    def get_key(self, entity: str, service_name: Optional[str] = None,
+                hostname: Optional[str] = None,
+                ignore_missing_exception: bool = False) -> str:
+        return self.api.cert_store_get_key(entity, service_name, hostname,
+                                           no_exception_when_missing=ignore_missing_exception)
+
+
+class MonitoringManager(ResourceManager):
+
+    @wait_api_result
+    def get_prometheus_access_info(self) -> Dict[str, str]:
+        """Get Prometheus access information"""
+        return self.api.get_prometheus_access_info()
+
+    @wait_api_result
+    def get_alertmanager_access_info(self) -> Dict[str, str]:
+        """Get Alertmanager access information"""
+        return self.api.get_alertmanager_access_info()
+
+
 class OrchClient(object):
 
     _instance = None
@@ -228,6 +256,8 @@ class OrchClient(object):
         self.daemons = DaemonManager(self.api)
         self.upgrades = UpgradeManager(self.api)
         self.hardware = HardwareManager(self.api)
+        self.cert_store = CertStoreManager(self.api)
+        self.monitoring = MonitoringManager(self.api)
 
     def available(self, features: Optional[List[str]] = None) -> bool:
         available = self.status()['available']

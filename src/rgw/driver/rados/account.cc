@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -455,7 +455,7 @@ int resource_count(const DoutPrefixProvider* dpp,
   int ret = 0;
   op.omap_get_header(&bl, &ret);
 
-  r = ref.operate(dpp, &op, nullptr, y);
+  r = ref.operate(dpp, std::move(op), nullptr, y);
   if (r == -ENOENT) { // doesn't exist yet
     count = 0;
     return 0;

@@ -1,14 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_pubsub_push.h"
+#include <shared_mutex> // for std::shared_lock
 #include <string>
 #include <sstream>
 #include <algorithm>
 #include <curl/curl.h>
 #include "common/Formatter.h"
 #include "common/iso_8601.h"
+#include "common/JSONFormatter.h"
 #include "common/async/completion.h"
+#include "common/async/yield_waiter.h"
+#include "common/async/waiter.h"
+#include "rgw_asio_thread.h"
 #include "rgw_common.h"
 #include "rgw_data_sync.h"
 #include "rgw_pubsub.h"
@@ -57,6 +62,7 @@ bool get_bool(const RGWHTTPArgs& args, const std::string& name, bool default_val
 
 static std::unique_ptr<RGWHTTPManager> s_http_manager;
 static std::shared_mutex s_http_manager_mutex;
+static std::atomic<unsigned> s_http_manager_inflight(0);
 
 class RGWPubSubHTTPEndpoint : public RGWPubSubEndpoint {
 private:
@@ -88,14 +94,24 @@ public:
     }
   }
 
-  int send(const rgw_pubsub_s3_event& event, optional_yield y) override {
+  int send(const DoutPrefixProvider* dpp, const rgw_pubsub_s3_event& event,
+           optional_yield y) override {
     std::shared_lock lock(s_http_manager_mutex);
     if (!s_http_manager) {
       ldout(cct, 1) << "ERROR: send failed. http endpoint manager not running" << dendl;
       return -ESRCH;
     }
+    const auto max_inflight = cct->_conf->rgw_http_notif_max_inflight;
+    if (max_inflight != 0 &&
+        s_http_manager_inflight >= max_inflight) {
+      ldout(cct, 1) << "ERROR: send failed. http endpoint manager busy. in-flight requests: " <<
+        s_http_manager_inflight << " >= " << max_inflight << dendl;
+      return -EBUSY;
+    }
     bufferlist read_bl;
     RGWPostHTTPData request(cct, "POST", endpoint, &read_bl, verify_ssl);
+    request.set_req_connect_timeout(cct->_conf->rgw_http_notif_connection_timeout);
+    request.set_req_timeout(cct->_conf->rgw_http_notif_message_timeout);
     const auto post_data = json_format_pubsub_event(event);
     if (cloudevents) {
       // following: https://github.com/cloudevents/spec/blob/v1.0.1/http-protocol-binding.md
@@ -111,11 +127,13 @@ public:
     request.set_post_data(post_data);
     request.set_send_length(post_data.length());
     request.append_header("Content-Type", "application/json");
+    ++s_http_manager_inflight;
     if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_pending);
     auto rc = s_http_manager->add_request(&request);
     if (rc == 0) {
-      rc = request.wait(y);
+      rc = request.wait(dpp, y);
     }
+    --s_http_manager_inflight;
     if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
     // TODO: use read_bl to process return code and handle according to ack level
     return rc;
@@ -128,55 +146,6 @@ public:
     return str;
   }
 };
-
-namespace {
-// this allows waiting untill "finish()" is called from a different thread
-// waiting could be blocking the waiting thread or yielding, depending
-// with compilation flag support and whether the optional_yield is set
-class Waiter {
-  using Signature = void(boost::system::error_code);
-  using Completion = ceph::async::Completion<Signature>;
-  std::unique_ptr<Completion> completion = nullptr;
-  int ret;
-
-  bool done = false;
-  mutable std::mutex lock;
-  mutable std::condition_variable cond;
-
-public:
-  int wait(optional_yield y) {
-    std::unique_lock l{lock};
-    if (done) {
-      return ret;
-    }
-    if (y) {
-      boost::system::error_code ec;
-      auto yield = y.get_yield_context();
-      auto&& token = yield[ec];
-      boost::asio::async_initiate<boost::asio::yield_context, Signature>(
-          [this, &l] (auto handler, auto ex) {
-            completion = Completion::create(ex, std::move(handler));
-            l.unlock(); // unlock before suspend
-          }, token, yield.get_executor());
-      return -ec.value();
-    }
-    cond.wait(l, [this]{return (done==true);});
-    return ret;
-  }
-
-  void finish(int r) {
-    std::unique_lock l{lock};
-    ret = r;
-    done = true;
-    if (completion) {
-      boost::system::error_code ec(-ret, boost::system::system_category());
-      Completion::post(std::move(completion), ec);
-    } else {
-      cond.notify_all();
-    }
-  }
-};
-} // namespace
 
 #ifdef WITH_RADOSGW_AMQP_ENDPOINT
 class RGWPubSubAMQPEndpoint : public RGWPubSubEndpoint {
@@ -247,22 +216,47 @@ public:
     }
   }
 
-  int send(const rgw_pubsub_s3_event& event, optional_yield y) override {
+  int send(const DoutPrefixProvider* dpp, const rgw_pubsub_s3_event& event, optional_yield y) override {
     if (ack_level == ack_level_t::None) {
-      return amqp::publish(conn_id, topic, json_format_pubsub_event(event));
+      if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_pending);
+      const auto rc = amqp::publish(conn_id, topic, json_format_pubsub_event(event));
+      if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+      if (rc < 0 && perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
+      return rc;
     } else {
       // TODO: currently broker and routable are the same - this will require different flags but the same mechanism
-      auto w = std::make_unique<Waiter>();
-      const auto rc = amqp::publish_with_confirm(conn_id, 
-        topic,
-        json_format_pubsub_event(event),
-        [wp = w.get()](int r) { wp->finish(r);}
-      );
-      if (rc < 0) {
-        // failed to publish, does not wait for reply
+      if (y) {
+        if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_pending);
+        auto& yield = y.get_yield_context();
+        ceph::async::yield_waiter<int> w;
+        boost::asio::defer(yield.get_executor(),[&w, &event, this]() {
+          const auto rc = amqp::publish_with_confirm(
+              conn_id, topic, json_format_pubsub_event(event),
+              [&w](int r) {w.complete(boost::system::error_code{}, r);});
+          if (rc < 0) {
+            // failed to publish, does not wait for reply
+            w.complete(boost::system::error_code{}, rc);
+          }
+        });
+        const auto rc = w.async_wait(yield);
+        if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+        if (rc < 0 && perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
         return rc;
       }
-      return w->wait(y);
+      ceph::async::waiter<int> w;
+      const auto rc = amqp::publish_with_confirm(
+            conn_id, topic, json_format_pubsub_event(event),
+            [&w](int r) {w(r);});
+      if (rc < 0) {
+        // failed to publish, does not wait for reply
+        if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+        if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
+        return rc;
+      }
+      const auto wait_rc = w.wait();
+      if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+      if (wait_rc < 0 && perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
+      return wait_rc;
     }
   }
 
@@ -289,8 +283,7 @@ private:
   };
   const std::string topic;
   const ack_level_t ack_level;
-  std::string conn_name;
-
+  kafka::connection_id_t conn_id;
 
   ack_level_t get_ack_level(const RGWHTTPArgs& args) {
     bool exists;
@@ -311,38 +304,63 @@ public:
       const RGWHTTPArgs& args) : 
         topic(_topic),
         ack_level(get_ack_level(args)) {
-    if (!kafka::connect(conn_name, _endpoint,
-                        get_bool(args, "use-ssl", false),
-                        get_bool(args, "verify-ssl", true),
-                        args.get_optional("ca-location"),
-                        args.get_optional("mechanism"),
-                        args.get_optional("user-name"),
-                        args.get_optional("password"))) {
-      throw configuration_error("Kafka: failed to create connection to: " + _endpoint);
-    }
-  }
+   if (!kafka::connect(
+           conn_id, _endpoint, get_bool(args, "use-ssl", false),
+           get_bool(args, "verify-ssl", true), args.get_optional("ca-location"),
+           args.get_optional("mechanism"), args.get_optional("user-name"),
+           args.get_optional("password"), args.get_optional("kafka-brokers"))) {
+     throw configuration_error("Kafka: failed to create connection to: " +
+                               _endpoint);
+   }
+ }
 
-  int send(const rgw_pubsub_s3_event& event, optional_yield y) override {
+  int send(const DoutPrefixProvider* dpp, const rgw_pubsub_s3_event& event,
+           optional_yield y) override {
     if (ack_level == ack_level_t::None) {
-      return kafka::publish(conn_name, topic, json_format_pubsub_event(event));
+      if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_pending);
+      const auto rc = kafka::publish(conn_id, topic, json_format_pubsub_event(event));
+      if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+      if (rc < 0 && perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
+      return rc;
     } else {
-      auto w = std::make_unique<Waiter>();
-      const auto rc = kafka::publish_with_confirm(conn_name, 
-        topic,
-        json_format_pubsub_event(event),
-        [wp = w.get()](int r) { wp->finish(r); }
-      );
-      if (rc < 0) {
-        // failed to publish, does not wait for reply
+      if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_pending);
+      if (y) {
+        auto& yield = y.get_yield_context();
+        ceph::async::yield_waiter<int> w;
+        boost::asio::defer(yield.get_executor(),[&w, &event, this]() {
+          const auto rc = kafka::publish_with_confirm(
+              conn_id, topic, json_format_pubsub_event(event),
+              [&w](int r) {w.complete(boost::system::error_code{}, r);});
+          if (rc < 0) {
+            // failed to publish, does not wait for reply
+            w.complete(boost::system::error_code{}, rc);
+          }
+        });
+        const auto rc = w.async_wait(yield);
+        if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+        if (rc < 0 && perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
         return rc;
       }
-      return w->wait(y);
+      ceph::async::waiter<int> w;
+      const auto rc = kafka::publish_with_confirm(
+            conn_id, topic, json_format_pubsub_event(event),
+            [&w](int r) {w(r);});
+      if (rc < 0) {
+        // failed to publish, does not wait for reply
+        if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+        if (perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
+        return rc;
+      }
+      const auto wait_rc = w.wait();
+      if (perfcounter) perfcounter->dec(l_rgw_pubsub_push_pending);
+      if (wait_rc < 0 && perfcounter) perfcounter->inc(l_rgw_pubsub_push_failed);
+      return wait_rc;
     }
   }
 
   std::string to_str() const override {
     std::string str("Kafka Endpoint");
-    str += "\nBroker: " + conn_name;
+    str += "\nBroker: " + to_string(conn_id);
     str += "\nTopic: " + topic;
     return str;
   }
@@ -456,4 +474,3 @@ void RGWPubSubEndpoint::shutdown_all() {
 #endif
   shutdown_http_manager();
 }
-

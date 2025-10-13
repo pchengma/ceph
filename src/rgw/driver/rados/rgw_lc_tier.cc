@@ -1,11 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string.h>
 #include <iostream>
 #include <map>
 
-#include "common/Formatter.h"
+#include "common/XMLFormatter.h"
 #include <common/errno.h>
 #include "rgw_lc.h"
 #include "rgw_lc_tier.h"
@@ -14,6 +14,7 @@
 #include "rgw_common.h"
 #include "rgw_rest.h"
 #include "svc_zone.h"
+#include "rgw_rados.h"
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string.hpp>
@@ -76,8 +77,9 @@ WRITE_CLASS_ENCODER(rgw_lc_multipart_upload_info)
 
 static inline string get_key_instance(const rgw_obj_key& key)
 {
-  if (!key.instance.empty() &&
-      !key.have_null_instance()) {
+  // if non-current entry, add versionID to the
+  // transitioned object name including "null".
+  if (!key.instance.empty()) {
     return "-" + key.instance;
   }
   return "";
@@ -231,18 +233,107 @@ static void init_headers(map<string, bufferlist>& attrs,
   }
 }
 
-/* Read object or just head from remote endpoint. For now initializes only headers,
- * but can be extended to fetch etag, mtime etc if needed.
+struct generic_attr {
+  const char *http_header;
+  const char *rgw_attr;
+};
+
+/*
+ * mapping between http env fields and rgw object attrs
  */
-static int cloud_tier_get_object(RGWLCCloudTierCtx& tier_ctx, bool head,
-                         std::map<std::string, std::string>& headers) {
+static const struct generic_attr generic_attrs[] = {
+  { "CONTENT_TYPE",             RGW_ATTR_CONTENT_TYPE },
+  { "HTTP_CONTENT_LANGUAGE",    RGW_ATTR_CONTENT_LANG },
+  { "HTTP_EXPIRES",             RGW_ATTR_EXPIRES },
+  { "HTTP_CACHE_CONTROL",       RGW_ATTR_CACHE_CONTROL },
+  { "HTTP_CONTENT_DISPOSITION", RGW_ATTR_CONTENT_DISP },
+  { "HTTP_CONTENT_ENCODING",    RGW_ATTR_CONTENT_ENC },
+  { "HTTP_X_ROBOTS_TAG",        RGW_ATTR_X_ROBOTS_TAG },
+  { "ETAG",                     RGW_ATTR_ETAG },
+};
+
+/* Restore object from remote endpoint.
+ */
+int rgw_cloud_tier_restore_object(RGWLCCloudTierCtx& tier_ctx,
+                         std::map<std::string, std::string>& headers,
+                         real_time* pset_mtime, std::string& etag,
+                         uint64_t& accounted_size, rgw::sal::Attrs& attrs,
+                         std::optional<uint64_t> days,
+                         RGWZoneGroupTierS3Glacier& glacier_params,
+			 bool& in_progress,
+                         void* cb) {
   RGWRESTConn::get_obj_params req_params;
   std::string target_obj_name;
   int ret = 0;
   rgw_lc_obj_properties obj_properties(tier_ctx.o.meta.mtime, tier_ctx.o.meta.etag,
         tier_ctx.o.versioned_epoch, tier_ctx.acl_mappings,
         tier_ctx.target_storage_class);
-  std::string etag;
+
+  rgw_bucket dest_bucket;
+  dest_bucket.name = tier_ctx.target_bucket_name;
+  target_obj_name = tier_ctx.bucket_info.bucket.name + "/" +
+                    tier_ctx.obj->get_name();
+  if (!tier_ctx.o.is_current()) {
+    target_obj_name += get_key_instance(tier_ctx.obj->get_key());
+  }
+
+  if (!in_progress) { // first time. Send RESTORE req.
+
+    rgw_obj dest_obj(dest_bucket, rgw_obj_key(target_obj_name));
+    ret = cloud_tier_restore(tier_ctx.dpp, tier_ctx.conn, dest_obj, days, glacier_params);
+
+    ldpp_dout(tier_ctx.dpp, 20) << __func__ << "Restoring object=" << target_obj_name << "returned ret = " << ret << dendl;
+
+    if (ret < 0 ) {
+      ldpp_dout(tier_ctx.dpp, -1) << __func__ << "ERROR: failed to restore object=" << dest_obj << "; ret = " << ret << dendl;
+      return ret;
+    }
+    in_progress = true;
+  }
+
+  // now send HEAD request and verify if restore is complete on glacier/tape endpoint
+  static constexpr int MAX_RETRIES = 2;
+  uint32_t retries = 0;
+  do {
+    ret = rgw_cloud_tier_get_object(tier_ctx, true, headers, nullptr, etag,
+                                    accounted_size, attrs, nullptr);
+
+    if (ret < 0) {
+      ldpp_dout(tier_ctx.dpp, 0) << __func__ << "ERROR: failed to fetch HEAD from cloud for obj=" << tier_ctx.obj << " , ret = " << ret << dendl;
+      return ret;
+    }
+
+    in_progress = is_restore_in_progress(tier_ctx.dpp, headers);
+
+  } while(retries++ < MAX_RETRIES && in_progress);
+
+  if (in_progress) {
+    ldpp_dout(tier_ctx.dpp, 20) << __func__ << "Restoring object=" << target_obj_name << " still in progress; returning " << dendl;
+    return 0;
+  } 
+
+  // now do the actual GET
+  ret = rgw_cloud_tier_get_object(tier_ctx, false, headers, pset_mtime, etag,
+                                  accounted_size, attrs, cb);
+
+  ldpp_dout(tier_ctx.dpp, 20) << __func__ << "(): fetching object from cloud bucket:" << dest_bucket << ", object: " << target_obj_name << " returned ret:" << ret << dendl;
+
+  return ret;
+}
+
+/* Read object or just head from remote endpoint.
+ */
+int rgw_cloud_tier_get_object(RGWLCCloudTierCtx& tier_ctx, bool head,
+                         std::map<std::string, std::string>& headers,
+                         real_time* pset_mtime, std::string& etag,
+                         uint64_t& accounted_size, rgw::sal::Attrs& attrs,
+                         void* cb) {
+  RGWRESTConn::get_obj_params req_params;
+  std::string target_obj_name;
+  int ret = 0;
+  rgw_lc_obj_properties obj_properties(tier_ctx.o.meta.mtime, tier_ctx.o.meta.etag,
+        tier_ctx.o.versioned_epoch, tier_ctx.acl_mappings,
+        tier_ctx.target_storage_class);
   RGWRESTStreamRWRequest *in_req;
 
   rgw_bucket dest_bucket;
@@ -257,24 +348,65 @@ static int cloud_tier_get_object(RGWLCCloudTierCtx& tier_ctx, bool head,
 
   /* init input connection */
   req_params.get_op = !head;
-  req_params.prepend_metadata = true;
-  req_params.rgwx_stat = true;
-  req_params.sync_manifest = true;
-  req_params.skip_decrypt = true;
+  req_params.cb = (RGWHTTPStreamRWRequest::ReceiveCB *)cb;
 
-  ret = tier_ctx.conn.get_obj(tier_ctx.dpp, dest_obj, req_params, true /* send */, &in_req);
-  if (ret < 0) {
-    ldpp_dout(tier_ctx.dpp, 0) << "ERROR: " << __func__ << "(): conn.get_obj() returned ret=" << ret << dendl;
-    return ret;
+  ldpp_dout(tier_ctx.dpp, 20) << __func__ << "(): fetching object from cloud bucket:" << dest_bucket << ", object: " << target_obj_name << dendl;
+
+  static constexpr int NUM_ENPOINT_IOERROR_RETRIES = 20;
+  for (int tries = 0; tries < NUM_ENPOINT_IOERROR_RETRIES; tries++) {
+    ret = tier_ctx.conn.get_obj(tier_ctx.dpp, dest_obj, req_params, true /* send */, &in_req);
+    if (ret < 0) {
+      ldpp_dout(tier_ctx.dpp, 0) << "ERROR: " << __func__ << "(): conn.get_obj() returned ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* fetch headers */
+    // accounted_size in complete_request() reads from RGWX_OBJECT_SIZE which is set
+    // only for internal ops/sync. So instead read from headers[CONTENT_LEN].
+    // Same goes for pattrs.
+    ret = tier_ctx.conn.complete_request(tier_ctx.dpp, in_req, &etag, pset_mtime, nullptr, nullptr, &headers, null_yield);
+    if (ret < 0) {
+      if (ret == -EIO && tries < NUM_ENPOINT_IOERROR_RETRIES - 1) {
+        ldpp_dout(tier_ctx.dpp, 20) << __func__  << "(): failed to fetch object from remote. retries=" << tries << dendl;
+        continue;
+      }
+      return ret;
+    }
+    break;
   }
 
-  /* fetch headers */
-  ret = tier_ctx.conn.complete_request(in_req, nullptr, nullptr, nullptr, nullptr, &headers, null_yield);
-  if (ret < 0 && ret != -ENOENT) {
-    ldpp_dout(tier_ctx.dpp, 20) << "ERROR: " << __func__ << "(): conn.complete_request() returned ret=" << ret << dendl;
-    return ret;
+  static map<string, string> generic_attrs_map;
+  for (const auto& http2rgw : generic_attrs) {
+    generic_attrs_map[http2rgw.http_header] = http2rgw.rgw_attr;
   }
-  return 0;
+
+  for (auto header: headers) {
+    const char* name = header.first.c_str();
+    const string& val = header.second;
+    bufferlist bl;
+    bl.append(val.c_str(), val.size());
+
+    const auto aiter = generic_attrs_map.find(name);
+    if (aiter != std::end(generic_attrs_map)) {
+      attrs[aiter->second] = bl;
+    } else {
+      std::string s1 = boost::algorithm::to_lower_copy(header.first);
+      std::replace(s1.begin(), s1.end(), '_', '-');
+
+      // copy versioned epoch
+      if (s1 == "x-amz-meta-rgwx-versioned-epoch") {
+        attrs[s1] = bl;
+      }
+    }
+    
+    if (header.first == "CONTENT_LENGTH") {
+      char* end = nullptr;
+      accounted_size = strtoull(val.c_str(), &end, 10);	    
+    }
+  }
+
+  ldpp_dout(tier_ctx.dpp, 20) << __func__ << "(): Successfully fetched object from cloud bucket:" << dest_bucket << ", object: " << target_obj_name << dendl;
+  return ret;
 }
 
 static bool is_already_tiered(const DoutPrefixProvider *dpp,
@@ -303,6 +435,30 @@ static bool is_already_tiered(const DoutPrefixProvider *dpp,
     return 1;
   }
   return 0;
+}
+
+bool is_restore_in_progress(const DoutPrefixProvider *dpp,
+                            std::map<std::string, std::string>& headers) {
+  map<string, string> attrs = headers;
+
+  for (const auto& a : attrs) {
+    ldpp_dout(dpp, 20) << "GetCrf attr[" << a.first << "] = " << a.second <<dendl;
+  }
+  string s = attrs["X_AMZ_RESTORE"];
+
+  if (s.empty())
+    s = attrs["x_amz_restore"];
+
+  ldpp_dout(dpp, 0) << "is_already_tiered attrs[X_AMZ_RESTORE] = " << s <<dendl;
+
+  if (!s.empty()){
+    const char *r_str = "ongoing-request=\"true\"";
+    const char *found = std::strstr(s.c_str(), r_str);
+    if (found) {
+    	return true;
+    }
+  }
+  return false;;
 }
 
 /* Read object locally & also initialize dest rest obj based on read attrs */
@@ -672,10 +828,8 @@ void RGWLCCloudStreamPut::send_ready(const DoutPrefixProvider *dpp, const rgw_re
 }
 
 void RGWLCCloudStreamPut::handle_headers(const map<string, string>& headers) {
-  for (const auto& h : headers) {
-    if (h.first == "ETAG") {
-      etag = h.second;
-    }
+  if (auto h = headers.find("ETAG"); h != headers.end()) {
+    etag = h->second;
   }
 }
 
@@ -704,8 +858,7 @@ RGWGetDataCB *RGWLCCloudStreamPut::get_cb() {
 }
 
 int RGWLCCloudStreamPut::complete_request() {
-  int ret = conn.complete_request(out_req, etag, &obj_properties.mtime, null_yield);
-  return ret;
+  return conn.complete_request(dpp, out_req, etag, &obj_properties.mtime, null_yield);
 }
 
 /* Read local copy and write to Cloud endpoint */
@@ -775,7 +928,7 @@ static int cloud_tier_plain_transfer(RGWLCCloudTierCtx& tier_ctx) {
 
   rgw_obj dest_obj(dest_bucket, rgw_obj_key(target_obj_name));
 
-  tier_ctx.obj->set_atomic();
+  tier_ctx.obj->set_atomic(true);
 
   /* Prepare Read from source */
   /* TODO: Define readf, writef as stack variables. For some reason,
@@ -819,7 +972,7 @@ static int cloud_tier_send_multipart_part(RGWLCCloudTierCtx& tier_ctx,
 
   rgw_obj dest_obj(dest_bucket, rgw_obj_key(target_obj_name));
 
-  tier_ctx.obj->set_atomic();
+  tier_ctx.obj->set_atomic(true);
 
   /* TODO: Define readf, writef as stack variables. For some reason,
    * when used as stack variables (esp., readf), the transition seems to
@@ -851,6 +1004,95 @@ static int cloud_tier_send_multipart_part(RGWLCCloudTierCtx& tier_ctx,
   }
 
   return 0;
+}
+
+int cloud_tier_restore(const DoutPrefixProvider *dpp, RGWRESTConn& dest_conn,
+                       const rgw_obj& dest_obj, std::optional<uint64_t> days,
+                       RGWZoneGroupTierS3Glacier& glacier_params) {
+  rgw_http_param_pair params[] = {{"restore", nullptr}, {nullptr, nullptr}};
+  // XXX: include versionId=VersionId in the params above
+
+  stringstream ss;
+  XMLFormatter formatter;
+  int ret;
+
+  bufferlist bl, out_bl;
+  string resource = obj_to_aws_path(dest_obj);
+
+  const std::string tier_v = (glacier_params.glacier_restore_tier_type == GlacierRestoreTierType::Expedited) ? "Expedited" : "Standard";
+
+  struct RestoreRequest {
+	  std::optional<uint64_t> days;
+	  std::optional<std::string> tier;
+
+    explicit RestoreRequest(std::optional<uint64_t> _days, std::optional<std::string> _tier) : days(_days), tier(_tier) {}
+
+    void dump_xml(Formatter *f) const {
+      encode_xml("Days", days, f);
+      if (tier) {
+      	f->open_object_section("GlacierJobParameters");
+	      encode_xml("Tier", tier, f);
+      	f->close_section();
+      };
+    }
+  } req_enc(days, tier_v);
+
+  struct RestoreResult {
+    std::string code;
+
+    void decode_xml(XMLObj *obj) {
+      RGWXMLDecoder::decode_xml("Code", code, obj);
+    }
+  } result;
+
+  req_enc.days = glacier_params.glacier_restore_days;
+  req_enc.tier = tier_v;
+  encode_xml("RestoreRequest", req_enc, &formatter);
+
+  formatter.flush(ss);
+  bl.append(ss.str());
+
+  ret = dest_conn.send_resource(dpp, "POST", resource, params, nullptr,
+                                out_bl, &bl, nullptr, null_yield);
+
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << __func__ << "ERROR: failed to send Restore request to cloud for obj=" << dest_obj << " , ret = " << ret << dendl;
+  } else {
+    ldpp_dout(dpp, 0) << __func__ << "Sent Restore request to cloud for obj=" << dest_obj << " , ret = " << ret << dendl;
+  }
+
+  if (out_bl.length() > 0) {
+    RGWXMLDecoder::XMLParser parser;
+    if (!parser.init()) {
+      ldpp_dout(dpp, 0) << "ERROR: failed to initialize xml parser for parsing restore request response from server" << dendl;
+      return -EIO;
+    }
+
+    if (!parser.parse(out_bl.c_str(), out_bl.length(), 1)) {
+      string str(out_bl.c_str(), out_bl.length());
+      ldpp_dout(dpp, 5) << "ERROR: failed to parse xml restore: " << str << dendl;
+      return -EIO;
+    }
+
+    try {
+      RGWXMLDecoder::decode_xml("Error", result, &parser, true);
+    } catch (RGWXMLDecoder::err& err) {
+      string str(out_bl.c_str(), out_bl.length());
+      ldpp_dout(dpp, 5) << "ERROR: unexpected xml: " << str << dendl;
+      return -EIO;
+    }
+
+    ldpp_dout(dpp, 0) << "ERROR: Restore request received result : " << result.code << dendl;
+    if (result.code != "RestoreAlreadyInProgress") {
+      return -EIO;
+    } else { // treat as success
+      return 0;
+    }
+
+    ldpp_dout(dpp, 0) << "ERROR: restore req failed with error: " << result.code << dendl;
+  }
+
+  return ret;
 }
 
 static int cloud_tier_abort_multipart(const DoutPrefixProvider *dpp,
@@ -1185,9 +1427,12 @@ static int cloud_tier_multipart_transfer(RGWLCCloudTierCtx& tier_ctx) {
 static int cloud_tier_check_object(RGWLCCloudTierCtx& tier_ctx, bool& already_tiered) {
   int ret;
   std::map<std::string, std::string> headers;
+  std::string etag;
+  uint64_t accounted_size;
+  rgw::sal::Attrs attrs;
 
   /* Fetch Head object */
-  ret = cloud_tier_get_object(tier_ctx, true, headers);
+  ret = rgw_cloud_tier_get_object(tier_ctx, true, headers, nullptr, etag, accounted_size, attrs, nullptr);
 
   if (ret < 0) {
     ldpp_dout(tier_ctx.dpp, 0) << "ERROR: failed to fetch HEAD from cloud for obj=" << tier_ctx.obj << " , ret = " << ret << dendl;

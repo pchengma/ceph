@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "common/errno.h"
 
@@ -9,7 +9,6 @@
 #include "rgw_cr_rest.h"
 #include "rgw_zone.h"
 #include "services/svc_zone.h"
-#include "services/svc_meta.h"
 #include "services/svc_mdlog.h"
 #include "services/svc_cls.h"
 

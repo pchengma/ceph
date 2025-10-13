@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -55,9 +56,14 @@ struct _rangeset_base {
 
 
 template <class T>
-class rangeset_iterator :
-  public std::iterator<std::input_iterator_tag, T>
+class rangeset_iterator
 {
+    using iterator_category = std::input_iterator_tag;
+    using value_type = T;
+    using difference_type = std::ptrdiff_t;
+    using pointer = T*;
+    using reference = T&;
+
   //typedef typename map<T,T>::iterator mapit;
 
   map<T,T> ranges;

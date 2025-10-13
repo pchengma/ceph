@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -26,6 +26,7 @@
 class RGWReshard;
 
 
+class BucketReshardManager;
 namespace rgw { namespace sal {
   class RadosStore;
 } }
@@ -84,12 +85,23 @@ class RGWBucketReshard {
   // allocated in at once
   static const std::initializer_list<uint16_t> reshard_primes;
 
+  int calc_target_shard(const RGWBucketInfo& bucket_info, const rgw_obj_key& key,
+                        int& shard, const DoutPrefixProvider *dpp);
+  int reshard_process(const rgw::bucket_index_layout_generation& current,
+                      int& max_entries,
+                      BucketReshardManager& target_shards_mgr,
+                      bool verbose_json_out,
+                      std::ostream *out,
+                      Formatter *formatter, rgw::BucketReshardState reshard_stage,
+                      const DoutPrefixProvider *dpp, optional_yield y);
+
   int do_reshard(const rgw::bucket_index_layout_generation& current,
                  const rgw::bucket_index_layout_generation& target,
-                 int max_entries,
+                 int max_entries, bool support_logrecord,
                  bool verbose,
                  std::ostream *os,
 		 Formatter *formatter,
+                 ReshardFaultInjector& fault,
                  const DoutPrefixProvider *dpp, optional_yield y);
 public:
 
@@ -105,8 +117,10 @@ public:
               bool verbose = false, std::ostream *out = nullptr,
               ceph::Formatter *formatter = nullptr,
 	      RGWReshard *reshard_log = nullptr);
-  int get_status(const DoutPrefixProvider *dpp, std::list<cls_rgw_bucket_instance_entry> *status);
+  int get_status(const DoutPrefixProvider *dpp, optional_yield y,
+                 std::list<cls_rgw_bucket_instance_entry> *status);
   int cancel(const DoutPrefixProvider* dpp, optional_yield y);
+  int renew_lock_if_needed(const DoutPrefixProvider *dpp);
 
   static int clear_resharding(rgw::sal::RadosStore* store,
 			      RGWBucketInfo& bucket_info,
@@ -147,14 +161,12 @@ public:
     }
   }
 
-  // returns a preferred number of shards given a calculated number of
-  // shards based on max_dynamic_shards and the list of prime values
-  static uint32_t get_prime_shard_count(uint32_t suggested_shards,
-					uint32_t max_dynamic_shards,
-					uint32_t min_dynamic_shards);
+  // returns a preferred number of shards as a prime value
+  static uint32_t nearest_prime(uint32_t suggested_shards);
 
   static void calculate_preferred_shards(const DoutPrefixProvider* dpp,
 					 const uint32_t max_dynamic_shards,
+					 const uint32_t min_layout_shards,
 					 const uint64_t max_objs_per_shard,
 					 const bool is_multisite,
 					 const uint64_t num_objs,
@@ -227,7 +239,6 @@ public:
   int get(const DoutPrefixProvider *dpp, cls_rgw_reshard_entry& entry);
   int remove(const DoutPrefixProvider *dpp, const cls_rgw_reshard_entry& entry, optional_yield y);
   int list(const DoutPrefixProvider *dpp, int logshard_num, std::string& marker, uint32_t max, std::list<cls_rgw_reshard_entry>& entries, bool *is_truncated);
-  int clear_bucket_resharding(const DoutPrefixProvider *dpp, const std::string& bucket_instance_oid, cls_rgw_reshard_entry& entry);
 
   /* reshard thread */
   int process_entry(const cls_rgw_reshard_entry& entry, int max_entries,
@@ -266,7 +277,7 @@ public:
   ~RGWReshardWait() {
     ceph_assert(going_down);
   }
-  int wait(optional_yield y);
+  int wait(const DoutPrefixProvider* dpp, optional_yield y);
   // unblock any threads waiting on reshard
   void stop();
 };

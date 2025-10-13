@@ -6,6 +6,7 @@ build/ops:
   - admin/**
   - ceph.spec.in
   - cmake/**
+  - container/**
   - debian/**
   - do_cmake.sh
   - do_freebsd.sh
@@ -154,6 +155,7 @@ crimson:
   - src/crimson/**
   - src/test/crimson/**
   - qa/suites/crimson-rados/**
+  - src/seastar/**
 
 dashboard:
   - src/pybind/mgr/dashboard/**
@@ -262,6 +264,19 @@ rbd:
   - systemd/rbdmap.service.in
   - udev/50-rbd.rules
 
+nvmeof:
+  - qa/suites/nvmeof/**
+  - qa/tasks/nvmeof.py
+  - qa/workunits/nvmeof/**
+  - src/ceph_nvmeof_monitor_client.cc
+  - src/cephadm/cephadmlib/daemons/nvmeof.py
+  - src/messages/MNVMeofGw*
+  - src/mon/NVMeofGw*
+  - src/nvmeof/**
+  - src/pybind/mgr/cephadm/services/nvmeof.py
+  - src/pybind/mgr/cephadm/templates/services/nvmeof/**
+  - src/tools/ceph-dencoder/nvmeof*
+
 rgw:
   - qa/suites/rgw/**
   - qa/tasks/rgw*
@@ -274,11 +289,15 @@ rgw:
   - src/cls/rgw_gc/**
   - src/cls/timeindex/**
   - src/mrgw.sh
+  - src/mrun
+  - src/mstart.sh
+  - src/mstop.sh
   - src/rgw/**
   - src/test/cls_rgw/**
   - src/test/librgw_*
   - src/test/rgw/**
   - src/test/test_rgw*
+  - doc/radosgw
 
 ceph-volume:
   - src/ceph-volume/**
@@ -327,3 +346,6 @@ script:
   - src/script/**
   - admin/**
   - doc/scripts/**
+
+config-change:
+  - src/common/options/**

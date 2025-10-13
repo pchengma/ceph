@@ -25,7 +25,6 @@ tasks:
     sighup_delay: 0
     min_in: 3
     noscrub_toggle_delay: 0
-    chance_down: 0
     chance_thrash_pg_upmap: 0
     reweight_osd: 0
     thrash_primary_affinity: false
@@ -33,3 +32,4 @@ tasks:
     chance_inject_pause_short: 0
     chance_thrash_cluster_full: 0
     chance_reset_purged_snaps_last: 0
+    chance_trim_stale_osdmaps: 0

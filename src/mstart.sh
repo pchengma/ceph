@@ -1,5 +1,33 @@
 #!/bin/sh
 
+# Deploy a vstart.sh cluster in a named subdirectory. This makes it possible to
+# start multiple clusters in different subdirectories. See mstop.sh for cleanup.
+#
+# Example:
+#
+# ~/ceph/build $ MON=1 OSD=1 RGW=1 MDS=0 MGR=0 ../src/mstart.sh c1 -n -d
+# ~/ceph/build $ MON=1 OSD=1 RGW=1 MDS=0 MGR=0 ../src/mstart.sh c2 -n -d
+#
+# ~/ceph/build $ ls run
+# c1  c2
+# ~/ceph/build $ ls run/c1
+# asok  ceph.conf  dev  keyring  out
+#
+# ~/ceph/build $ ../src/mrun c1 radosgw-admin user list
+# [
+#     "56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234",
+#     "testx$9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+#     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+#     "testacct1user",
+#     "test",
+#     "testacct2root",
+#     "testacct1root",
+#     "testid"
+# ]
+#
+# ~/ceph/build $ ../src/mstop.sh c1
+# ~/ceph/build $ ../src/mstop.sh c2
+
 usage="usage: $0 <name> [vstart options]..\n"
 
 usage_exit() {
@@ -46,7 +74,10 @@ if [ $? -ne 0 ]; then
 fi
 
 pos=`echo $pos | cut -d: -f1`
-base_port=$((6800+pos*20))
+
+CEPH_BASE_PORT=${CEPH_BASE_PORT:-6800}
+
+base_port=$((CEPH_BASE_PORT+pos*20))
 rgw_port=$((8000+pos*1))
 
 [ -z "$VSTART_DEST" ] && export VSTART_DEST=$RUN_ROOT_PATH/$instance

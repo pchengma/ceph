@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "block_driver.h"
 
@@ -40,6 +40,9 @@ private:
   using TransactionManager = crimson::os::seastore::TransactionManager;
   using TransactionManagerRef = crimson::os::seastore::TransactionManagerRef;
   TransactionManagerRef tm;
+
+  using shard_stats_t = crimson::os::seastore::shard_stats_t;
+  shard_stats_t shard_stats;
 
   seastar::future<> mkfs();
   void init();

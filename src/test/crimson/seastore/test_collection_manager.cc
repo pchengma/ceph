@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "os/ObjectStore.h"
 #include "test/crimson/gtest_seastar.h"
@@ -35,7 +35,7 @@ namespace {
         std::forward<decltype(args)>(args)...);				\
       },								\
       root,								\
-      std::forward<Args>(args)...).unsafe_get0();			\
+      std::forward<Args>(args)...).unsafe_get();			\
   }
 
 struct collection_manager_test_t :
@@ -74,7 +74,7 @@ struct collection_manager_test_t :
       *tref,
       [this](auto &t) {
 	return collection_manager->mkfs(t);
-      }).unsafe_get0();
+      }).unsafe_get();
     submit_transaction(std::move(tref));
     return coll_root;
   }

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,9 +21,11 @@
 #include <atomic>
 #include <pthread.h>
 #include <climits>
+#include <deque>
 #include <list>
 #include <mutex>
 #include <map>
+#include <set>
 #include <functional>
 #include <optional>
 
@@ -223,7 +226,7 @@ private:
 
   std::unique_ptr<Protocol> protocol;
 
-  std::optional<std::function<void(ssize_t)>> writeCallback;
+  std::function<void(ssize_t)> writeCallback;
   std::function<void(char *, ssize_t)> readCallback;
   std::optional<unsigned> pendingReadLen;
   char *read_buffer;
@@ -242,6 +245,8 @@ private:
   }
 
   bool is_msgr2() const override;
+
+  void dump(Formatter* f, bool tcp_info);
 
   friend class Protocol;
   friend class ProtocolV1;

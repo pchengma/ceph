@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,6 +18,7 @@
 #include "common/errno.h"
 #include <fcntl.h>
 #include "EventEpoll.h"
+#include "Timeout.h"
 
 #define dout_subsys ceph_subsys_ms
 
@@ -120,8 +122,7 @@ int EpollDriver::event_wait(std::vector<FiredFileEvent> &fired_events, struct ti
 {
   int retval, numevents = 0;
 
-  retval = epoll_wait(epfd, events, nevent,
-                      tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
+  retval = epoll_wait(epfd, events, nevent, timeout_to_milliseconds(tvp));
   if (retval > 0) {
     numevents = retval;
     fired_events.resize(numevents);

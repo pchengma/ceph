@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_gc.h"
 
 #include "rgw_tools.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "include/scope_guard.h"
 #include "include/rados/librados.hpp"
 #include "cls/rgw/cls_rgw_client.h"
@@ -51,7 +52,7 @@ void RGWGC::initialize(CephContext *_cct, RGWRados *_store, optional_yield y) {
     op.create(false);
     const uint64_t queue_size = cct->_conf->rgw_gc_max_queue_size, num_deferred_entries = cct->_conf->rgw_gc_max_deferred;
     gc_log_init2(op, queue_size, num_deferred_entries);
-    store->gc_operate(this, obj_names[i], &op, y);
+    store->gc_operate(this, obj_names[i], std::move(op), y);
   }
 }
 
@@ -129,13 +130,13 @@ int RGWGC::send_chain(const cls_rgw_obj_chain& chain, const string& tag, optiona
 
   ldpp_dout(this, 20) << "RGWGC::send_chain - on object name: " << obj_names[i] << "tag is: " << tag << dendl;
 
-  auto ret = store->gc_operate(this, obj_names[i], &op, y);
+  auto ret = store->gc_operate(this, obj_names[i], std::move(op), y);
   if (ret != -ECANCELED && ret != -EPERM) {
     return ret;
   }
   ObjectWriteOperation set_entry_op;
   cls_rgw_gc_set_entry(set_entry_op, cct->_conf->rgw_gc_obj_min_wait, info);
-  return store->gc_operate(this, obj_names[i], &set_entry_op, y);
+  return store->gc_operate(this, obj_names[i], std::move(set_entry_op), y);
 }
 
 struct defer_chain_state {
@@ -241,7 +242,21 @@ int RGWGC::remove(int index, int num_entries, optional_yield y)
   ObjectWriteOperation op;
   cls_rgw_gc_queue_remove_entries(op, num_entries);
 
-  return store->gc_operate(this, obj_names[index], &op, y);
+  return store->gc_operate(this, obj_names[index], std::move(op), y);
+}
+
+static int gc_list(const DoutPrefixProvider* dpp, optional_yield y, librados::IoCtx& io_ctx,
+                   std::string& oid, std::string& marker, uint32_t max, bool expired_only,
+                   std::list<cls_rgw_gc_obj_info>& entries, bool *truncated, std::string& next_marker)
+{
+  librados::ObjectReadOperation op;
+  bufferlist bl;
+  cls_rgw_gc_list(op, marker, max, expired_only, bl);
+  int ret = rgw_rados_operate(dpp, io_ctx, oid, std::move(op), nullptr, y);
+  if (ret < 0) {
+    return ret;
+  }
+  return cls_rgw_gc_list_decode(bl, entries, truncated, next_marker);
 }
 
 int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool *truncated, bool& processing_queue)
@@ -256,7 +271,7 @@ int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std
 
     //processing_queue is set to true from previous iteration if the queue was under process and probably has more elements in it.
     if (! transitioned_objects_cache[*index] && ! check_queue && ! processing_queue) {
-      ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
+      ret = gc_list(this, null_yield, store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
       if (ret != -ENOENT && ret < 0) {
         return ret;
       }
@@ -271,7 +286,7 @@ int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std
             marker.clear();
           } else {
             std::list<cls_rgw_gc_obj_info> non_expired_entries;
-            ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, 1, false, non_expired_entries, truncated, next_marker);
+            ret = gc_list(this, null_yield, store->gc_pool_ctx, obj_names[*index], marker, 1, false, non_expired_entries, truncated, next_marker);
             if (non_expired_entries.size() == 0) {
               transitioned_objects_cache[*index] = true;
               marker.clear();
@@ -588,7 +603,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
     int ret = 0;
 
     if (! transitioned_objects_cache[index]) {
-      ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, &truncated, next_marker);
+      ret = gc_list(this, y, store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, &truncated, next_marker);
       ldpp_dout(this, 20) <<
       "RGWGC::process cls_rgw_gc_list returned with returned:" << ret <<
       ", entries.size=" << entries.size() << ", truncated=" << truncated <<
@@ -597,7 +612,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
       cls_version_read(store->gc_pool_ctx, obj_names[index], &objv);
       if ((objv.ver == 1) && entries.size() == 0) {
         std::list<cls_rgw_gc_obj_info> non_expired_entries;
-        ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, 1, false, non_expired_entries, &truncated, next_marker);
+        ret = gc_list(this, y, store->gc_pool_ctx, obj_names[index], marker, 1, false, non_expired_entries, &truncated, next_marker);
         if (non_expired_entries.size() == 0) {
           transitioned_objects_cache[index] = true;
           marker.clear();
@@ -639,7 +654,6 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	info.tag << "', time=" << info.time << ", chain.objs.size()=" <<
 	info.chain.objs.size() << dendl;
 
-      std::list<cls_rgw_obj>::iterator liter;
       cls_rgw_obj_chain& chain = info.chain;
 
       utime_t now = ceph_clock_now();
@@ -654,9 +668,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
         }
       }
       if (! chain.objs.empty()) {
-	for (liter = chain.objs.begin(); liter != chain.objs.end(); ++liter) {
-	  cls_rgw_obj& obj = *liter;
-
+	for (const auto& obj : chain.objs) {
 	  if (obj.pool != last_pool) {
 	    delete ctx;
 	    ctx = new IoCtx;
@@ -674,6 +686,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	  }
 
 	  ctx->locator_set_key(obj.loc);
+	  ctx->set_pool_full_try(); // allow deletion at pool quota limit
 
 	  const string& oid = obj.key.name; /* just stored raw oid there */
 

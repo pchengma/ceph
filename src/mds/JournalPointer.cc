@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,15 +14,18 @@
  */
 
 
+#include "mds/JournalPointer.h"
+
+#include <iomanip>
+#include <ostream>
+
+#include "mds/mdstypes.h"
+
 #include "common/debug.h"
 #include "common/errno.h"
 #include "common/Cond.h"
 #include "osdc/Objecter.h"
-#include "mds/mdstypes.h"
 #include "msg/Messenger.h"
-
-#include "mds/JournalPointer.h"
-
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_journaler
@@ -61,7 +65,7 @@ int JournalPointer::load(Objecter *objecter)
     try {
       decode(q);
     } catch (const buffer::error &e) {
-      return -CEPHFS_EINVAL;
+      return -EINVAL;
     }
   } else {
     dout(1) << "Journal pointer '" << object_id << "' read failed: " << cpp_strerror(r) << dendl;

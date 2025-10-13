@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=2 sw=2 expandtab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=2 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -509,7 +509,9 @@ int DaosBucket::check_bucket_shards(const DoutPrefixProvider* dpp) {
   return DAOS_NOT_IMPLEMENTED_LOG(dpp);
 }
 
-int DaosBucket::chown(const DoutPrefixProvider* dpp, const rgw_owner& new_user,
+int DaosBucket::chown(const DoutPrefixProvider* dpp,
+                      const rgw_owner& new_user,
+                      const std::string& new_owner_name,
                       optional_yield y) {
   return DAOS_NOT_IMPLEMENTED_LOG(dpp);
 }
@@ -858,8 +860,6 @@ bool DaosZone::is_writeable() { return true; }
 
 bool DaosZone::get_redirect_endpoint(std::string* endpoint) { return false; }
 
-bool DaosZone::has_zonegroup_api(const std::string& api) const { return false; }
-
 const std::string& DaosZone::get_current_period_id() {
   return current_period->get_id();
 }
@@ -898,7 +898,7 @@ int DaosObject::load_obj_state(const DoutPrefixProvider* dpp,
 DaosObject::~DaosObject() { close(nullptr); }
 
 int DaosObject::set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
-                              Attrs* delattrs, optional_yield y) {
+                              Attrs* delattrs, optional_yield y, uint32_t flags) {
   ldpp_dout(dpp, 20) << "DEBUG: DaosObject::set_obj_attrs()" << dendl;
   // TODO handle target_obj
   // Get object's metadata (those stored in rgw_bucket_dir_entry)
@@ -932,7 +932,7 @@ int DaosObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp,
 
 int DaosObject::modify_obj_attrs(const char* attr_name, bufferlist& attr_val,
                                  optional_yield y,
-                                 const DoutPrefixProvider* dpp) {
+                                 const DoutPrefixProvider* dpp, uint32_t flags) {
   // Get object's metadata (those stored in rgw_bucket_dir_entry)
   ldpp_dout(dpp, 20) << "DEBUG: modify_obj_attrs" << dendl;
   rgw_bucket_dir_entry ent;
@@ -942,7 +942,7 @@ int DaosObject::modify_obj_attrs(const char* attr_name, bufferlist& attr_val,
   }
 
   // Update object attrs
-  set_atomic();
+  set_atomic(true);
   attrs[attr_name] = attr_val;
 
   ret = set_dir_entry_attrs(dpp, &ent, &attrs);
@@ -957,7 +957,7 @@ int DaosObject::delete_obj_attrs(const DoutPrefixProvider* dpp,
   bufferlist bl;
 
   rmattr[attr_name] = bl;
-  return set_obj_attrs(dpp, nullptr, &rmattr, y);
+  return set_obj_attrs(dpp, nullptr, &rmattr, y, rgw::sal::FLAG_LOG_OP);
 }
 
 bool DaosObject::is_expired() {
@@ -1025,6 +1025,19 @@ int DaosObject::transition_to_cloud(
     Bucket* bucket, rgw::sal::PlacementTier* tier, rgw_bucket_dir_entry& o,
     std::set<std::string>& cloud_targets, CephContext* cct, bool update_object,
     const DoutPrefixProvider* dpp, optional_yield y) {
+  return DAOS_NOT_IMPLEMENTED_LOG(dpp);
+}
+
+int DaosObject::restore_obj_from_cloud(Bucket* bucket,
+          rgw::sal::PlacementTier* tier,
+	  CephContext* cct,
+          RGWObjTier& tier_config,
+          uint64_t olh_epoch,
+          std::optional<uint64_t> days,
+	  bool& in_progress,
+          const DoutPrefixProvider* dpp, 
+          optional_yield y)
+{
   return DAOS_NOT_IMPLEMENTED_LOG(dpp);
 }
 
@@ -1196,7 +1209,8 @@ int DaosObject::DaosDeleteOp::delete_obj(const DoutPrefixProvider* dpp,
 }
 
 int DaosObject::delete_object(const DoutPrefixProvider* dpp, optional_yield y,
-                              uint32_t flags) {
+                              uint32_t flags, std::list<rgw_obj_index_key>* remove_objs,
+                              RGWObjVersionTracker* objv) {
   ldpp_dout(dpp, 20) << "DEBUG: delete_object" << dendl;
   DaosObject::DaosDeleteOp del_op(this);
   del_op.params.bucket_owner = bucket->get_info().owner;
@@ -1596,6 +1610,7 @@ int DaosMultipartUpload::init(const DoutPrefixProvider* dpp, optional_yield y,
 
   multipart_upload_info upload_info;
   upload_info.dest_placement = dest_placement;
+  upload_info.cksum_type = cksum_type;
 
   ent.encode(bl);
   encode(attrs, bl);
@@ -1676,7 +1691,8 @@ int DaosMultipartUpload::complete(
     map<int, string>& part_etags, list<rgw_obj_index_key>& remove_objs,
     uint64_t& accounted_size, bool& compressed, RGWCompressionInfo& cs_info,
     off_t& off, std::string& tag, ACLOwner& owner, uint64_t olh_epoch,
-    rgw::sal::Object* target_obj) {
+    rgw::sal::Object* target_obj,
+    prefix_map_t& processed_prefixes) {
   ldpp_dout(dpp, 20) << "DEBUG: complete" << dendl;
   char final_etag[CEPH_CRYPTO_MD5_DIGESTSIZE];
   char final_etag_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16];
@@ -1760,11 +1776,14 @@ int DaosMultipartUpload::complete(
       bool part_compressed = (obj_part.cs_info.compression_type != "none");
       if ((handled_parts > 0) &&
           ((part_compressed != compressed) ||
-           (cs_info.compression_type != obj_part.cs_info.compression_type))) {
+           (cs_info.compression_type != obj_part.cs_info.compression_type) ||
+           (cs_info.compressor_message.has_value() &&
+           (cs_info.compressor_message != obj_part.cs_info.compressor_message)))) {
         ldpp_dout(dpp, 0)
-            << "ERROR: compression type was changed during multipart upload ("
-            << cs_info.compression_type << ">>"
-            << obj_part.cs_info.compression_type << ")" << dendl;
+            << "ERROR: compression type or compressor message was changed during multipart upload ("
+            << cs_info.compression_type << ">>" << obj_part.cs_info.compression_type << "),"
+            << cs_info.compressor_message << ">>" << obj_part.cs_info.compressor_message << ") "
+            << dendl;
         ret = -ERR_INVALID_PART;
         return ret;
       }
@@ -1785,8 +1804,11 @@ int DaosMultipartUpload::complete(
           cs_info.blocks.push_back(cb);
           new_ofs = cb.new_ofs + cb.len;
         }
-        if (!compressed)
+        if (!compressed) {
           cs_info.compression_type = obj_part.cs_info.compression_type;
+          if (obj_part.cs_info.compressor_message.has_value())
+            cs_info.compressor_message = obj_part.cs_info.compressor_message;
+	}
         cs_info.orig_size += obj_part.cs_info.orig_size;
         compressed = true;
       }
@@ -1915,6 +1937,15 @@ int DaosMultipartUpload::complete(
   return ret;
 }
 
+int DaosMultipartUpload::cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
+    CephContext *cct, optional_yield y,
+    const rgw_obj& obj,
+    std::list<rgw_obj_index_key>& remove_objs,
+    prefix_map_t& processed_prefixes)
+{
+  return -ENOTSUP;
+}
+
 int DaosMultipartUpload::get_info(const DoutPrefixProvider* dpp,
                                   optional_yield y, rgw_placement_rule** rule,
                                   rgw::sal::Attrs* attrs) {
@@ -1968,6 +1999,7 @@ int DaosMultipartUpload::get_info(const DoutPrefixProvider* dpp,
 
   // Now decode the placement rule
   decode(upload_info, iter);
+  cksum_type = upload_info.cksum_type;
   placement = upload_info.dest_placement;
   *rule = &placement;
 
@@ -2285,6 +2317,18 @@ int DaosStore::cluster_stat(RGWClusterStat& stats) {
 }
 
 std::unique_ptr<Lifecycle> DaosStore::get_lifecycle(void) {
+  DAOS_NOT_IMPLEMENTED_LOG(nullptr);
+  return 0;
+}
+
+std::unique_ptr<Restore> DaosStore::get_restore(const int n_objs,
+				const std::vector<std::string_view>& obj_names) {
+  DAOS_NOT_IMPLEMENTED_LOG(nullptr);
+  return 0;
+}
+
+bool DaosStore::process_expired_objects(const DoutPrefixProvider *dpp,
+	       				optional_yield y) {
   DAOS_NOT_IMPLEMENTED_LOG(nullptr);
   return 0;
 }

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -219,7 +219,7 @@ protected:
   }
 
   void restart() {
-    restart_fut().get0();
+    restart_fut().get();
   }
 
   seastar::future<> tm_setup() {
@@ -273,6 +273,7 @@ protected:
   Cache* cache;
   ExtentPlacementManager *epm;
   uint64_t seq = 0;
+  shard_stats_t shard_stats;
 
   TMTestState() : EphemeralTestState(1, 0) {}
 
@@ -292,7 +293,8 @@ protected:
 	"seastore_full_integrity_check", "false");
     }
 #endif
-    tm = make_transaction_manager(p_dev, sec_devices, true);
+    shard_stats = {};
+    tm = make_transaction_manager(p_dev, sec_devices, shard_stats, true);
     epm = tm->get_epm();
     lba_manager = tm->get_lba_manager();
     cache = tm->get_cache();
@@ -358,20 +360,19 @@ protected:
       });
   }
   auto submit_transaction_fut_with_seq(Transaction &t) {
-    using ertr = TransactionManager::base_iertr;
     return with_trans_intr(
       t,
       [this](auto &t) {
 	return tm->submit_transaction(t
 	).si_then([this] {
-	  return ertr::make_ready_future<uint64_t>(seq++);
+	  return base_iertr::make_ready_future<uint64_t>(seq++);
 	});
       });
   }
 
   void submit_transaction(TransactionRef t) {
-    submit_transaction_fut(*t).unsafe_get0();
-    epm->run_background_work_until_halt().get0();
+    submit_transaction_fut(*t).unsafe_get();
+    epm->run_background_work_until_halt().get();
   }
 };
 

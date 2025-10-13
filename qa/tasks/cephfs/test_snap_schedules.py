@@ -545,6 +545,30 @@ class TestSnapSchedules(TestSnapSchedulesHelper):
 
         self.mount_a.run_shell(['rmdir', test_dir[1:]])
 
+    def test_failure_for_duplicate_retention(self):
+        """
+        Test that adding retention for same spec fails for second time.
+        """
+        test_dir = '/' + TestSnapSchedules.TEST_DIRECTORY
+
+        self.mount_a.run_shell(['mkdir', '-p', test_dir[1:]])
+
+        self.fs_snap_schedule_cmd('add', path=test_dir, snap_schedule='1m')
+        self.fs_snap_schedule_cmd('retention', 'add', path=test_dir,
+                                  retention_spec_or_period='m',
+                                  retention_count='50')
+
+        # Adding a duplicate retention spec should fail
+        with self.assertRaises(CommandFailedError):
+            self.fs_snap_schedule_cmd('retention', 'add', path=test_dir,
+                                      retention_spec_or_period='m',
+                                      retention_count='50')
+
+        # remove snapshot schedule
+        self.fs_snap_schedule_cmd('remove', path=test_dir)
+
+        self.mount_a.run_shell(['rmdir', test_dir[1:]])
+
     def test_snap_schedule_all_periods(self):
         test_dir = TestSnapSchedulesSnapdir.TEST_DIRECTORY + "/minutes"
         self.mount_a.run_shell(['mkdir', '-p', test_dir])
@@ -1091,6 +1115,56 @@ class TestSnapSchedulesSnapdir(TestSnapSchedulesHelper):
         self.remove_snapshots(TestSnapSchedulesSnapdir.TEST_DIRECTORY, sdn)
 
         self.mount_a.run_shell(['rmdir', TestSnapSchedulesSnapdir.TEST_DIRECTORY])
+
+
+class TestSnapSchedulesFetchForeignConfig(TestSnapSchedulesHelper):
+    def test_fetch_for_mds_max_snaps_per_dir(self):
+        """Test the correctness of snap directory name"""
+        dir_path = TestSnapSchedulesHelper.TEST_DIRECTORY
+        sdn = self.get_snap_dir_name()
+
+        self.mount_a.run_shell(['mkdir', '-p', dir_path])
+
+        # set a schedule on the dir
+        self.fs_snap_schedule_cmd('add', path=dir_path, snap_schedule='1m')
+
+        self.config_set('mds', 'mds_max_snaps_per_dir', 10)
+
+        time.sleep(11*60)  # wait for 9 snaps to be retained
+
+        snap_path = f"{dir_path}/{sdn}"
+        snapshots = self.mount_a.ls(path=snap_path)
+        fs_count = len(snapshots)
+
+        self.assertTrue(fs_count == 9)
+
+        self.config_set('mds', 'mds_max_snaps_per_dir', 8)
+
+        time.sleep(1*60 + 10)  # wait for max_snaps_per_dir limit to be breached
+
+        snap_path = f"{dir_path}/{sdn}"
+        snapshots = self.mount_a.ls(path=snap_path)
+        fs_count = len(snapshots)
+
+        self.assertTrue(fs_count == 7)
+
+        self.config_set('mds', 'mds_max_snaps_per_dir', 10)
+
+        time.sleep(2*60 + 10)  # wait for more snaps to be created
+
+        snap_path = f"{dir_path}/{sdn}"
+        snapshots = self.mount_a.ls(path=snap_path)
+        fs_count = len(snapshots)
+
+        self.assertTrue(fs_count == 9)
+
+        # remove snapshot schedule
+        self.fs_snap_schedule_cmd('remove', path=dir_path)
+
+        # remove all scheduled snapshots
+        self.remove_snapshots(dir_path, sdn)
+
+        self.mount_a.run_shell(['rmdir', dir_path])
 
 
 """

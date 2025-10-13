@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef _LARGEFILE64_SOURCE
 #define _LARGEFILE64_SOURCE
@@ -74,7 +74,7 @@ struct FileStream<I>::ReadRequest {
     auto offset = lseek64(file_stream->m_file_no, byte_extent.first, SEEK_SET);
     if (offset == -1) {
       r = -errno;
-      lderr(cct) << "failed to seek file stream: " << cpp_strerror(r) << dendl;
+      lderr(cct) << "failed to seek file: " << cpp_strerror(r) << dendl;
       finish(r);
       return;
     }
@@ -149,7 +149,7 @@ void FileStream<I>::open(Context* on_finish) {
   m_file_no = ::open(file_path.c_str(), O_RDONLY);
   if (m_file_no < 0) {
     int r = -errno;
-    lderr(m_cct) << "failed to open file stream '" << file_path << "': "
+    lderr(m_cct) << "failed to open file '" << file_path << "': "
                  << cpp_strerror(r) << dendl;
     on_finish->complete(r);
     return;
@@ -225,6 +225,18 @@ void FileStream<I>::read(io::Extents&& byte_extents, bufferlist* data,
 }
 
 #endif // BOOST_ASIO_HAS_POSIX_STREAM_DESCRIPTOR
+
+template <typename I>
+void FileStream<I>::list_sparse_extents(io::Extents&& byte_extents,
+                                        io::SparseExtents* sparse_extents,
+                                        Context* on_finish) {
+  // TODO: list sparse extents based on SEEK_HOLE/SEEK_DATA
+  for (auto [byte_offset, byte_length] : byte_extents) {
+    sparse_extents->insert(byte_offset, byte_length,
+                           {io::SPARSE_EXTENT_STATE_DATA, byte_length});
+  }
+  on_finish->complete(0);
+}
 
 } // namespace migration
 } // namespace librbd

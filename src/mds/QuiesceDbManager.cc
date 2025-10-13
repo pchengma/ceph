@@ -200,7 +200,7 @@ void QuiesceDbManager::update_membership(const QuiesceClusterMembership& new_mem
     // start the thread
     dout(5) << "starting the db mgr thread at epoch: " << new_membership.epoch << dendl;
     db_thread_should_exit = false;
-    quiesce_db_thread.create("quiesce_db_mgr");
+    quiesce_db_thread.create("mds-q-db");
   } else if (quiesce_db_thread.is_started()) {
     submit_condition.notify_all();
   }
@@ -1201,6 +1201,7 @@ void QuiesceDbManager::calculate_quiesce_map(QuiesceMap &map)
 
   for(auto & [set_id, set]: db.sets) {
     if (set.is_active()) {
+      auto requested = set.get_requested_member_state();
       // we only report active sets;
       for(auto & [root, member]: set.members) {
         if (member.excluded) {
@@ -1210,7 +1211,6 @@ void QuiesceDbManager::calculate_quiesce_map(QuiesceMap &map)
         // for a quiesce map, we want to report active roots as either QUIESCING or RELEASING
         // this is to make sure that clients always have a reason to report back and confirm
         // the quiesced state.
-        auto requested = set.get_requested_member_state();
         auto ttl = get_root_ttl(set, member, db_age);
         auto root_it = map.roots.try_emplace(root, QuiesceMap::RootInfo { requested, ttl }).first;
 

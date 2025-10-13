@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -11,7 +12,11 @@
  * Foundation.  See file COPYING.
  * 
  */
+
+#include "Resetter.h"
+
 #include <memory>
+#include "common/debug.h"
 #include "common/errno.h"
 #include "osdc/Journaler.h"
 #include "mds/JournalPointer.h"
@@ -20,8 +25,6 @@
 #include "mds/MDCache.h"
 #include "mon/MonClient.h"
 #include "mds/events/EResetJournal.h"
-
-#include "Resetter.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -117,7 +120,6 @@ int Resetter::reset()
   journaler.set_read_pos(new_start);
   journaler.set_write_pos(new_start);
   journaler.set_expire_pos(new_start);
-  journaler.set_trimmed_pos(new_start);
   journaler.set_writeable();
 
   cout << "writing journal head" << std::endl;

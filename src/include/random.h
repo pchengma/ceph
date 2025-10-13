@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,9 +17,9 @@
 #define CEPH_RANDOM_H 1
 
 #include <mutex>
+#include <optional>
 #include <random>
 #include <type_traits>
-#include <boost/optional.hpp>
 
 // Workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85494
 #ifdef __MINGW32__
@@ -123,7 +124,7 @@ void randomize_rng()
 template <typename EngineT>
 EngineT& engine()
 {
-  thread_local boost::optional<EngineT> rng_engine;
+  thread_local std::optional<EngineT> rng_engine;
 
   if (!rng_engine) {
     rng_engine.emplace(EngineT());

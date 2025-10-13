@@ -1,8 +1,7 @@
-import { DebugElement, Type } from '@angular/core';
+import { CUSTOM_ELEMENTS_SCHEMA, DebugElement, NO_ERRORS_SCHEMA, Type } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { AbstractControl } from '@angular/forms';
 import { By } from '@angular/platform-browser';
-import { BrowserDynamicTestingModule } from '@angular/platform-browser-dynamic/testing';
 
 import { NgbModal, NgbNav, NgbNavItem, NgbNavLink } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
@@ -29,20 +28,12 @@ import {
   PrometheusRule
 } from '~/app/shared/models/prometheus-alerts';
 
-export function configureTestBed(configuration: any, entryComponents?: any) {
-  beforeEach(async () => {
-    if (entryComponents) {
-      // Declare entryComponents without having to add them to a module
-      // This is needed since Jest doesn't yet support not declaring entryComponents
-      await TestBed.configureTestingModule(configuration).overrideModule(
-        BrowserDynamicTestingModule,
-        {
-          set: { entryComponents: entryComponents }
-        }
-      );
-    } else {
-      await TestBed.configureTestingModule(configuration);
-    }
+export function configureTestBed(configuration: any) {
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      ...configuration,
+      schemas: [NO_ERRORS_SCHEMA, CUSTOM_ELEMENTS_SCHEMA]
+    });
   });
 }
 
@@ -355,7 +346,7 @@ export class PrometheusHelper {
   }
 
   createLink(url: string) {
-    return `<a href="${url}" target="_blank"><i class="${Icons.lineChart}"></i></a>`;
+    return `<a href="${url}" target="_blank"><svg cdsIcon="${Icons.lineChart}" size="${Icons.size16}" ></svg></a>`;
   }
 }
 
@@ -423,9 +414,10 @@ export class Mocks {
     return { name, type, type_id, id, children, device_class };
   }
 
-  static getPool = (name: string, id: number): Pool => {
+  static getPool = (name: string, id: number, application_metadata: string[] = ['rbd']): Pool => {
     return _.merge(new Pool(name), {
       pool: id,
+      application_metadata,
       type: 'replicated',
       pg_num: 256,
       pg_placement_num: 256,
@@ -661,24 +653,18 @@ export class TableActionHelper {
       [action: string]: { disabled: boolean; disableDesc: string };
     }
   ) => {
-    // click dropdown to update all actions buttons
-    const dropDownToggle = fixture.debugElement.query(By.css('.dropdown-toggle'));
-    dropDownToggle.triggerEventHandler('click', null);
-    fixture.detectChanges();
-    await fixture.whenStable();
-
+    const component = fixture.componentInstance;
+    const selection = component.selection;
     const tableActionElement = fixture.debugElement.query(By.directive(TableActionsComponent));
-    const toClassName = TestBed.inject(TableActionsComponent).toClassName;
-    const getActionElement = (action: CdTableAction) =>
-      tableActionElement.query(By.css(`[ngbDropdownItem].${toClassName(action)}`));
+    const tableActionComponent: TableActionsComponent = tableActionElement.componentInstance;
+    tableActionComponent.selection = selection;
 
     const actions = {};
     tableActions.forEach((action) => {
-      const actionElement = getActionElement(action);
       if (expectResult[action.name]) {
         actions[action.name] = {
-          disabled: actionElement.classes.disabled ? true : false,
-          disableDesc: actionElement.properties.title
+          disabled: tableActionComponent.disableSelectionAction(action),
+          disableDesc: tableActionComponent.useDisableDesc(action) || ''
         };
       }
     });

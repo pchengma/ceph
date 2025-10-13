@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -18,6 +18,8 @@
 #include "librbd/operation/EnableFeaturesRequest.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 namespace librbd {
 

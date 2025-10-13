@@ -23,9 +23,9 @@ The Ceph Metadata Server is necessary to run Ceph File System clients.
 
 .. ditaa::
 
-            +---------------+ +------------+ +------------+ +---------------+
-            |      OSDs     | | Monitors   | |  Managers  | |      MDSs     |
-            +---------------+ +------------+ +------------+ +---------------+
+            +------+ +----------+ +----------+ +-------+ +------+
+            | OSDs | | Monitors | | Managers | | MDSes | | RGWs |
+            +------+ +----------+ +----------+ +-------+ +------+
 
 - **Monitors**: A :term:`Ceph Monitor` (``ceph-mon``) maintains maps of the
   cluster state, including the :ref:`monitor map<display-mon-map>`, manager
@@ -40,8 +40,8 @@ The Ceph Metadata Server is necessary to run Ceph File System clients.
   state of the Ceph cluster, including storage utilization, current
   performance metrics, and system load.  The Ceph Manager daemons also
   host python-based modules to manage and expose Ceph cluster
-  information, including a web-based :ref:`mgr-dashboard` and
-  `REST API`_.  At least two managers are normally required for high
+  information, including a web-based :ref:`mgr-dashboard`.
+  At least two managers are normally required for high
   availability.
 
 - **Ceph OSDs**: An Object Storage Daemon (:term:`Ceph OSD`,
@@ -51,18 +51,20 @@ The Ceph Metadata Server is necessary to run Ceph File System clients.
   heartbeat. At least three Ceph OSDs are normally required for 
   redundancy and high availability.
 
-- **MDSs**: A :term:`Ceph Metadata Server` (MDS, ``ceph-mds``) stores metadata
+- **MDSes**: A :term:`Ceph Metadata Server` (MDS, ``ceph-mds``) stores metadata
   for the :term:`Ceph File System`. Ceph Metadata Servers allow CephFS users to
   run basic commands (like ``ls``, ``find``, etc.) without placing a burden on
   the Ceph Storage Cluster.
+
+- **RGWs**: A :term:`Ceph Object Gateway` (RGW, ``ceph-radosgw``) daemon provides
+  a RESTful gateway between applications and Ceph storage clusters. The
+  S3-compatible API is most commonly used, though Swift is also available.
 
 Ceph stores data as objects within logical storage pools. Using the
 :term:`CRUSH` algorithm, Ceph calculates which placement group (PG) should
 contain the object, and which OSD should store the placement group.  The
 CRUSH algorithm enables the Ceph Storage Cluster to scale, rebalance, and
 recover dynamically.
-
-.. _REST API: ../../mgr/restful
 
 .. container:: columns-2
 

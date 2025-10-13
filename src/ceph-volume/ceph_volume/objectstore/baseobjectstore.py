@@ -2,9 +2,11 @@ import logging
 import os
 import errno
 import time
+import tempfile
 from ceph_volume import conf, terminal, process
 from ceph_volume.util import prepare as prepare_utils
 from ceph_volume.util import system, disk
+from ceph_volume.util import encryption as encryption_utils
 from typing import Dict, Any, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,21 +24,29 @@ class BaseObjectStore:
         # for the OSD, this needs to be fixed. This could either be a file (!)
         # or a string (!!) or some flags that we would need to compound
         # into a dict so that we can convert to JSON (!!!)
-        self.secrets = {'cephx_secret': prepare_utils.create_key()}
-        self.cephx_secret = self.secrets.get('cephx_secret',
-                                             prepare_utils.create_key())
-        self.encrypted = 0
+        self.secrets: Dict[str, str] = {'cephx_secret': prepare_utils.create_key()}
+        self.cephx_secret: str = self.secrets.get('cephx_secret',
+                                                  prepare_utils.create_key())
+        self.encrypted: int = 0
         self.tags: Dict[str, Any] = {}
         self.osd_id: str = ''
-        self.osd_fsid = ''
-        self.block_lv: Optional["Volume"] = None
-        self.cephx_lockbox_secret = ''
-        self.objectstore: str = ''
+        self.osd_fsid: str = ''
+        self.cephx_lockbox_secret: str = ''
+        self.objectstore: str = getattr(args, "objectstore", '')
         self.osd_mkfs_cmd: List[str] = []
-        self.block_device_path = ''
-        if hasattr(self.args, 'dmcrypt'):
-            if self.args.dmcrypt:
-                self.encrypted = 1
+        self.block_device_path: str = ''
+        self.dmcrypt_key: str = encryption_utils.create_dmcrypt_key()
+        self.with_tpm: int = int(getattr(self.args, 'with_tpm', False))
+        self.method: str = ''
+        self.osd_path: str = ''
+        self.key: Optional[str] = None
+        self.block_device_path: str = ''
+        self.wal_device_path: str = ''
+        self.db_device_path: str = ''
+        self.block_lv: Optional[Volume] = None
+        if getattr(self.args, 'dmcrypt', False):
+            self.encrypted = 1
+            if not self.with_tpm:
                 self.cephx_lockbox_secret = prepare_utils.create_key()
                 self.secrets['cephx_lockbox_secret'] = \
                     self.cephx_lockbox_secret
@@ -60,11 +70,45 @@ class BaseObjectStore:
                             osd_uuid: str) -> Optional["Volume"]:
         raise NotImplementedError()
 
-    def safe_prepare(self, args: "argparse.Namespace") -> None:
+    def safe_prepare(self, args: Optional["argparse.Namespace"] = None) -> None:
         raise NotImplementedError()
 
     def add_objectstore_opts(self) -> None:
-        raise NotImplementedError()
+        """
+        Create the files for the OSD to function. A normal call will look like:
+
+            ceph-osd --cluster ceph --mkfs --mkkey -i 0 \
+                    --monmap /var/lib/ceph/osd/ceph-0/activate.monmap \
+                    --osd-data /var/lib/ceph/osd/ceph-0 \
+                    --osd-uuid 8d208665-89ae-4733-8888-5d3bfbeeec6c \
+                    --keyring /var/lib/ceph/osd/ceph-0/keyring \
+                    --setuser ceph --setgroup ceph
+
+        In some cases it is required to use the keyring, when it is passed
+        in as a keyword argument it is used as part of the ceph-osd command
+        """
+
+        if self.wal_device_path:
+            self.osd_mkfs_cmd.extend(
+                ['--bluestore-block-wal-path', self.wal_device_path]
+            )
+            system.chown(self.wal_device_path)
+
+        if self.db_device_path:
+            self.osd_mkfs_cmd.extend(
+                ['--bluestore-block-db-path', self.db_device_path]
+            )
+            system.chown(self.db_device_path)
+
+        if self.get_osdspec_affinity():
+            self.osd_mkfs_cmd.extend(['--osdspec-affinity',
+                                      self.get_osdspec_affinity()])
+
+    def unlink_bs_symlinks(self) -> None:
+        for link_name in ['block', 'block.db', 'block.wal']:
+            link_path = os.path.join(self.osd_path, link_name)
+            if os.path.exists(link_path):
+                os.unlink(os.path.join(self.osd_path, link_name))
 
     def prepare_osd_req(self, tmpfs: bool = True) -> None:
         # create the directory
@@ -112,10 +156,8 @@ class BaseObjectStore:
         ]
         if self.cephx_secret is not None:
             self.osd_mkfs_cmd.extend(['--keyfile', '-'])
-        try:
-            self.add_objectstore_opts()
-        except NotImplementedError:
-            logger.info("No specific objectstore options to add.")
+
+        self.add_objectstore_opts()
 
         self.osd_mkfs_cmd.extend(self.supplementary_command)
         return self.osd_mkfs_cmd
@@ -150,5 +192,69 @@ class BaseObjectStore:
                     raise RuntimeError('Command failed with exit code %s: %s' %
                                        (returncode, ' '.join(cmd)))
 
+        mapping: Dict[str, Any] = {'raw': ['data', 'block_db', 'block_wal'],
+                                   'lvm': ['ceph.block_device', 'ceph.db_device', 'ceph.wal_device']}
+        if self.args.dmcrypt:
+            for dev_type in mapping[self.method]:
+                if self.method == 'raw':
+                    path = self.args.__dict__.get(dev_type, None)
+                else:
+                    if self.block_lv is not None:
+                        path = self.block_lv.tags.get(dev_type, None)
+                    else:
+                        raise RuntimeError('Unexpected error while running bluestore mkfs.')
+                if path is not None:
+                    encryption_utils.CephLuks2(path).config_luks2({'subsystem': f'ceph_fsid={self.osd_fsid}'})
+
     def activate(self) -> None:
         raise NotImplementedError()
+
+    def activate_all(self) -> None:
+        raise NotImplementedError()
+
+    def enroll_tpm2(self, device: str) -> None:
+        """
+        Enrolls a device with TPM2 (Trusted Platform Module 2.0) using systemd-cryptenroll.
+        This method creates a temporary file to store the dmcrypt key and uses it to enroll the device.
+
+        Args:
+            device (str): The device path to be enrolled with TPM2.
+        """
+
+        if self.with_tpm:
+            tmp_dir: str = '/rootfs/tmp' if os.environ.get('I_AM_IN_A_CONTAINER', False) else '/tmp'
+            with tempfile.NamedTemporaryFile(mode='w', delete=True, dir=tmp_dir) as temp_file:
+                temp_file.write(self.dmcrypt_key)
+                temp_file.flush()
+                temp_file_name: str = temp_file.name.replace('/rootfs', '', 1)
+                cmd: List[str] = ['systemd-cryptenroll', '--tpm2-device=auto',
+                                  device, '--unlock-key-file', temp_file_name,
+                                  '--tpm2-pcrs', '9+12', '--wipe-slot', 'tpm2']
+                process.call(cmd, run_on_host=True, show_command=True)
+
+    def add_label(self, key: str,
+                  value: str,
+                  device: str) -> None:
+        """Add a label to a BlueStore device.
+        Args:
+            key (str): The name of the label being added.
+            value (str): Value of the label being added.
+            device (str): The path of the BlueStore device.
+        Raises:
+            RuntimeError: If `ceph-bluestore-tool` command doesn't success.
+        """
+
+        command: List[str] = ['ceph-bluestore-tool',
+                              'set-label-key',
+                              '-k',
+                              key,
+                              '-v',
+                              value,
+                              '--dev',
+                              device]
+
+        _, err, rc = process.call(command,
+                                  terminal_verbose=True,
+                                  show_command=True)
+        if rc:
+            raise RuntimeError(f"Can't add BlueStore label '{key}' to device {device}: {err}")

@@ -250,6 +250,9 @@
 /* we have a recent nasm and are x86_64 */
 #cmakedefine HAVE_NASM_X64
 
+/* nasm can also build the isa-l:avx2 */
+#cmakedefine HAVE_NASM_X64_AVX2
+
 /* nasm can also build the isa-l:avx512 */
 #cmakedefine HAVE_NASM_X64_AVX512
 
@@ -363,14 +366,17 @@
 /* Backend POSIX for Rados Gateway */
 #cmakedefine WITH_RADOSGW_POSIX
 
+/* Backend RADOS for Rados Gateway */
+#cmakedefine WITH_RADOSGW_RADOS
+
 /* Defined if std::map::merge() is supported */
 #cmakedefine HAVE_STDLIB_MAP_SPLICING
 
 /* Defined if Intel QAT compress/decompress is supported */
 #cmakedefine HAVE_QATZIP
 
-/* Define if seastar is available. */
-#cmakedefine HAVE_SEASTAR
+/* Defined if UADK compress/decompress is supported */
+#cmakedefine HAVE_UADK
 
 /* Define if unit tests are built. */
 #cmakedefine UNIT_TESTS_BUILT
@@ -390,10 +396,16 @@
 /* Define if libcryptsetup can be used (linux only) */
 #cmakedefine HAVE_LIBCRYPTSETUP
 
+/* Define if libnbd can be used */
+#cmakedefine HAVE_LIBNBD
+
 /* Shared library extension, such as .so, .dll or .dylib */
 #cmakedefine CMAKE_SHARED_LIBRARY_SUFFIX "@CMAKE_SHARED_LIBRARY_SUFFIX@"
 
 /* libexec directory path */
 #cmakedefine CMAKE_INSTALL_LIBEXECDIR "@CMAKE_INSTALL_LIBEXECDIR@"
+
+/* Define if breakpad is available */
+#cmakedefine HAVE_BREAKPAD
 
 #endif /* CONFIG_H */

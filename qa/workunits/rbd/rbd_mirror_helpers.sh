@@ -53,7 +53,7 @@
 #
 #   cd $CEPH_SRC_PATH
 #   RBD_MIRROR_TEMDIR=/tmp/tmp.rbd_mirror \
-#     ../qa/workunits/rbd_mirror_helpers.sh setup
+#     ../qa/workunits/rbd/rbd_mirror_helpers.sh setup
 #
 # Also you can execute commands (functions) from the script:
 #
@@ -69,17 +69,8 @@
 #
 #   cd $CEPH_SRC_PATH
 #   RBD_MIRROR_TEMDIR=/tmp/tmp.rbd_mirror \
-#     ../qa/workunits/rbd_mirror_helpers.sh cleanup
+#     ../qa/workunits/rbd/rbd_mirror_helpers.sh cleanup
 #
-
-if type xmlstarlet > /dev/null 2>&1; then
-    XMLSTARLET=xmlstarlet
-elif type xml > /dev/null 2>&1; then
-    XMLSTARLET=xml
-else
-    echo "Missing xmlstarlet binary!"
-    exit 1
-fi
 
 RBD_MIRROR_INSTANCES=${RBD_MIRROR_INSTANCES:-2}
 
@@ -222,7 +213,7 @@ setup_cluster()
 {
     local cluster=$1
 
-    CEPH_ARGS='' ${CEPH_SRC}/mstart.sh ${cluster} -n ${RBD_MIRROR_VARGS}
+    CEPH_ARGS='' MDS=0 ${CEPH_SRC}/mstart.sh ${cluster} -n ${RBD_MIRROR_VARGS} --without-dashboard
 
     cd ${CEPH_ROOT}
     rm -f ${TEMPDIR}/${cluster}.conf
@@ -308,9 +299,11 @@ setup_pools()
 
     rbd --cluster ${cluster} namespace create ${POOL}/${NS1}
     rbd --cluster ${cluster} namespace create ${POOL}/${NS2}
+    rbd --cluster ${cluster} namespace create ${PARENT_POOL}/${NS1}
 
     rbd --cluster ${cluster} mirror pool enable ${POOL}/${NS1} ${MIRROR_POOL_MODE}
     rbd --cluster ${cluster} mirror pool enable ${POOL}/${NS2} image
+    rbd --cluster ${cluster} mirror pool enable ${PARENT_POOL}/${NS1} ${MIRROR_POOL_MODE}
 
     if [ -z ${RBD_MIRROR_MANUAL_PEERS} ]; then
       if [ -z ${RBD_MIRROR_CONFIG_KEY} ]; then
@@ -535,11 +528,11 @@ status()
                 rbd --cluster ${cluster} -p ${image_pool} --namespace "${image_ns}" ls -l
                 echo
 
-                echo "${cluster} ${image_pool}${image_ns} mirror pool info"
+                echo "${cluster} ${image_pool} ${image_ns} mirror pool info"
                 rbd --cluster ${cluster} -p ${image_pool} --namespace "${image_ns}" mirror pool info
                 echo
 
-                echo "${cluster} ${image_pool}${image_ns} mirror pool status"
+                echo "${cluster} ${image_pool} ${image_ns} mirror pool status"
                 CEPH_ARGS='' rbd --cluster ${cluster} -p ${image_pool} --namespace "${image_ns}" mirror pool status --verbose
                 echo
 
@@ -752,17 +745,18 @@ wait_for_journal_replay_complete()
 {
     local local_cluster=$1
     local cluster=$2
-    local pool=$3
-    local image=$4
+    local local_pool=$3
+    local remote_pool=$4
+    local image=$5
     local s master_pos mirror_pos last_mirror_pos
     local master_tag master_entry mirror_tag mirror_entry
 
     while true; do
         for s in 0.2 0.4 0.8 1.6 2 2 4 4 8 8 16 16 32 32; do
             sleep ${s}
-            flush "${local_cluster}" "${pool}" "${image}"
-            master_pos=$(get_master_journal_position "${cluster}" "${pool}" "${image}")
-            mirror_pos=$(get_mirror_journal_position "${cluster}" "${pool}" "${image}")
+            flush "${local_cluster}" "${local_pool}" "${image}"
+            master_pos=$(get_master_journal_position "${cluster}" "${remote_pool}" "${image}")
+            mirror_pos=$(get_mirror_journal_position "${cluster}" "${remote_pool}" "${image}")
             test -n "${master_pos}" -a "${master_pos}" = "${mirror_pos}" && return 0
             test "${mirror_pos}" != "${last_mirror_pos}" && break
         done
@@ -805,21 +799,22 @@ wait_for_snapshot_sync_complete()
 {
     local local_cluster=$1
     local cluster=$2
-    local pool=$3
-    local image=$4
+    local local_pool=$3
+    local remote_pool=$4
+    local image=$5
 
-    local status_log=${TEMPDIR}/$(mkfname ${cluster}-${pool}-${image}.status)
-    local local_status_log=${TEMPDIR}/$(mkfname ${local_cluster}-${pool}-${image}.status)
+    local status_log=${TEMPDIR}/$(mkfname ${cluster}-${remote_pool}-${image}.status)
+    local local_status_log=${TEMPDIR}/$(mkfname ${local_cluster}-${local_pool}-${image}.status)
 
-    mirror_image_snapshot "${cluster}" "${pool}" "${image}"
-    get_newest_mirror_snapshot "${cluster}" "${pool}" "${image}" "${status_log}"
+    mirror_image_snapshot "${cluster}" "${remote_pool}" "${image}"
+    get_newest_mirror_snapshot "${cluster}" "${remote_pool}" "${image}" "${status_log}"
     local snapshot_id=$(xmlstarlet sel -t -v "//snapshot/id" < ${status_log})
 
     while true; do
         for s in 0.2 0.4 0.8 1.6 2 2 4 4 8 8 16 16 32 32; do
             sleep ${s}
 
-            get_newest_mirror_snapshot "${local_cluster}" "${pool}" "${image}" "${local_status_log}"
+            get_newest_mirror_snapshot "${local_cluster}" "${local_pool}" "${image}" "${local_status_log}"
             local primary_snapshot_id=$(xmlstarlet sel -t -v "//snapshot/namespace/primary_snap_id" < ${local_status_log})
 
             test "${snapshot_id}" = "${primary_snapshot_id}" && return 0
@@ -834,13 +829,14 @@ wait_for_replay_complete()
 {
     local local_cluster=$1
     local cluster=$2
-    local pool=$3
-    local image=$4
+    local local_pool=$3
+    local remote_pool=$4
+    local image=$5
 
     if [ "${RBD_MIRROR_MODE}" = "journal" ]; then
-        wait_for_journal_replay_complete ${local_cluster} ${cluster} ${pool} ${image}
+        wait_for_journal_replay_complete ${local_cluster} ${cluster} ${local_pool} ${remote_pool} ${image}
     elif [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
-        wait_for_snapshot_sync_complete ${local_cluster} ${cluster} ${pool} ${image}
+        wait_for_snapshot_sync_complete ${local_cluster} ${cluster} ${local_pool} ${remote_pool} ${image}
     else
         return 1
     fi
@@ -894,9 +890,9 @@ test_mirror_pool_status_verbose()
                  --verbose --format xml)
 
     local last_update state
-    last_update=$($XMLSTARLET sel -t -v \
+    last_update=$(xmlstarlet sel -t -v \
         "//images/image[name='${image}']/last_update" <<< "$status")
-    state=$($XMLSTARLET sel -t -v \
+    state=$(xmlstarlet sel -t -v \
         "//images/image[name='${image}']/state" <<< "$status")
 
     echo "${state}" | grep "${state_pattern}" ||
@@ -1258,6 +1254,15 @@ count_mirror_snaps()
         grep -c -F " mirror ("
 }
 
+get_snaps_json()
+{
+    local cluster=$1
+    local pool=$2
+    local image=$3
+
+    rbd --cluster ${cluster} snap ls ${pool}/${image} --all --format json
+}
+
 write_image()
 {
     local cluster=$1
@@ -1307,16 +1312,19 @@ show_diff()
 
 compare_images()
 {
-    local pool=$1
-    local image=$2
     local ret=0
+    local local_cluster=$1
+    local cluster=$2
+    local local_pool=$3
+    local remote_pool=$4
+    local image=$5
 
-    local rmt_export=${TEMPDIR}/$(mkfname ${CLUSTER2}-${pool}-${image}.export)
-    local loc_export=${TEMPDIR}/$(mkfname ${CLUSTER1}-${pool}-${image}.export)
+    local rmt_export=${TEMPDIR}/$(mkfname ${cluster}-${remote_pool}-${image}.export)
+    local loc_export=${TEMPDIR}/$(mkfname ${local_cluster}-${local_pool}-${image}.export)
 
     rm -f ${rmt_export} ${loc_export}
-    rbd --cluster ${CLUSTER2} export ${pool}/${image} ${rmt_export}
-    rbd --cluster ${CLUSTER1} export ${pool}/${image} ${loc_export}
+    rbd --cluster ${cluster} export ${remote_pool}/${image} ${rmt_export}
+    rbd --cluster ${local_cluster} export ${local_pool}/${image} ${loc_export}
     if ! cmp ${rmt_export} ${loc_export}
     then
         show_diff ${rmt_export} ${loc_export}
@@ -1337,7 +1345,7 @@ compare_image_snapshots()
 
     for snap_name in $(rbd --cluster ${CLUSTER1} --format xml \
                            snap list ${pool}/${image} | \
-                           $XMLSTARLET sel -t -v "//snapshot/name" | \
+                           xmlstarlet sel -t -v "//snapshot/name" | \
                            grep -E -v "^\.rbd-mirror\."); do
         rm -f ${rmt_export} ${loc_export}
         rbd --cluster ${CLUSTER2} export ${pool}/${image}@${snap_name} ${rmt_export}

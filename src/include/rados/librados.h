@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -155,6 +156,7 @@ enum {
   LIBRADOS_ALLOC_HINT_FLAG_LONGLIVED = 128,
   LIBRADOS_ALLOC_HINT_FLAG_COMPRESSIBLE = 256,
   LIBRADOS_ALLOC_HINT_FLAG_INCOMPRESSIBLE = 512,
+  LIBRADOS_ALLOC_HINT_FLAG_LOG = 1024,
 };
 /** @} */
 

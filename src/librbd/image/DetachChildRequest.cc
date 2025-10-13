@@ -1,8 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/image/DetachChildRequest.h"
 #include "common/dout.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/errno.h"
 #include "cls/rbd/cls_rbd_client.h"
 #include "librbd/ExclusiveLock.h"
@@ -13,6 +14,8 @@
 #include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/DisabledPolicy.h"
 #include "librbd/trash/RemoveRequest.h"
+
+#include <shared_mutex> // for std::shared_lock
 #include <string>
 
 #define dout_subsys ceph_subsys_rbd

@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -84,11 +84,13 @@ class SegmentAllocator : public JournalAllocator {
   // close the current segment and initialize next one
   roll_ertr::future<> roll() final;
 
+  journal_seq_t get_written_to() const final;
+
   // write the buffer, return the write result
   //
   // May be called concurrently, but writes may complete in any order.
   // If rolling/opening, no write is allowed.
-  write_ret write(ceph::bufferlist&& to_write) final;
+  write_ertr::future<> write(ceph::bufferlist&& to_write) final;
 
   using close_ertr = base_ertr;
   close_ertr::future<> close() final;

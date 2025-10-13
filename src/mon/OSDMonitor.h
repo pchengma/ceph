@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -213,7 +214,7 @@ public:
   OSDMap osdmap;
 
   // config observer
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
     const std::set<std::string> &changed) override;
   // [leader]
@@ -364,7 +365,7 @@ private:
    * @returns true if the map is passable, false otherwise
    */
   bool validate_crush_against_features(const CrushWrapper *newcrush,
-				       std::stringstream &ss);
+				       std::ostream &ss);
   void check_osdmap_subs();
   void share_map_with_random_osd();
 
@@ -741,6 +742,9 @@ public:
       std::stringstream &ss,
       ceph::Formatter *f);
 
+  int enable_pool_ec_optimizations(pg_pool_t &pool,
+                                   std::stringstream *ss,
+                                   bool enable);
   int prepare_command_pool_set(const cmdmap_t& cmdmap,
                                std::stringstream& ss);
 
@@ -751,6 +755,10 @@ public:
                                           const cmdmap_t& cmdmap,
                                           std::stringstream& ss,
                                           bool *modified);
+  int prepare_command_pool_stretch_set(const cmdmap_t& cmdmap,
+                               std::stringstream& ss);
+  int prepare_command_pool_stretch_unset(const cmdmap_t& cmdmap,
+                                std::stringstream& ss);
   int _command_pool_application(const std::string &prefix,
 				const cmdmap_t& cmdmap,
 				std::stringstream& ss,
@@ -840,6 +848,20 @@ public:
 			       uint32_t bucket_count,
 			       const std::set<pg_pool_t*>& pools,
 			       const std::string& new_crush_rule);
+  /**
+  *
+  * Set all stretch mode values of all pools back to pre-stretch mode values.
+  * Set all stretch mode values of OSDMap back to pre-stretch mode values.
+  * If crush_rule is not empty, set the crush rule to that value, else use
+  * the default replicated crush rule.
+  * @param ss: a stringstream to write errors into
+  * @param errcode: filled with -errno if there's a problem
+  * @param crush_rule: the crush rule that will used after disabling stretch mode
+  */
+  void try_disable_stretch_mode(std::stringstream& ss,
+          bool *okay,
+          int *errcode,
+          const std::string& crush_rule);
   /**
    * Check the input dead_buckets mapping (buckets->dead monitors) to see
    * if the OSDs are also down. If so, fill in really_down_buckets and

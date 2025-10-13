@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -63,8 +64,8 @@ TEST(LibCephFS, NewOPs)
   {
     char value[1024] = "";
     int r = ceph_getxattr(cmount, test_path, "ceph.dir.pin.random", (void*)value, sizeof(value));
-    // Clients will return -CEPHFS_ENODATA if new getvxattr op not support yet.
-    EXPECT_THAT(r, AnyOf(Gt(0), Eq(-CEPHFS_ENODATA)));
+    // Clients will return -ENODATA if new getvxattr op not support yet.
+    EXPECT_THAT(r, AnyOf(Gt(0), Eq(-ENODATA)));
   }
 
   {
@@ -72,13 +73,13 @@ TEST(LibCephFS, NewOPs)
     std::stringstream ss;
     ss << val;
     int r = ceph_setxattr(cmount, test_path, "ceph.dir.pin.random", (void*)ss.str().c_str(), strlen(ss.str().c_str()), XATTR_CREATE);
-    // Old cephs will return -CEPHFS_EINVAL if not support "ceph.dir.pin.random" yet.
-    EXPECT_THAT(r, AnyOf(Eq(0), Eq(-CEPHFS_EINVAL)));
+    // Old cephs will return -EINVAL if not support "ceph.dir.pin.random" yet.
+    EXPECT_THAT(r, AnyOf(Eq(0), Eq(-EINVAL)));
 
     char value[1024] = "";
     r = ceph_getxattr(cmount, test_path, "ceph.dir.pin.random", (void*)value, sizeof(value));
-    // Clients will return -CEPHFS_ENODATA if new getvxattr op not support yet.
-    EXPECT_THAT(r, AnyOf(Gt(0), Eq(-CEPHFS_ENODATA)));
+    // Clients will return -ENODATA if new getvxattr op not support yet.
+    EXPECT_THAT(r, AnyOf(Gt(0), Eq(-ENODATA)));
   }
 
   ASSERT_EQ(0, ceph_rmdir(cmount, test_path));

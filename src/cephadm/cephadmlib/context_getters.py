@@ -45,7 +45,7 @@ def _get_config_json(option: str) -> Dict[str, Any]:
         return js
 
 
-def get_parm(option: str) -> Dict[str, str]:
+def get_parm(option: str) -> Dict[str, Any]:
     js = _get_config_json(option)
     # custom_config_files is a special field that may be in the config
     # dict. It is used for mounting custom config files into daemon's containers
@@ -134,6 +134,24 @@ def fetch_endpoints(ctx: CephadmContext) -> List[EndPoint]:
             endpoints.append(EndPoint('0.0.0.0', port))
 
     return endpoints
+
+
+def fetch_rank_info(ctx: CephadmContext) -> Optional[Tuple[int, int]]:
+    """Return the daemon's rank and rank generation values as a tuple of ints
+    if available. Return None if rank information is not available.
+    """
+    meta = getattr(ctx, 'meta_properties', None)
+    if meta is None:
+        return None
+    # We must either return both rank *and* rank_generation together or
+    # nothing at all.
+    try:
+        rank, gen = meta['rank'], meta['rank_generation']
+    except KeyError:
+        return None
+    if rank is None or gen is None:
+        return None
+    return int(rank), int(gen)
 
 
 def get_config_and_keyring(ctx):

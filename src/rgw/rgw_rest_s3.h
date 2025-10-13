@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -42,6 +42,7 @@ protected:
   // Serving a custom error page from an object is really a 200 response with
   // just the status line altered.
   int custom_http_ret = 0;
+  bool checksum_mode{false};
   std::map<std::string, std::string> crypt_http_responses;
   int override_range_hdr(const rgw::auth::StrategyRegistry& auth_registry, optional_yield y);
 public:
@@ -130,10 +131,7 @@ public:
   RGWListBuckets_ObjStore_S3() {}
   ~RGWListBuckets_ObjStore_S3() override {}
 
-  int get_params(optional_yield y) override {
-    limit = -1; /* no limit */
-    return 0;
-  }
+  int get_params(optional_yield y) override;
   void send_response_begin(bool has_buckets) override;
   void send_response_data(std::span<const RGWBucketEnt> buckets) override;
   void send_response_end() override;
@@ -180,14 +178,6 @@ public:
   int get_params(optional_yield y) override;
   void send_response() override;
   void send_versioned_response();
-};
-
-class RGWGetBucketLogging_ObjStore_S3 : public RGWGetBucketLogging {
-public:
-  RGWGetBucketLogging_ObjStore_S3() {}
-  ~RGWGetBucketLogging_ObjStore_S3() override {}
-
-  void send_response() override;
 };
 
 class RGWGetBucketLocation_ObjStore_S3 : public RGWGetBucketLocation {
@@ -246,6 +236,7 @@ public:
   ~RGWStatBucket_ObjStore_S3() override {}
 
   void send_response() override;
+  int get_params(optional_yield y) override;
 };
 
 class RGWCreateBucket_ObjStore_S3 : public RGWCreateBucket_ObjStore {
@@ -302,6 +293,12 @@ class RGWPostObj_ObjStore_S3 : public RGWPostObj_ObjStore {
   std::string get_current_filename() const override;
   std::string get_current_content_type() const override;
 
+  inline void put_prop(const std::string_view k, const std::string_view v) {
+    /* assume the caller will mangle the key name, if required */
+    auto& map = const_cast<env_map_t&>(s->info.env->get_map());
+    map.insert(env_map_t::value_type(k, v));
+  }
+
 public:
   RGWPostObj_ObjStore_S3() {}
   ~RGWPostObj_ObjStore_S3() override {}
@@ -318,6 +315,16 @@ public:
   int get_data(ceph::bufferlist& bl, bool& again) override;
   int get_encrypt_filter(std::unique_ptr<rgw::sal::DataProcessor> *filter,
                          rgw::sal::DataProcessor *cb) override;
+};
+
+class RGWRestoreObj_ObjStore_S3 : public RGWRestoreObj_ObjStore {
+
+public:
+  RGWRestoreObj_ObjStore_S3() {}
+  ~RGWRestoreObj_ObjStore_S3() override {}
+
+  int get_params(optional_yield y) override;
+  void send_response() override;
 };
 
 class RGWDeleteObj_ObjStore_S3 : public RGWDeleteObj_ObjStore {
@@ -359,6 +366,18 @@ public:
                             RGWAccessControlPolicy& p) override;
   void send_response() override;
   int get_params(optional_yield y) override;
+};
+
+class RGWGetObjAttrs_ObjStore_S3 : public RGWGetObjAttrs_ObjStore {
+public:
+  RGWGetObjAttrs_ObjStore_S3() {}
+  ~RGWGetObjAttrs_ObjStore_S3() override {}
+
+  int get_params(optional_yield y) override;
+  int get_decrypt_filter(std::unique_ptr<RGWGetObj_Filter>* filter,
+                         RGWGetObj_Filter* cb,
+                         bufferlist* manifest_bl) override;
+  void send_response() override;
 };
 
 class RGWGetLC_ObjStore_S3 : public RGWGetLC_ObjStore {
@@ -442,6 +461,22 @@ public:
   RGWDeleteBucketEncryption_ObjStore_S3() {}
   ~RGWDeleteBucketEncryption_ObjStore_S3() override {}
 
+  void send_response() override;
+};
+
+class RGWGetBucketOwnershipControls_ObjStore_S3 : public RGWGetBucketOwnershipControls_ObjStore {
+ public:
+  void send_response() override;
+};
+
+class RGWPutBucketOwnershipControls_ObjStore_S3 : public RGWPutBucketOwnershipControls_ObjStore {
+  int get_params(optional_yield y) override;
+ public:
+  void send_response() override;
+};
+
+class RGWDeleteBucketOwnershipControls_ObjStore_S3 : public RGWDeleteBucketOwnershipControls_ObjStore {
+ public:
   void send_response() override;
 };
 
@@ -686,6 +721,9 @@ protected:
   bool is_acl_op() const {
     return s->info.args.exists("acl");
   }
+  bool is_attributes_op() const {
+    return s->info.args.exists("attributes");
+  }
   bool is_cors_op() const {
       return s->info.args.exists("cors");
   }
@@ -725,6 +763,9 @@ protected:
   bool is_bucket_encryption_op() {
     return s->info.args.exists("encryption");
   }
+  bool is_bucket_ownership_op() const {
+    return s->info.args.exists("ownershipControls");
+  }
 
   RGWOp *get_obj_op(bool get_data) const;
   RGWOp *op_get() override;
@@ -743,6 +784,9 @@ class RGWHandler_REST_Obj_S3 : public RGWHandler_REST_S3 {
 protected:
   bool is_acl_op() const {
     return s->info.args.exists("acl");
+  }
+  bool is_attributes_op() const {
+    return s->info.args.exists("attributes");
   }
   bool is_tagging_op() const {
     return s->info.args.exists("tagging");
@@ -1126,6 +1170,7 @@ public:
 };
 
 class LocalEngine : public AWSEngine {
+  typedef rgw::auth::IdentityApplier::aplptr_t aplptr_t;
   rgw::sal::Driver* driver;
   const rgw::auth::LocalApplier::Factory* const apl_factory;
 

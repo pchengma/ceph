@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -70,9 +70,8 @@ parallel_for_each(Iterator first, Iterator last, Func&& func) noexcept {
     auto f = seastar::futurize_invoke(std::forward<Func>(func), *first);
     if (!f.available() || f.failed()) {
       if (!s) {
-        using itraits = std::iterator_traits<Iterator>;
         auto n = (seastar::internal::iterator_range_estimate_vector_capacity(
-              first, last, typename itraits::iterator_category()) + 1);
+              first, last) + 1);
         s = new parallel_for_each_state<AllowedErrors...>(n);
       }
       s->add_future(std::move(f));
