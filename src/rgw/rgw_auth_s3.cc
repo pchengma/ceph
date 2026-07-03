@@ -5,6 +5,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <map>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1006,7 +1007,7 @@ get_v4_signature(const std::string_view& credential_scope,
   using srv_signature_t = AWSEngine::VersionAbstractor::server_signature_t;
   srv_signature_t signature(srv_signature_t::initialized_later(),
                             digest.SIZE * 2);
-  buf_to_hex(digest.v, digest.SIZE, signature.begin());
+  buf_to_hex(std::span{digest.v, digest.SIZE}, signature.begin());
 
   ldpp_dout(dpp, 10) << "generated signature = " << signature << dendl;
 
@@ -1024,12 +1025,13 @@ get_v2_signature(CephContext* const cct,
 
   const auto digest = calc_hmac_sha1(secret_key, string_to_sign);
 
-  /* 64 is really enough */;
-  char buf[64];
-  const int ret = ceph_armor(std::begin(buf),
-                             std::begin(buf) + 64,
-                             reinterpret_cast<const char *>(digest.v),
-                             reinterpret_cast<const char *>(digest.v + digest.SIZE));
+  /* Sized for signature */;
+  char buf[AWSEngine::VersionAbstractor::SIGNATURE_MAX_SIZE];
+  const int ret = ceph_armor(
+      std::begin(buf),
+      std::begin(buf) + AWSEngine::VersionAbstractor::SIGNATURE_MAX_SIZE,
+      reinterpret_cast<const char*>(digest.v),
+      reinterpret_cast<const char*>(digest.v + digest.SIZE));
   if (ret < 0) {
     ldout(cct, 10) << "ceph_armor failed" << dendl;
     throw ret;
@@ -1759,7 +1761,10 @@ void get_aws_version_and_auth_type(const req_state* s, string& aws_version, stri
       aws_version = "SigV2";
     }
   } else {
-    if (!s->info.args.get("x-amz-credential").empty()) {
+    // Expires is characteristic of the older Signature Version 2,
+    //  while X-Amz-Expires is used in Signature Version 4 (SigV4)
+    if (!s->info.args.get("x-amz-expires").empty() ||
+        !s->info.args.get("Expires").empty()) {
       auth_type = "QueryString";
       if (s->info.args.get("x-amz-algorithm") == AWS4_HMAC_SHA256_STR) {
       /* AWS v4 */

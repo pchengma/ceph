@@ -12,16 +12,15 @@ ifneq (,$(findstring WITH_STATIC_LIBSTDCXX,$(CEPH_EXTRA_CMAKE_ARGS)))
   # see http://tracker.ceph.com/issues/25209
   export DEB_LDFLAGS_MAINT_STRIP = -Wl,-Bsymbolic-functions
 endif
-ifeq (,$(findstring WITH_CRIMSON,$(CEPH_EXTRA_CMAKE_ARGS)))
-  export CEPH_OSD_BASENAME = ceph-osd
-else
-  export CEPH_OSD_BASENAME = crimson-osd
-endif
 ifneq ($(filter pkg.ceph.arrow,$(DEB_BUILD_PROFILES)),)
   extraopts += -DWITH_SYSTEM_ARROW=ON
 endif
+ifneq ($(filter pkg.ceph.crimson,$(DEB_BUILD_PROFILES)),)
+  extraopts += -DWITH_CRIMSON=ON
+endif
 
 extraopts += -DWITH_JAEGER=ON
+extraopts += -DWITH_SYSTEM_JERASURE=ON
 extraopts += -DWITH_SYSTEM_UTF8PROC=ON
 extraopts += -DWITH_OCF=ON -DWITH_LTTNG=ON
 extraopts += -DWITH_MGR_DASHBOARD_FRONTEND=OFF
@@ -30,6 +29,7 @@ extraopts += -DWITH_CEPHFS_JAVA=ON
 extraopts += -DWITH_CEPHFS_SHELL=ON
 extraopts += -DWITH_SYSTEMD=ON -DCEPH_SYSTEMD_ENV_DIR=/etc/default
 extraopts += -DWITH_GRAFANA=ON
+extraopts += -DCEPHADM_BUNDLED_DEPENDENCIES=deb
 ifeq ($(DEB_HOST_ARCH), amd64)
   extraopts += -DWITH_RBD_RWL=ON
 else
@@ -116,6 +116,8 @@ override_dh_strip:
 	dh_strip -pceph-exporter --dbg-package=ceph-exporter-dbg
 	dh_strip -pceph-mon --dbg-package=ceph-mon-dbg
 	dh_strip -pceph-osd --dbg-package=ceph-osd-dbg
+	dh_strip -pceph-osd-classic --dbg-package=ceph-osd-classic-dbg
+	dh_strip -pceph-osd-crimson --dbg-package=ceph-osd-crimson-dbg
 	dh_strip -pceph-base --dbg-package=ceph-base-dbg
 	dh_strip -pcephfs-mirror --dbg-package=cephfs-mirror-dbg
 	dh_strip -prbd-fuse --dbg-package=rbd-fuse-dbg

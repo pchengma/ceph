@@ -1,5 +1,5 @@
 import { DatePipe } from '@angular/common';
-import { Component, Input, NgZone, OnDestroy, OnInit } from '@angular/core';
+import { Component, Input, NgZone, OnDestroy, OnInit, ViewEncapsulation } from '@angular/core';
 
 import { NgbDateStruct } from '@ng-bootstrap/ng-bootstrap';
 import { Observable } from 'rxjs';
@@ -12,7 +12,9 @@ import { Icons } from '~/app/shared/enum/icons.enum';
 @Component({
   selector: 'cd-logs',
   templateUrl: './logs.component.html',
-  styleUrls: ['./logs.component.scss']
+  styleUrls: ['./logs.component.scss'],
+  encapsulation: ViewEncapsulation.None,
+  standalone: false
 })
 export class LogsComponent implements OnInit, OnDestroy {
   @Input()
@@ -190,5 +192,9 @@ export class LogsComponent implements OnInit, OnDestroy {
         '\n';
     }
     return logText;
+  }
+
+  trackByLogEntry(index: number, entry: any): string {
+    return `${entry.stamp}-${index}`;
   }
 }

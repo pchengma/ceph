@@ -35,7 +35,8 @@ public:
 
   virtual writer_stats_t get_stats() const = 0;
 
-  using open_ertr = base_ertr;
+  using open_ertr = base_ertr::extend<
+    crimson::ct_error::enospc>;
   virtual open_ertr::future<> open() = 0;
 
   virtual paddr_t alloc_paddr(extent_len_t length) = 0;
@@ -68,7 +69,8 @@ using ExtentOolWriterRef = std::unique_ptr<ExtentOolWriter>;
  */
 class SegmentedOolWriter : public ExtentOolWriter {
 public:
-  SegmentedOolWriter(data_category_t category,
+  SegmentedOolWriter(store_index_t store_index,
+                     data_category_t category,
                      rewrite_gen_t gen,
                      SegmentProvider &sp,
                      SegmentSeqAllocator &ssa);
@@ -82,7 +84,7 @@ public:
   }
 
   open_ertr::future<> open() final {
-    return record_submitter.open(false).discard_result();
+    return record_submitter.open(store_index, false).discard_result();
   }
 
   alloc_write_iertr::future<> alloc_write_ool_extents(
@@ -121,6 +123,7 @@ private:
     std::list<LogicalCachedExtentRef> &&extents,
     bool with_atomic_roll_segment=false);
 
+  store_index_t store_index;
   journal::SegmentAllocator segment_allocator;
   journal::RecordSubmitter record_submitter;
   seastar::gate write_guard;
@@ -268,10 +271,12 @@ class ExtentPlacementManager {
 public:
   ExtentPlacementManager(
     rewrite_gen_t hot_tier_generations,
-    rewrite_gen_t cold_tier_generations)
+    rewrite_gen_t cold_tier_generations,
+    store_index_t store_index)
     : hot_tier_generations(hot_tier_generations),
       cold_tier_generations(cold_tier_generations),
       dynamic_max_rewrite_generation(cold_tier_generations),
+      store_index(store_index),
       ool_segment_seq_allocator(
           std::make_unique<SegmentSeqAllocator>(segment_type_t::OOL)),
       max_data_allocation_size(crimson::common::get_conf<Option::size_t>(
@@ -330,7 +335,7 @@ public:
       crimson::ct_error::input_output_error>;
   using mount_ret = mount_ertr::future<>;
   mount_ret mount() {
-    return background_process.mount();
+    return background_process.mount(store_index);
   }
 
   using open_ertr = ExtentOolWriter::open_ertr;
@@ -511,7 +516,7 @@ public:
    */
   alloc_paddr_iertr::future<> write_preallocated_ool_extents(
     Transaction &t,
-    std::list<CachedExtentRef> extents);
+    std::list<CachedExtentRef> &extents);
 
   seastar::future<> stop_background() {
     return background_process.stop_background();
@@ -528,6 +533,13 @@ public:
   ) {
     assert(devices_by_id[addr.get_device_id()] != nullptr);
     return devices_by_id[addr.get_device_id()]->read(addr, len, out);
+  }
+
+  read_ertr::future<> readv(
+    paddr_t addr,
+    std::vector<bufferptr> ptrs) {
+    assert(devices_by_id[addr.get_device_id()] != nullptr);
+    return devices_by_id[addr.get_device_id()]->readv(addr, std::move(ptrs));
   }
 
   void mark_space_used(paddr_t addr, extent_len_t len) {
@@ -559,6 +571,13 @@ public:
     return primary_device->get_backend_type();
   }
 
+
+  bool is_pure_rbm() const {
+    return get_main_backend_type() == backend_type_t::RANDOM_BLOCK &&
+      // as of now, cold tier can only be segmented.
+      !background_process.has_cold_tier();
+  }
+
   // Testing interfaces
 
   void test_init_no_background(Device *test_device) {
@@ -573,6 +592,10 @@ public:
 
   seastar::future<> run_background_work_until_halt() {
     return background_process.run_until_halt();
+  }
+
+  seastar::future<> run_cleaner_until_done() {
+    return background_process.run_cleaner_until_done();
   }
 
   bool get_checksum_needed(paddr_t addr) {
@@ -738,6 +761,11 @@ private:
       return trimmer->get_backend_type();
     }
 
+    const segments_info_t* get_segments_info() const {
+      assert(main_cleaner);
+      return main_cleaner->get_segments_info();
+    }
+
     bool has_cold_tier() const {
       return cold_cleaner.get() != nullptr;
     }
@@ -758,18 +786,7 @@ private:
       return stat;
     }
 
-    using mount_ret = ExtentPlacementManager::mount_ret;
-    mount_ret mount() {
-      ceph_assert(state == state_t::STOP);
-      state = state_t::MOUNT;
-      trimmer->reset();
-      stats = {};
-      register_metrics();
-      return main_cleaner->mount(
-      ).safe_then([this] {
-        return has_cold_tier() ? cold_cleaner->mount() : mount_ertr::now();
-      });
-    }
+    ExtentPlacementManager::mount_ret mount(store_index_t store_index);
 
     void start_scan_space() {
       ceph_assert(state == state_t::MOUNT);
@@ -860,12 +877,14 @@ private:
     // Testing interfaces
 
     bool check_usage() {
-      return main_cleaner->check_usage() &&
-        (!has_cold_tier() || cold_cleaner->check_usage());
+      return main_cleaner->check_usage(has_cold_tier()) &&
+        (!has_cold_tier() || cold_cleaner->check_usage(true));
     }
 
     seastar::future<> run_until_halt();
-    
+
+    seastar::future<> run_cleaner_until_done();
+
     bool is_no_background() const {
       return !trimmer || !main_cleaner;
     }
@@ -1078,7 +1097,7 @@ private:
 
     seastar::future<> do_background_cycle();
 
-    void register_metrics();
+    void register_metrics(store_index_t store_index);
 
     struct {
       uint64_t io_blocking_num = 0;
@@ -1086,6 +1105,8 @@ private:
       uint64_t io_blocked_count = 0;
       uint64_t io_blocked_count_trim = 0;
       uint64_t io_blocked_count_clean = 0;
+      uint64_t io_retried_blocked_count_trim = 0;
+      uint64_t io_retried_blocked_count_clean = 0;
       uint64_t io_blocked_sum = 0;
       uint64_t io_blocked_time = 0;
     } stats;
@@ -1103,6 +1124,11 @@ private:
     std::optional<seastar::future<>> process_join;
     std::optional<seastar::promise<>> blocking_background;
     std::optional<seastar::promise<>> blocking_io;
+    // Set by maybe_wake_blocked_io() whenever it actually unblocks a
+    // user IO; consumed by run() to yield exactly once on that edge,
+    // giving the woken continuation a chance to retry the reservation
+    // before the next background cycle.
+    bool pending_user_io_wake = false;
     bool is_running_until_halt = false;
     state_t state = state_t::STOP;
     eviction_state_t eviction_state;
@@ -1124,6 +1150,7 @@ private:
   const rewrite_gen_t cold_tier_generations = NULL_GENERATION;
   rewrite_gen_t dynamic_max_rewrite_generation = NULL_GENERATION;
   BackgroundProcess background_process;
+  store_index_t store_index = 0;
   // TODO: drop once paddr->journal_seq_t is introduced
   SegmentSeqAllocatorRef ool_segment_seq_allocator;
   extent_len_t max_data_allocation_size = 0;

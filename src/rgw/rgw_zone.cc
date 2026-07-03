@@ -2,21 +2,20 @@
 // vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <optional>
+#include <boost/algorithm/string.hpp>
 
 #include "common/errno.h"
 
 #include "rgw_zone.h"
 #include "rgw_sal.h"
 #include "rgw_sal_config.h"
-#include "rgw_sync.h"
+#include "driver/rados/rgw_sync.h"
 
 #include "services/svc_zone.h"
 
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
-
-RGWMetaSyncStatusManager::~RGWMetaSyncStatusManager(){}
 
 #define FIRST_EPOCH 1
 
@@ -168,6 +167,7 @@ void RGWZoneParams::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("topics_pool", topics_pool, obj);
   JSONDecoder::decode_json("account_pool", account_pool, obj);
   JSONDecoder::decode_json("group_pool", group_pool, obj);
+  JSONDecoder::decode_json("bucket_logging_pool", bucket_logging_pool, obj);
   JSONDecoder::decode_json("system_key", system_key, obj);
   JSONDecoder::decode_json("placement_pools", placement_pools, obj);
   JSONDecoder::decode_json("tier_config", tier_config, obj);
@@ -198,6 +198,7 @@ void RGWZoneParams::dump(Formatter *f) const
   encode_json("topics_pool", topics_pool, f);
   encode_json("account_pool", account_pool, f);
   encode_json("group_pool", group_pool, f);
+  encode_json("bucket_logging_pool", bucket_logging_pool, f);
   encode_json_plain("system_key", system_key, f);
   encode_json("placement_pools", placement_pools, f);
   encode_json("tier_config", tier_config, f);
@@ -245,6 +246,7 @@ void add_zone_pools(const RGWZoneParams& info,
   pools.insert(info.dedup_pool);
   pools.insert(info.gc_pool);
   pools.insert(info.log_pool);
+  pools.insert(info.bucket_logging_pool);
   pools.insert(info.intent_log_pool);
   pools.insert(info.usage_log_pool);
   pools.insert(info.user_keys_pool);
@@ -606,7 +608,14 @@ void RGWZoneStorageClasses::decode_json(JSONObj *obj)
 void RGWZoneGroupTierS3Glacier::dump(Formatter *f) const
 {
   encode_json("glacier_restore_days", glacier_restore_days, f);
-  string s = (glacier_restore_tier_type == Standard ? "Standard" : "Expedited");
+  string s;
+  if (glacier_restore_tier_type == Expedited) {
+    s = "Expedited";
+  } else if (glacier_restore_tier_type == NoTier) {
+    s = "NoTier";
+  } else {
+    s = "Standard";
+  }
   encode_json("glacier_restore_tier_type", s, f);
 }
 
@@ -615,10 +624,12 @@ void RGWZoneGroupTierS3Glacier::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("glacier_restore_days", glacier_restore_days, obj);
   string s;
   JSONDecoder::decode_json("glacier_restore_tier_type", s, obj);
-  if (s != "Expedited") {
-    glacier_restore_tier_type = Standard;
-  } else {
+  if (s == "Expedited") {
     glacier_restore_tier_type = Expedited;
+  } else if (s == "NoTier") {
+    glacier_restore_tier_type = NoTier;
+  } else {
+    glacier_restore_tier_type = Standard;
   }
 }
 
@@ -652,11 +663,70 @@ void RGWZoneGroupPlacementTierS3::decode_json(JSONObj *obj)
   } else {
     host_style = VirtualStyle;
   }
+  JSONDecoder::decode_json("location_constraint", location_constraint, obj);
   JSONDecoder::decode_json("target_storage_class", target_storage_class, obj);
   JSONDecoder::decode_json("target_path", target_path, obj);
+  JSONDecoder::decode_json("target_by_bucket", target_by_bucket, obj);
+  JSONDecoder::decode_json("target_by_bucket_prefix", target_by_bucket_prefix, obj);
   JSONDecoder::decode_json("acl_mappings", acl_mappings, obj);
   JSONDecoder::decode_json("multipart_sync_threshold", multipart_sync_threshold, obj);
   JSONDecoder::decode_json("multipart_min_part_size", multipart_min_part_size, obj);
+}
+
+std::string RGWZoneGroupPlacementTierS3::make_target_bucket_name(
+    const std::string& zonegroup_name,
+    const std::string& storage_class,
+    const std::string& bucket_name,
+    const std::string& tenant,
+    const std::string& owner) const
+{
+  auto substitute = [](std::string& target, const std::string& placeholder,
+                       const std::string& value) {
+    size_t pos = 0;
+    while ((pos = target.find(placeholder, pos)) != std::string::npos) {
+      target.replace(pos, placeholder.size(), value);
+      pos += value.size();
+    }
+  };
+
+  const bool has_custom_target = !target_path.empty();
+  const bool has_custom_bucket_prefix = !target_by_bucket_prefix.empty();
+
+  std::string templ;
+
+  if (target_by_bucket) {
+    if (has_custom_bucket_prefix) {
+      templ = target_by_bucket_prefix;
+    } else {
+      templ = "rgwx-${zonegroup}-${storage_class}-${bucket}";
+    }
+  } else {
+    if (has_custom_target) {
+      templ = target_path;
+    } else {
+      templ = "rgwx-${zonegroup}-${storage_class}-cloud-bucket";
+    }
+  }
+
+  if (target_by_bucket) {
+    const bool has_bucket_token = templ.find("${bucket}") != std::string::npos;
+    substitute(templ, "${bucket}", bucket_name);
+    if (!has_bucket_token) {
+      if (!templ.empty() && templ.back() != '-' && templ.back() != '/') {
+        templ.push_back('-');
+      }
+      templ.append(bucket_name);
+    }
+    substitute(templ, "${tenant}", tenant);
+    substitute(templ, "${owner}", owner);
+  }
+
+  substitute(templ, "${zonegroup}", zonegroup_name);
+  substitute(templ, "${storage_class}", storage_class);
+
+  boost::algorithm::to_lower(templ);
+
+  return templ;
 }
 
 void RGWZoneStorageClass::dump(Formatter *f) const
@@ -709,8 +779,11 @@ void RGWZoneGroupPlacementTierS3::dump(Formatter *f) const
   encode_json("region", region, f);
   string s = (host_style == PathStyle ? "path" : "virtual");
   encode_json("host_style", s, f);
+  encode_json("location_constraint", location_constraint, f);
   encode_json("target_storage_class", target_storage_class, f);
   encode_json("target_path", target_path, f);
+  encode_json("target_by_bucket", target_by_bucket, f);
+  encode_json("target_by_bucket_prefix", target_by_bucket_prefix, f);
   encode_json("acl_mappings", acl_mappings, f);
   encode_json("multipart_sync_threshold", multipart_sync_threshold, f);
   encode_json("multipart_min_part_size", multipart_min_part_size, f);
@@ -836,6 +909,7 @@ int init_zone_pool_names(const DoutPrefixProvider *dpp, optional_yield y,
   info.otp_pool = fix_zone_pool_dup(pools, info.name, ".rgw.otp", info.otp_pool);
   info.oidc_pool = fix_zone_pool_dup(pools, info.name, ".rgw.meta:oidc", info.oidc_pool);
   info.notif_pool = fix_zone_pool_dup(pools, info.name, ".rgw.log:notif", info.notif_pool);
+  info.bucket_logging_pool = fix_zone_pool_dup(pools, info.name, ".rgw.log:logging", info.bucket_logging_pool);
   info.topics_pool =
       fix_zone_pool_dup(pools, info.name, ".rgw.meta:topics", info.topics_pool);
   info.account_pool = fix_zone_pool_dup(pools, info.name, ".rgw.meta:accounts", info.account_pool);
@@ -964,7 +1038,9 @@ int add_zone_to_group(const DoutPrefixProvider* dpp, RGWZoneGroup& zonegroup,
   }
 
   // add/remove supported features
-  zone.supported_features.insert(enable_features.begin(),
+  zone.supported_features.insert(boost::container::ordered_unique_range,
+                                 enable_features.begin(),
+
                                  enable_features.end());
 
   for (const auto& feature : disable_features) {
@@ -1054,6 +1130,19 @@ int create_realm(const DoutPrefixProvider* dpp, optional_yield y,
           << " with " << cpp_strerror(r) << dendl;
       return r;
     }
+
+    r = cfgstore->update_latest_epoch(dpp, y, period->id, period->epoch);
+    if (r == -EEXIST) {
+      // already have this epoch (or a more recent one)
+      ldpp_dout(dpp, -1) << "already have epoch >= " << period->get_epoch()
+          << " for period " << period->get_id() << dendl;
+      return 0;
+    }
+    if (r < 0) {
+      ldpp_dout(dpp, -1) << "Error updating latest epoch for period " << period->get_id() <<
+      ": " << cpp_strerror(r) << dendl;
+      return r;
+    }
   }
 
   // update the realm's current_period
@@ -1124,11 +1213,29 @@ int reflect_period(const DoutPrefixProvider* dpp, optional_yield y,
   }
 
   for (auto& [zonegroup_id, zonegroup] : info.period_map.zonegroups) {
-    r = cfgstore->create_zonegroup(dpp, y, exclusive, zonegroup, nullptr);
-    if (r < 0) {
-      ldpp_dout(dpp, -1) << __func__ << " failed to store zonegroup id="
-          << zonegroup_id << " with " << cpp_strerror(r) << dendl;
-      return r;
+    // read the existing zonegroup to detect renames
+    RGWZoneGroup existing_zg;
+    std::unique_ptr<sal::ZoneGroupWriter> writer;
+    r = cfgstore->read_zonegroup_by_id(dpp, y, zonegroup_id, existing_zg, &writer);
+    if (r == 0 && existing_zg.name != zonegroup.name) {
+      // if the name changed, call rename() instead of create
+      RGWZoneGroup new_zg = zonegroup; // copy because zonegroup is const
+      std::string new_name = std::move(new_zg.name);
+      new_zg.name = std::move(existing_zg.name); // rename() expects current name in info
+      r = writer->rename(dpp, y, new_zg, new_name);
+      if (r < 0) {
+        ldpp_dout(dpp, -1) << __func__ << " failed to rename zonegroup from "
+            << existing_zg.name << " to " << new_name
+            << ": " << cpp_strerror(r) << dendl;
+        return r;
+      }
+    } else {
+      r = cfgstore->create_zonegroup(dpp, y, exclusive, zonegroup, nullptr);
+      if (r < 0) {
+        ldpp_dout(dpp, -1) << __func__ << " failed to store zonegroup id="
+            << zonegroup_id << " with " << cpp_strerror(r) << dendl;
+        return r;
+      }
     }
     if (zonegroup.is_master) {
       // set master as default if no default exists
@@ -1281,6 +1388,19 @@ int commit_period(const DoutPrefixProvider* dpp, optional_yield y,
       ldpp_dout(dpp, 0) << "failed to create new period: " << cpp_strerror(-r) << dendl;
       return r;
     }
+    r = cfgstore->update_latest_epoch(dpp, y, info.id, info.epoch);
+    if (r == -EEXIST) {
+      // already have this epoch (or a more recent one)
+      ldpp_dout(dpp, 0) << "already have epoch >= " << info.get_epoch()
+          << " for period " << info.get_id() << dendl;
+      return 0;
+    }
+    if (r < 0) {
+      ldpp_dout(dpp, 0) << "Error updating latest epoch for period " << info.get_id() <<
+      ": " << cpp_strerror(r) << dendl;
+      return r;
+    }
+
     // set as current period
     r = realm_set_current_period(dpp, y, cfgstore, realm_writer, realm, info);
     if (r < 0) {
@@ -1312,6 +1432,19 @@ int commit_period(const DoutPrefixProvider* dpp, optional_yield y,
     ldpp_dout(dpp, 0) << "failed to store period: " << cpp_strerror(r) << dendl;
     return r;
   }
+  r = cfgstore->update_latest_epoch(dpp, y, info.id, info.epoch);
+  if (r == -EEXIST) {
+    // already have this epoch (or a more recent one)
+    ldpp_dout(dpp, 0) << "already have epoch >= " << info.get_epoch()
+        << " for period " << info.get_id() << dendl;
+    return 0;
+  }
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "Error updating latest epoch for period " << info.get_id() <<
+    ": " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
   r = reflect_period(dpp, y, cfgstore, info);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "failed to update local objects: " << cpp_strerror(r) << dendl;
@@ -1950,6 +2083,19 @@ int RGWZoneGroupPlacementTierS3::update_params(const JSONFormattable& config)
   if (config.exists("target_path")) {
     target_path = config["target_path"];
   }
+  if (config.exists("target_by_bucket")) {
+    string s = config["target_by_bucket"];
+    target_by_bucket = (s == "true");
+  }
+  if (config.exists("target_by_bucket_prefix")) {
+    target_by_bucket_prefix = config["target_by_bucket_prefix"];
+  }
+  if (target_by_bucket) {
+    if (!target_by_bucket_prefix.empty() &&
+        target_by_bucket_prefix.find('/') != std::string::npos) {
+      ldout(g_ceph_context, 1) << "cloud tier target_by_bucket_prefix contains '/', which may be invalid for bucket names" << dendl;
+    }
+  }
   if (config.exists("region")) {
     region = config["region"];
   }
@@ -1961,6 +2107,9 @@ int RGWZoneGroupPlacementTierS3::update_params(const JSONFormattable& config)
     } else {
       host_style = VirtualStyle;
     }
+  }
+  if (config.exists("location_constraint")) {
+    location_constraint = config["location_constraint"];
   }
   if (config.exists("target_storage_class")) {
     target_storage_class = config["target_storage_class"];
@@ -2014,6 +2163,12 @@ int RGWZoneGroupPlacementTierS3::clear_params(const JSONFormattable& config)
   if (config.exists("target_path")) {
     target_path.clear();
   }
+  if (config.exists("target_by_bucket")) {
+    target_by_bucket = false;
+  }
+  if (config.exists("target_by_bucket_prefix")) {
+    target_by_bucket_prefix.clear();
+  }
   if (config.exists("region")) {
     region.clear();
   }
@@ -2023,6 +2178,9 @@ int RGWZoneGroupPlacementTierS3::clear_params(const JSONFormattable& config)
   }
   if (config.exists("target_storage_class")) {
     target_storage_class.clear();
+  }
+  if (config.exists("location_constraint")) {
+    location_constraint.clear();
   }
   if (config.exists("access_key")) {
     key.id.clear();
@@ -2066,10 +2224,12 @@ int RGWZoneGroupTierS3Glacier::update_params(const JSONFormattable& config)
   if (config.exists("glacier_restore_tier_type")) {
     string s;
     s = config["glacier_restore_tier_type"];
-    if (s != "Expedited") {
-      glacier_restore_tier_type = Standard;
-    } else {
+    if (s == "Expedited") {
       glacier_restore_tier_type = Expedited;
+    } else if (s == "NoTier") {
+      glacier_restore_tier_type = NoTier;
+    } else {
+      glacier_restore_tier_type = Standard;
     }
   }
   return 0;

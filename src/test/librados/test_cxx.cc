@@ -14,13 +14,16 @@
 #include <time.h>
 #include <unistd.h>
 #include <iostream>
+
+#include "test.h"
 #include "gtest/gtest.h"
+#include "common/ceph_json.h"
 
 using namespace librados;
 
 std::string create_one_pool_pp(const std::string &pool_name, Rados &cluster)
 {
-    return create_one_pool_pp(pool_name, cluster, {});
+  return create_one_pool_pp(pool_name, cluster, {});
 }
 std::string create_one_pool_pp(const std::string &pool_name, Rados &cluster,
                                const std::map<std::string, std::string> &config)
@@ -53,9 +56,8 @@ int destroy_rule_pp(Rados &cluster,
                        const std::string &rule,
                        std::ostream &oss)
 {
-  bufferlist inbl;
   int ret = cluster.mon_command("{\"prefix\": \"osd crush rule rm\", \"name\":\"" +
-                                rule + "\"}", inbl, NULL, NULL);
+                                rule + "\"}", {}, NULL, NULL);
   if (ret)
     oss << "mon_command: osd crush rule rm " + rule + " failed with error " << ret << std::endl;
   return ret;
@@ -64,11 +66,33 @@ int destroy_rule_pp(Rados &cluster,
 int destroy_ec_profile_pp(Rados &cluster, const std::string& pool_name,
 			  std::ostream &oss)
 {
-  bufferlist inbl;
   int ret = cluster.mon_command("{\"prefix\": \"osd erasure-code-profile rm\", \"name\": \"testprofile-" + pool_name + "\"}",
-                                inbl, NULL, NULL);
+                                {}, NULL, NULL);
   if (ret)
     oss << "mon_command: osd erasure-code-profile rm testprofile-" << pool_name << " failed with error " << ret << std::endl;
+  return ret;
+}
+
+int set_config(Rados &cluster, const std::string& who, const std::string& name, const std::string &val) {
+  int ret = cluster.mon_command("{\"prefix\": \"config set\", \"who\": \"" + who + "\", "
+    + "\"name\": \"" + name + "\", "
+    + "\"value\": \"" + val + "\"}",
+    {}, NULL, NULL);
+  if (ret != 0) {
+    return ret;
+  }
+  /* Wait for the config option to reach this client! */
+  std::string actual_val;
+  // This can be quite slow, so we allow 100s.
+  int retries = 100;
+  do {
+    if (--retries <= 0) {
+      return -ETIMEDOUT;
+    }
+    sleep(1);
+    cluster.conf_get("rados_osd_op_timeout", actual_val);
+  } while (actual_val != val);
+
   return ret;
 }
 
@@ -83,23 +107,54 @@ int destroy_ec_profile_and_rule_pp(Rados &cluster,
   return destroy_rule_pp(cluster, rule, oss);
 }
 
-std::string create_one_ec_pool_pp(const std::string &pool_name, Rados &cluster)
+std::string create_one_ec_pool_pp(const std::string &pool_name,
+  Rados &cluster, bool optimised_ec, bool enable_omap)
 {
   std::string err = connect_cluster_pp(cluster);
   if (err.length())
     return err;
 
-  std::ostringstream oss;
-  int ret = destroy_ec_profile_and_rule_pp(cluster, pool_name, oss);
+  err = create_ec_pool_pp(pool_name, cluster, optimised_ec, enable_omap);
+  if (err.length()) {
+    cluster.shutdown();
+    return err;
+  }
+
+  return err;
+}
+
+std::string create_pool_pp(const std::string &pool_name, Rados &cluster) {
+  int ret = cluster.pool_create(pool_name.c_str());
   if (ret) {
     cluster.shutdown();
+    std::ostringstream oss;
+    oss << "cluster.pool_create(" << pool_name << ") failed with error " << ret;
     return oss.str();
   }
 
-  bufferlist inbl;
+  IoCtx ioctx;
+  ret = cluster.ioctx_create(pool_name.c_str(), ioctx);
+  if (ret < 0) {
+    cluster.shutdown();
+    std::ostringstream oss;
+    oss << "cluster.ioctx_create(" << pool_name << ") failed with error "
+        << ret;
+    return oss.str();
+  }
+  ioctx.application_enable("rados", true);
+  return "";
+}
+
+std::string create_ec_pool_pp(const std::string &pool_name, Rados &cluster, bool optimised_ec, bool enable_omap) {
+  std::ostringstream oss;
+  int ret = destroy_ec_profile_and_rule_pp(cluster, pool_name, oss);
+  if (ret) {
+    return oss.str();
+  }
+
   ret = cluster.mon_command(
     "{\"prefix\": \"osd erasure-code-profile set\", \"name\": \"testprofile-" + pool_name + "\", \"profile\": [ \"k=2\", \"m=1\", \"crush-failure-domain=osd\"]}",
-    inbl, NULL, NULL);
+    {}, NULL, NULL);
   if (ret) {
     cluster.shutdown();
     oss << "mon_command erasure-code-profile set name:testprofile-" << pool_name << " failed with error " << ret;
@@ -108,26 +163,69 @@ std::string create_one_ec_pool_pp(const std::string &pool_name, Rados &cluster)
     
   ret = cluster.mon_command(
     "{\"prefix\": \"osd pool create\", \"pool\": \"" + pool_name + "\", \"pool_type\":\"erasure\", \"pg_num\":8, \"pgp_num\":8, \"erasure_code_profile\":\"testprofile-" + pool_name + "\"}",
-    inbl, NULL, NULL);
+    {}, NULL, NULL);
   if (ret) {
-    bufferlist inbl;
     destroy_ec_profile_pp(cluster, pool_name, oss);
-    cluster.shutdown();
     oss << "mon_command osd pool create pool:" << pool_name << " pool_type:erasure failed with error " << ret;
     return oss.str();
+  }
+
+  if (optimised_ec) {
+    bufferlist inbl;
+    ret = cluster.mon_command(
+      "{\"prefix\": \"osd pool set\", \"pool\": \"" + pool_name +
+      "\", \"var\": \"allow_ec_optimizations\", \"val\": \"true\"}",
+      std::move(inbl), nullptr, nullptr);
+    if (ret) {
+      destroy_one_ec_pool_pp(pool_name, cluster);
+      destroy_ec_profile_pp(cluster, pool_name, oss);
+      oss << "rados_mon_command osd pool set failed with error " << ret;
+      return oss.str();
+    }
+
+    if (enable_omap) {
+      bufferlist inbl, outbl;
+      std::ostringstream oss;
+      oss << "{\"prefix\": \"osd pool set\", \"pool\": \"" << pool_name
+          << "\", \"var\": \"supports_omap\", \"val\": \"true\"}";
+      ret = cluster.mon_command(oss.str(), std::move(inbl), &outbl, nullptr);
+      if (ret) {
+        destroy_one_ec_pool_pp(pool_name, cluster);
+        destroy_ec_profile_pp(cluster, pool_name, oss);
+        oss << "rados_mon_command osd pool set failed with error " << ret;
+        return oss.str();
+      }
+    }
   }
 
   cluster.wait_for_latest_osdmap();
   return "";
 }
 
+std::string set_pool_flags_pp(const std::string &pool_name, librados::Rados &cluster, int64_t flags, bool set_not_unset) {
+  std::ostringstream oss;
+
+  std::string cmdstr = fmt::format(
+      R"({{"prefix": "osd pool set", "pool": "{}", "var": "{}", "val": "{}", "yes_i_really_mean_it": true}})",
+      pool_name,
+      (set_not_unset ? "set_pool_flags" : "unset_pool_flags"),
+      flags
+  );
+
+  int ret = cluster.mon_command(std::move(cmdstr), {}, NULL, NULL);
+  if (ret) {
+    oss << "rados_mon_command osd pool set set_pool_flags_pp failed with error " << ret;
+  }
+
+  return oss.str();
+}
+
 std::string set_allow_ec_overwrites_pp(const std::string &pool_name, Rados &cluster, bool allow)
 {
   std::ostringstream oss;
-  bufferlist inbl;
   int ret = cluster.mon_command(
     "{\"prefix\": \"osd pool set\", \"pool\": \"" + pool_name + "\", \"var\": \"allow_ec_overwrites\", \"val\": \"" + (allow ? "true" : "false") + "\"}",
-    inbl, NULL, NULL);
+    {}, NULL, NULL);
   if (ret) {
     cluster.shutdown();
     oss << "mon_command osd pool set pool:" << pool_name << " pool_type:erasure allow_ec_overwrites true failed with error " << ret;
@@ -215,4 +313,8 @@ int destroy_one_ec_pool_pp(const std::string &pool_name, Rados &cluster)
   cluster.wait_for_latest_osdmap();
   cluster.shutdown();
   return ret;
+}
+
+int destroy_pool_pp(const std::string &pool_name, Rados &cluster) {
+  return cluster.pool_delete(pool_name.c_str());
 }

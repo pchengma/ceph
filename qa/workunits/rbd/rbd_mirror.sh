@@ -274,6 +274,60 @@ wait_for_replaying_status_in_pool_dir ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+stopped'
 compare_images ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${image}
 
+if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
+  testlog "TEST: failover / failback loop with snapshot presence checks"
+  snap_id_1=""
+  demote_snap_id_1=""
+  snap_id_2=""
+  demote_snap_id_2=""
+  get_newest_complete_mirror_snapshot_id ${CLUSTER2} ${POOL} ${image} snap_id_2
+  for i in `seq 1 5`; do
+    demote_image ${CLUSTER2} ${POOL} ${image}
+    wait_for_image_replay_stopped ${CLUSTER1} ${POOL} ${image}
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+unknown'
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+unknown'
+    get_newest_complete_mirror_snapshot_id ${CLUSTER2} ${POOL} ${image} demote_snap_id_2
+    wait_for_non_primary_snap_present ${CLUSTER1} ${POOL} ${image} ${demote_snap_id_2}
+    wait_for_non_primary_snap_not_present ${CLUSTER1} ${POOL} ${image} ${snap_id_2}
+
+    promote_image ${CLUSTER1} ${POOL} ${image}
+    wait_for_image_replay_started ${CLUSTER2} ${POOL} ${image}
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+stopped'
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+replaying'
+    get_newest_complete_mirror_snapshot_id ${CLUSTER1} ${POOL} ${image} snap_id_1
+    wait_for_non_primary_snap_present ${CLUSTER2} ${POOL} ${image} ${snap_id_1}
+    wait_for_snap_not_present ${CLUSTER2} ${POOL} ${image} ${snap_id_2}
+    wait_for_snap_not_present ${CLUSTER2} ${POOL} ${image} ${demote_snap_id_2}
+
+    demote_image ${CLUSTER1} ${POOL} ${image}
+    wait_for_non_primary_snap_not_present ${CLUSTER1} ${POOL} ${image} ${demote_snap_id_2}
+    wait_for_image_replay_stopped ${CLUSTER2} ${POOL} ${image}
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+unknown'
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+unknown'
+    get_newest_complete_mirror_snapshot_id ${CLUSTER1} ${POOL} ${image} demote_snap_id_1
+    wait_for_non_primary_snap_present ${CLUSTER2} ${POOL} ${image} ${demote_snap_id_1}
+    wait_for_non_primary_snap_not_present ${CLUSTER2} ${POOL} ${image} ${snap_id_1}
+
+    promote_image ${CLUSTER2} ${POOL} ${image}
+    wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+stopped'
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying'
+    get_newest_complete_mirror_snapshot_id ${CLUSTER2} ${POOL} ${image} snap_id_2
+    wait_for_non_primary_snap_present ${CLUSTER1} ${POOL} ${image} ${snap_id_2}
+    wait_for_snap_not_present ${CLUSTER1} ${POOL} ${image} ${snap_id_1}
+    wait_for_snap_not_present ${CLUSTER1} ${POOL} ${image} ${demote_snap_id_1}
+  done
+  # expected snapshot in non-primary image: non-primary
+  SNAPS=$(get_snaps_json ${CLUSTER1} ${POOL} ${image})
+  jq -e 'length == 1' <<< ${SNAPS}
+  jq -e '.[0].namespace["type"] == "mirror" and .[0].namespace["state"] == "non-primary"' <<< ${SNAPS}
+  # expected snapshots in primary image: non-primary demoted, primary
+  SNAPS=$(get_snaps_json ${CLUSTER2} ${POOL} ${image})
+  jq -e 'length == 2' <<< ${SNAPS}
+  jq -e '.[0].namespace["type"] == "mirror" and .[0].namespace["state"] == "demoted" and (.[0]["name"] | startswith(".mirror.non_primary"))' <<< ${SNAPS}
+  jq -e '.[1].namespace["type"] == "mirror" and .[1].namespace["state"] == "primary"' <<< ${SNAPS}
+fi
+
 testlog "TEST: failover / failback loop"
 for i in `seq 1 20`; do
   demote_image ${CLUSTER2} ${POOL} ${image}
@@ -299,6 +353,35 @@ done
 if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
   test "$(count_mirror_snaps ${CLUSTER1} ${POOL} ${image})" -le 3
   test "$(count_mirror_snaps ${CLUSTER2} ${POOL} ${image})" -le 3
+fi
+
+if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
+  testlog "TEST: demote and promote on same cluster in loop"
+  for i in `seq 1 20`; do
+    last_demote_snap_id=''
+    demote_image ${CLUSTER2} ${POOL} ${image}
+    wait_for_image_replay_stopped ${CLUSTER1} ${POOL} ${image}
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+unknown'
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+unknown'
+    get_newest_complete_mirror_snapshot_id ${CLUSTER2} ${POOL} ${image} last_demote_snap_id
+    wait_for_non_primary_snap_present ${CLUSTER1} ${POOL} ${image} ${last_demote_snap_id}
+
+    promote_image ${CLUSTER2} ${POOL} ${image}
+    wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${image} 'up+stopped'
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying'
+    # check non-primary demote snapshot is removed
+    wait_for_non_primary_snap_not_present ${CLUSTER1} ${POOL} ${image} ${last_demote_snap_id}
+  done
+  # expected snapshots on CLUSTER1: non-primary
+  SNAPS=$(get_snaps_json ${CLUSTER1} ${POOL} ${image})
+  jq -e 'length == 1' <<< ${SNAPS}
+  jq -e '.[0].namespace["type"] == "mirror" and .[0].namespace["state"] == "non-primary"' <<< ${SNAPS}
+  # expected snapshots on CLUSTER2: primary demoted, primary
+  SNAPS=$(get_snaps_json ${CLUSTER2} ${POOL} ${image})
+  jq -e 'length == 2' <<< ${SNAPS}
+  jq -e '.[0].namespace["type"] == "mirror" and .[0].namespace["state"] == "demoted" and (.[0]["name"] | startswith(".mirror.primary"))' <<< ${SNAPS}
+  jq -e '.[1].namespace["type"] == "mirror" and .[1].namespace["state"] == "primary"' <<< ${SNAPS}
 fi
 
 testlog "TEST: force promote"
@@ -525,6 +608,31 @@ unprotect_snapshot ${CLUSTER2} ${POOL} ${image4} 'snap2'
 for i in ${image2} ${image4}; do
   remove_image_retry ${CLUSTER2} ${POOL} ${i}
 done
+
+if [ -z "${RBD_MIRROR_USE_RBD_MIRROR}" ]; then
+  testlog "TEST: demote image while daemon is offline"
+  demote_image=test_demote_image
+  create_image_and_enable_mirror ${CLUSTER2} ${POOL} ${demote_image} ${RBD_MIRROR_MODE}
+  write_image ${CLUSTER2} ${POOL} ${demote_image} 100
+  wait_for_image_replay_stopped ${CLUSTER2} ${POOL} ${demote_image}
+  wait_for_image_replay_started ${CLUSTER1} ${POOL} ${demote_image}
+  wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${demote_image}
+  wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${demote_image} 'up+replaying'
+  wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${demote_image} 'up+stopped'
+  stop_mirrors ${CLUSTER1}
+  write_image ${CLUSTER2} ${POOL} ${demote_image} 100
+  demote_image ${CLUSTER2} ${POOL} ${demote_image}
+  start_mirrors ${CLUSTER1}
+  wait_for_snapshot_sync_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${demote_image}
+  wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${demote_image} 'up+unknown'
+  wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${demote_image} 'up+unknown'
+  compare_images ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${demote_image}
+  promote_image ${CLUSTER1} ${POOL} ${demote_image}
+  wait_for_image_replay_started ${CLUSTER2} ${POOL} ${demote_image}
+  wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${demote_image} 'up+stopped'
+  wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${demote_image} 'up+replaying'
+  remove_image_retry ${CLUSTER1} ${POOL} ${demote_image}
+fi
 
 if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
   testlog "TEST: request image resync when remote is not primary"
@@ -798,6 +906,37 @@ if [ -z "${RBD_MIRROR_USE_RBD_MIRROR}" ]; then
   CEPH_ARGS='--id admin' ceph --cluster ${CLUSTER2} osd blocklist ls 2>&1 | grep -q "listed 0 entries"
 fi
 
+if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
+  if [ -z "${RBD_MIRROR_USE_RBD_MIRROR}" ]; then
+    testlog "TEST: test partially synced demote snapshot sync after daemon restart"
+    demote_image=test_demote_image
+    create_image_and_enable_mirror ${CLUSTER2} ${POOL} ${demote_image} ${RBD_MIRROR_MODE} 10G
+    write_image ${CLUSTER2} ${POOL} ${demote_image} 100
+    wait_for_image_replay_stopped ${CLUSTER2} ${POOL} ${demote_image}
+    wait_for_image_replay_started ${CLUSTER1} ${POOL} ${demote_image}
+    wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${demote_image}
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${demote_image} 'up+replaying'
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${demote_image} 'up+stopped'
+    write_image ${CLUSTER2} ${POOL} ${demote_image} 2560 4194304
+    demote_image ${CLUSTER2} ${POOL} ${demote_image}
+    get_newest_complete_mirror_snapshot_id ${CLUSTER2} ${POOL} ${demote_image} primary_snap_id
+    wait_for_non_primary_snap_present ${CLUSTER1} ${POOL} ${demote_image} ${primary_snap_id}
+    stop_mirrors ${CLUSTER1} -KILL
+    SNAPS=$(get_snaps_json ${CLUSTER1} ${POOL} ${demote_image})
+    jq -e '.[-1].namespace["type"] == "mirror" and .[-1].namespace["state"] == "demoted" and .[-1].namespace["complete"] == false' <<< ${SNAPS}
+    start_mirrors ${CLUSTER1}
+    wait_for_snapshot_sync_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${demote_image}
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${demote_image} 'up+unknown'
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${demote_image} 'up+unknown'
+    compare_images ${CLUSTER1} ${CLUSTER2} ${POOL} ${POOL} ${demote_image}
+    promote_image ${CLUSTER1} ${POOL} ${demote_image}
+    wait_for_image_replay_started ${CLUSTER2} ${POOL} ${demote_image}
+    wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${demote_image} 'up+stopped'
+    wait_for_status_in_pool_dir ${CLUSTER2} ${POOL} ${demote_image} 'up+replaying'
+    remove_image_retry ${CLUSTER1} ${POOL} ${demote_image}
+  fi
+fi
+
 testlog "TEST: force promote with a user snapshot"
 force_promote_image=test_force_promote_user
 create_image_and_enable_mirror ${CLUSTER2} ${POOL} ${force_promote_image} ${RBD_MIRROR_MODE} 10G
@@ -814,7 +953,7 @@ if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
   mirror_image_snapshot ${CLUSTER2} ${POOL} ${force_promote_image}
 fi
 wait_for_snap_present ${CLUSTER1} ${POOL} ${force_promote_image} 'snap1'
-sleep $((1 + RANDOM % 5))
+sleep 1
 stop_mirrors ${CLUSTER1} -KILL
 if [ "${RBD_MIRROR_MODE}" = "snapshot" ]; then
   SNAPS=$(get_snaps_json ${CLUSTER1} ${POOL} ${force_promote_image})

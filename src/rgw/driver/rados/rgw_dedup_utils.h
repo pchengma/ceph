@@ -19,22 +19,26 @@
 #include "common/Formatter.h"
 #include "common/ceph_json.h"
 #include <time.h>
+#include <chrono>
 #include "include/utime.h"
 #include "include/encoding.h"
 #include "common/dout.h"
 
 #define FULL_DEDUP_SUPPORT
+
 namespace rgw::dedup {
+  using namespace std::chrono;
   using work_shard_t   = uint16_t;
   using md5_shard_t    = uint16_t;
 
+  const uint64_t MICROSECONDS_PER_SECOND = 1000000;
   // settings to help debug small systems
   const work_shard_t MIN_WORK_SHARD = 2;
   const md5_shard_t  MIN_MD5_SHARD  = 4;
 
   // Those are the correct values for production system
   const work_shard_t MAX_WORK_SHARD = 255;
-  const md5_shard_t  MAX_MD5_SHARD  = 512;
+  const md5_shard_t  MAX_MD5_SHARD  = 2048;
 
   const work_shard_t NULL_WORK_SHARD = 0xFFFF;
   const md5_shard_t  NULL_MD5_SHARD  = 0xFFFF;
@@ -53,37 +57,105 @@ namespace rgw::dedup {
   static_assert(MAX_MD5_SHARD  < NULL_SHARD);
   static_assert(MAX_MD5_SHARD  <= MD5_SHARD_HARD_LIMIT);
 
+  // Limit the number of duplicates allowed per unique object to control
+  // the number of ref_count entries in the SRC-OBJ
+  const uint8_t MAX_COPIES_PER_OBJ = 128;
+
   //---------------------------------------------------------------------------
   enum dedup_req_type_t {
     DEDUP_TYPE_NONE     = 0,
     DEDUP_TYPE_ESTIMATE = 1,
-    DEDUP_TYPE_FULL     = 2
+    DEDUP_TYPE_EXEC     = 2
   };
 
   std::ostream& operator<<(std::ostream &out, const dedup_req_type_t& dedup_type);
-  struct __attribute__ ((packed)) dedup_flags_t {
-  private:
-    static constexpr uint8_t RGW_DEDUP_FLAG_HASH_CALCULATED = 0x01; // REC
-    static constexpr uint8_t RGW_DEDUP_FLAG_SHARED_MANIFEST   = 0x02; // REC + TAB
-    static constexpr uint8_t RGW_DEDUP_FLAG_OCCUPIED          = 0x04; // TAB
-    static constexpr uint8_t RGW_DEDUP_FLAG_FASTLANE          = 0x08; // REC
 
+  class alignas(8) Throttle {
+    friend void validate_max_calls_offset();
   public:
-    dedup_flags_t() : flags(0) {}
-    dedup_flags_t(uint8_t _flags) : flags(_flags) {}
-    inline void clear() { this->flags = 0; }
-    inline bool hash_calculated() const { return ((flags & RGW_DEDUP_FLAG_HASH_CALCULATED) != 0); }
-    inline void set_hash_calculated()  { flags |= RGW_DEDUP_FLAG_HASH_CALCULATED; }
-    inline bool has_shared_manifest() const { return ((flags & RGW_DEDUP_FLAG_SHARED_MANIFEST) != 0); }
-    inline void set_shared_manifest() { flags |= RGW_DEDUP_FLAG_SHARED_MANIFEST; }
-    inline bool is_occupied() const {return ((this->flags & RGW_DEDUP_FLAG_OCCUPIED) != 0); }
-    inline void set_occupied() {this->flags |= RGW_DEDUP_FLAG_OCCUPIED; }
-    inline void clear_occupied() { this->flags &= ~RGW_DEDUP_FLAG_OCCUPIED; }
-    inline bool is_fastlane()  const { return ((flags & RGW_DEDUP_FLAG_FASTLANE) != 0); }
-    inline void set_fastlane()  { flags |= RGW_DEDUP_FLAG_FASTLANE; }
+    // @max_calls_per_sec - max requests per second allowed, 0 means unlimited
+    // disbaled by default
+    Throttle(size_t max_calls_per_sec=0) {
+      set_max_calls_per_sec(max_calls_per_sec);
+      reset();
+    }
+
+    // set the number of calls per second
+    // zero means unlimited
+    inline void set_max_calls_per_sec(uint32_t max_calls_per_sec) {
+      max_calls = max_calls_per_sec;
+    }
+
+    inline size_t get_max_calls_per_second() const {
+      return max_calls;
+    }
+
+    inline uint64_t get_sleep_events() const {
+      return sleep_events;
+    }
+
+    inline uint64_t get_sleep_time_usec() const {
+      return sleep_time_usec;
+    }
+
+    inline void disable() {
+      set_max_calls_per_sec(0);
+    }
+
+    inline bool is_disabled() const {
+      return (max_calls == 0);
+    }
+
+    // Blocks until allowed to proceed
+    void acquire() {
+      if (is_disabled()) {
+        return;
+      }
+      // Should work fine without atomic since acquire is single threaded
+      const steady_clock::time_point now = steady_clock::now();
+      uint64_t elapsed_usec = duration_cast<microseconds>(now - last_reset).count();
+      if (elapsed_usec >= MICROSECONDS_PER_SECOND || last_reset > now) {
+        // Renew tokens if a second (or more) has passed since last_reset
+        reset();
+        --tokens;
+        return;
+      }
+
+      if (tokens > 0) {
+        --tokens;
+        return;
+      }
+
+      // if reached here, all tokens were exhausted, wait for the next time slot
+      ceph_assert(MICROSECONDS_PER_SECOND > elapsed_usec);
+      uint64_t wait_time_usec = MICROSECONDS_PER_SECOND - elapsed_usec;
+      sleep_events ++;
+      sleep_time_usec += wait_time_usec;
+
+      std::this_thread::sleep_for(microseconds(wait_time_usec));
+      // After sleeping, reset and return
+      reset();
+      tokens --;
+    }
+
   private:
-    uint8_t flags;
-  };
+    void reset() {
+      // atomic operation because it is 8 Bytes aligned
+      tokens = max_calls;
+      last_reset = steady_clock::now();
+    }
+
+    // @max_calls must be the first data member to guarantee 8 Bytes alignment
+    uint32_t max_calls;
+    uint32_t tokens;
+    steady_clock::time_point last_reset;
+    uint64_t sleep_events = 0;
+    uint64_t sleep_time_usec = 0;
+  } __attribute__ ((aligned (8)));
+
+  void validate_max_calls_offset();
+  void encode(const Throttle& t, ceph::bufferlist& bl);
+  void decode(Throttle& t, ceph::bufferlist::const_iterator& bl);
 
   struct dedup_stats_t {
     dedup_stats_t& operator+=(const dedup_stats_t& other);
@@ -100,13 +172,16 @@ namespace rgw::dedup {
 
   struct worker_stats_t {
     worker_stats_t& operator +=(const worker_stats_t& other);
-    void dump(Formatter *f) const;
+    void dump(Formatter *f, unsigned num_shards = 0) const;
 
     uint64_t ingress_obj = 0;
     uint64_t ingress_obj_bytes = 0;
     uint64_t egress_records = 0;
     uint64_t egress_blocks = 0;
     uint64_t egress_slabs = 0;
+    uint64_t write_slab_failure = 0;
+    uint64_t bidx_throttle_sleep_events = 0;
+    uint64_t bidx_throttle_sleep_time_usec = 0;
 
     uint64_t single_part_objs = 0;
     uint64_t multipart_objs = 0;
@@ -123,8 +198,8 @@ namespace rgw::dedup {
     uint64_t ingress_skip_too_small_bytes = 0;
     uint64_t ingress_skip_too_small = 0;
 
-    uint64_t ingress_skip_too_small_64KB_bytes = 0;
-    uint64_t ingress_skip_too_small_64KB = 0;
+    uint64_t ingress_skip_filtered_bucket = 0;
+    uint64_t ingress_skip_filtered_storage_class = 0;
 
     utime_t  duration = {0, 0};
   };
@@ -137,8 +212,8 @@ namespace rgw::dedup {
     md5_stats_t& operator +=(const md5_stats_t& other);
     void dump(Formatter *f) const;
 
-    dedup_stats_t small_objs_stat;
     dedup_stats_t big_objs_stat;
+    uint64_t ingress_slabs = 0;
     uint64_t ingress_failed_load_bucket = 0;
     uint64_t ingress_failed_get_object = 0;
     uint64_t ingress_failed_get_obj_attrs = 0;
@@ -149,12 +224,15 @@ namespace rgw::dedup {
     uint64_t ingress_skip_compressed = 0;
     uint64_t ingress_skip_compressed_bytes = 0;
     uint64_t ingress_skip_changed_objs = 0;
+    uint64_t ingress_skip_explicit_objs = 0;
+    uint64_t ingress_skip_alibaba = 0;
 
     uint64_t shared_manifest_dedup_bytes = 0;
     uint64_t skipped_shared_manifest = 0;
     uint64_t skipped_purged_small = 0;
     uint64_t skipped_singleton = 0;
     uint64_t skipped_singleton_bytes = 0;
+    uint64_t skipped_too_many_copies = 0;
     uint64_t skipped_source_record = 0;
     uint64_t duplicate_records = 0;
     uint64_t size_mismatch = 0;
@@ -163,21 +241,37 @@ namespace rgw::dedup {
     uint64_t failed_rec_load = 0;
     uint64_t failed_block_load = 0;
 
+    uint64_t different_storage_class = 0;
+    uint64_t invalid_hash_no_split_head = 0;
+    uint64_t invalid_storage_class_mapping = 0;
+    uint64_t singleton_after_purge = 0;
+    uint64_t shared_manifest_after_purge = 0;
+    uint64_t split_head_no_tail_placement = 0;
+    uint64_t illegal_rec_id = 0;
+    uint64_t missing_last_block_marker = 0;
+
     uint64_t valid_hash_attrs = 0;
     uint64_t invalid_hash_attrs = 0;
     uint64_t set_hash_attrs = 0;
+    uint64_t skip_shared_tail_objs = 0;
     uint64_t skip_hash_cmp = 0;
-
+    uint64_t manifest_raw_obj = 0;
+    uint64_t manifest_no_tail_placement = 0;
+    uint64_t rollback_tail_obj = 0;
+    uint64_t failed_split_head_creat = 0;
+    uint64_t split_head_src = 0;
+    uint64_t split_head_tgt = 0;
+    uint64_t split_head_dedup_bytes = 0;
     uint64_t set_shared_manifest_src = 0;
     uint64_t loaded_objects = 0;
     uint64_t processed_objects = 0;
     // counter is using on-disk size affected by block-size
-    uint64_t dup_head_bytes_estimate = 0; //duplicate_head_bytes
     uint64_t deduped_objects = 0;
     // counter is using s3 byte size disregarding the on-disk size affected by block-size
     uint64_t deduped_objects_bytes = 0;
-    uint64_t dup_head_bytes = 0;
     uint64_t failed_dedup = 0;
+    uint64_t md_throttle_sleep_events = 0;
+    uint64_t md_throttle_sleep_time_usec = 0;
     uint64_t failed_table_load = 0;
     uint64_t failed_map_overflow = 0;
     utime_t  duration = {0, 0};
@@ -218,15 +312,39 @@ namespace rgw::dedup {
   }
 
   enum urgent_msg_t {
-    URGENT_MSG_NONE    = 0,
-    URGENT_MSG_ABORT   = 1,
-    URGENT_MSG_PASUE   = 2,
-    URGENT_MSG_RESUME  = 3,
-    URGENT_MSG_RESTART = 4,
-    URGENT_MSG_INVALID = 5
+    URGENT_MSG_NONE = 0,
+    URGENT_MSG_ABORT,
+    URGENT_MSG_PASUE,
+    URGENT_MSG_RESUME,
+    URGENT_MSG_RESTART,
+    URGENT_MSG_THROTTLE,
+    URGENT_MSG_INVALID
+  };
+  const char* get_urgent_msg_names(int msg);
+  enum op_type_t {
+    NO_OP = 0,
+    BUCKET_INDEX_OP,
+    METADATA_ACCESS_OP,
+    DATA_READ_WRITE_OP,
+    STAT,
+    INVALID_OP
   };
 
-  const char* get_urgent_msg_names(int msg);
+  struct throttle_action_t {
+    op_type_t op_type;
+    uint32_t  limit;
+  };
+  void encode(const throttle_action_t& m, ceph::bufferlist& bl);
+  void decode(throttle_action_t& m, ceph::bufferlist::const_iterator& bl);
+  std::ostream& operator<<(std::ostream &out, const throttle_action_t& action);
+  struct throttle_msg_t {
+    std::vector<throttle_action_t> vec;
+  };
+
+  std::ostream& operator<<(std::ostream &out, const throttle_msg_t& msg);
+  void encode(const throttle_msg_t& m, ceph::bufferlist& bl);
+  void decode(throttle_msg_t& m, ceph::bufferlist::const_iterator& bl);
+
   bool hex2int(const char *p, const char *p_end, uint64_t *p_val);
   bool parse_etag_string(const std::string& etag, parsed_etag_t *parsed_etag);
   void etag_to_bufferlist(uint64_t md5_high, uint64_t md5_low, uint16_t num_parts,
@@ -237,15 +355,19 @@ namespace rgw::dedup {
                                 const DoutPrefixProvider* dpp);
 
   //---------------------------------------------------------------------------
-  static inline void build_oid(const std::string &bucket_id,
-                               const std::string &obj_name,
-                               std::string *oid)
+  static inline bool dedupable_object(bool     multipart_object,
+                                      uint64_t min_obj_size_for_dedup,
+                                      uint64_t object_byte_size)
   {
-    *oid = bucket_id + "_" + obj_name;
+    // all multipart objects are dedupable because the head-object is empty
+    // otherwise make sure object_byte_size is large enough
+    return (multipart_object || object_byte_size >= min_obj_size_for_dedup);
   }
 
   //---------------------------------------------------------------------------
-  static inline uint64_t calc_deduped_bytes(uint64_t head_obj_size,
+  static inline uint64_t calc_deduped_bytes(uint32_t head_obj_size,
+                                            uint32_t min_obj_size_for_dedup,
+                                            bool     split_head,
                                             uint16_t num_parts,
                                             uint64_t size_bytes)
   {
@@ -253,14 +375,16 @@ namespace rgw::dedup {
       // multipart objects with an empty head i.e. we achive full dedup
       return size_bytes;
     }
+    else if (size_bytes < min_obj_size_for_dedup) {
+      return 0;
+    }
+    else if (split_head) {
+      // Head is splitted into an empty obj and a new tail enabling a full dedup
+      return size_bytes;
+    }
     else {
-      // reduce the head size
-      if (size_bytes > head_obj_size) {
-        return size_bytes - head_obj_size;
-      }
-      else {
-        return 0;
-      }
+      // reduce the head size which is not dedup
+      return size_bytes - std::min(size_bytes, (uint64_t)head_obj_size);
     }
   }
 

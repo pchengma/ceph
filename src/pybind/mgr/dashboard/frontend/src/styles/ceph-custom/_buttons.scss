@@ -80,15 +80,9 @@
   @extend .btn-light;
 }
 
-.btn-primary .badge {
+.btn-primary .tag {
   background-color: vv.$gray-200;
   color: vv.$primary;
-}
-
-.btn-group > .btn > i.fa,
-.cd-datatable-actions button.btn i.fa {
-  /** Add space between icon and text */
-  margin-right: 5px;
 }
 
 .card-footer button.btn:not(:first-child) {

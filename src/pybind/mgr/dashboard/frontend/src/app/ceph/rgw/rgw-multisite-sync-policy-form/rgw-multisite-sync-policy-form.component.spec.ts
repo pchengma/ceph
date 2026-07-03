@@ -1,13 +1,13 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RgwMultisiteSyncPolicyFormComponent } from './rgw-multisite-sync-policy-form.component';
 import { HttpClientTestingModule } from '@angular/common/http/testing';
-import { ToastrModule } from 'ngx-toastr';
 import { ReactiveFormsModule } from '@angular/forms';
 import { PipesModule } from '~/app/shared/pipes/pipes.module';
 import { ComponentsModule } from '~/app/shared/components/components.module';
 import { RouterTestingModule } from '@angular/router/testing';
 import { CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA } from '@angular/core';
 import { SharedModule } from '~/app/shared/shared.module';
+import { ModalModule, SelectModule } from 'carbon-components-angular';
 
 describe('RgwMultisiteSyncPolicyFormComponent', () => {
   let component: RgwMultisiteSyncPolicyFormComponent;
@@ -19,11 +19,12 @@ describe('RgwMultisiteSyncPolicyFormComponent', () => {
       imports: [
         HttpClientTestingModule,
         ReactiveFormsModule,
-        ToastrModule.forRoot(),
         PipesModule,
         ComponentsModule,
         SharedModule,
-        RouterTestingModule
+        RouterTestingModule,
+        ModalModule,
+        SelectModule
       ],
       schemas: [NO_ERRORS_SCHEMA, CUSTOM_ELEMENTS_SCHEMA],
       providers: []

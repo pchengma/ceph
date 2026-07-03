@@ -20,16 +20,19 @@
   </cd-alert-panel>
   <div [cdsStack]="'horizontal'"
        [gap]="4">
-    <cd-table-actions [permission]="permissions.rgw"
+    <cd-table-actions class="btn-group"
+                      [permission]="permissions.rgw"
                       [selection]="selection"
                       [tableActions]="multisiteReplicationActions">
     </cd-table-actions>
     <cd-table-actions *ngIf="showMigrateAndReplicationActions"
+                      class="btn-group"
                       [permission]="permissions.rgw"
                       [selection]="selection"
                       [tableActions]="migrateTableAction">
     </cd-table-actions>
-    <cd-table-actions [permission]="permissions.rgw"
+    <cd-table-actions class="btn-group multisite-actions"
+                      [permission]="permissions.rgw"
                       [selection]="selection"
                       [tableActions]="createTableActions"
                       dropDownOnly="Actions"
@@ -44,8 +47,10 @@
        i18n>Topology Viewer</div>
   <div class="row">
     <div class="col-sm-6 col-lg-6 tree-container">
-      <i *ngIf="loadingIndicator"
-         [ngClass]="[icons.large, icons.spinner, icons.spin]"></i>
+      <cds-loading *ngIf="loadingIndicator"
+                   [isActive]="true"
+                   [overlay]="false"
+                   size="sm"></cds-loading>
       <cds-tree-view #tree
                      [isMultiSelect]="false"
                      (select)="onNodeSelected($event)">
@@ -82,22 +87,26 @@
                      [cdsIcon]="icons.deploy"
                      [size]="icons.size20"
                      ></svg>
-                <svg *ngIf="node?.data?.icon === 'fa fa-cubes'"
-                     [cdsIcon]="icons.parentChild"
+                <svg *ngIf="node?.data?.icon === 'web-services--cluster'"
+                     [cdsIcon]="icons.clusterIcon"
                      [size]="icons.size20"
                      ></svg>
                 {{ node?.data?.name }}
               </span>
-              <span class="badge badge-success me-2"
-                    *ngIf="node?.data?.is_default">
-                  default
-              </span>
-              <span class="badge badge-warning me-2"
-                    *ngIf="node?.data?.is_master"> master </span>
-              <span class="badge badge-warning me-2"
-                    *ngIf="node?.data?.secondary_zone">
-                secondary-zone
-              </span>
+              <cds-tag class="tag-success me-2"
+                       *ngIf="node?.data?.is_default">
+                    default
+              </cds-tag>
+              <cds-tag class="tag-warning me-2"
+                       *ngIf="node?.data?.is_master"> master </cds-tag>
+              <cds-tag class="tag-warning me-2"
+                       *ngIf="node?.data?.secondary_zone">
+                  secondary-zone
+              </cds-tag>
+              <cds-tag class="tag-info me-2"
+                       *ngIf="node?.data?.tier_type === 'archive'">
+                  archive
+              </cds-tag>
             </div>
             <div class="btn-group align-inline-btns"
                  [ngStyle]="{'visibility': activeNodeId === node?.data?.id ? 'visible' : 'hidden'}"

@@ -17,11 +17,13 @@ import {
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { PrometheusAlertService } from '~/app/shared/services/prometheus-alert.service';
 import { SummaryService } from '~/app/shared/services/summary.service';
+import { USER } from '~/app/shared/constants/app.constants';
 
 @Component({
   selector: 'cd-navigation',
   templateUrl: './navigation.component.html',
-  styleUrls: ['./navigation.component.scss']
+  styleUrls: ['./navigation.component.scss'],
+  standalone: false
 })
 export class NavigationComponent implements OnInit, OnDestroy {
   clusterDetails: any[] = [];
@@ -31,7 +33,6 @@ export class NavigationComponent implements OnInit, OnDestroy {
   clusterTokenStatus: object = {};
   summaryData: any;
 
-  rightSidebarOpen = false; // rightSidebar only opens when width is less than 768px
   showMenuSidebar = true;
 
   simplebar = {
@@ -74,7 +75,7 @@ export class NavigationComponent implements OnInit, OnDestroy {
           Object.keys(clustersConfig).forEach((clusterKey: string) => {
             const clusterDetailsList = clustersConfig[clusterKey];
             clusterDetailsList.forEach((clusterDetails: MultiCluster) => {
-              const clusterUser = clusterDetails['user'];
+              const clusterUser = clusterDetails[USER];
               const clusterUrl = clusterDetails['url'];
               const clusterUniqueKey = `${clusterUrl}-${clusterUser}`;
               this.clustersMap.set(clusterUniqueKey, clusterDetails);
@@ -99,10 +100,6 @@ export class NavigationComponent implements OnInit, OnDestroy {
         this.checkClusterConnectionStatus();
       })
     );
-  }
-
-  ngOnDestroy(): void {
-    this.subs.unsubscribe();
   }
 
   checkClusterConnectionStatus() {
@@ -159,20 +156,16 @@ export class NavigationComponent implements OnInit, OnDestroy {
     this.displayedSubMenu[menu] = !this.displayedSubMenu[menu];
   }
 
-  toggleRightSidebar() {
-    this.rightSidebarOpen = !this.rightSidebarOpen;
-  }
-
   onClusterSelection(value: object) {
     this.multiClusterService.setCluster(value).subscribe(
       (resp: any) => {
         if (value['cluster_alias'] === 'local-cluster') {
           localStorage.setItem('cluster_api_url', '');
         } else {
-          localStorage.setItem('current_cluster_name', `${value['name']}-${value['user']}`);
+          localStorage.setItem('current_cluster_name', `${value['name']}-${value[USER]}`);
           localStorage.setItem('cluster_api_url', value['url']);
         }
-        this.selectedCluster = this.clustersMap.get(`${value['url']}-${value['user']}`) || {};
+        this.selectedCluster = this.clustersMap.get(`${value['url']}-${value[USER]}`) || {};
         const clustersConfig = resp['config'];
         if (clustersConfig && typeof clustersConfig === 'object') {
           Object.keys(clustersConfig).forEach((clusterKey: string) => {
@@ -181,11 +174,11 @@ export class NavigationComponent implements OnInit, OnDestroy {
             clusterDetailsList.forEach((clusterDetails: any) => {
               const clusterName = clusterDetails['name'];
               const clusterToken = clusterDetails['token'];
-              const clusterUser = clusterDetails['user'];
+              const clusterUser = clusterDetails[USER];
 
               if (
                 clusterName === this.selectedCluster['name'] &&
-                clusterUser === this.selectedCluster['user'] &&
+                clusterUser === this.selectedCluster[USER] &&
                 clusterDetails['cluster_alias'] !== 'local-cluster'
               ) {
                 this.cookieService.setToken(`${clusterName}-${clusterUser}`, clusterToken);
@@ -208,10 +201,18 @@ export class NavigationComponent implements OnInit, OnDestroy {
       }
     );
   }
-  toggleSidebar() {
-    this.notificationService.toggleSidebar(true, true);
+
+  onNotificationSelected(event) {
+    event.stopPropagation();
+    const currentState = this.notificationService.getPanelState();
+    this.notificationService.setPanelState(!currentState);
   }
+
   trackByFn(item: any) {
     return item;
+  }
+
+  ngOnDestroy(): void {
+    this.subs.unsubscribe();
   }
 }

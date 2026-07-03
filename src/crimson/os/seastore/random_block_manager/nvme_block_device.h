@@ -212,7 +212,9 @@ public:
    * atomic_write_unit does not require fsync().
    */
 
-  NVMeBlockDevice(std::string device_path) : device_path(device_path) {}
+  NVMeBlockDevice(std::string device_path, store_index_t store_index = 0)
+    : RBMDevice(store_index),
+      device_path(device_path) {}
   ~NVMeBlockDevice() = default;
 
   open_ertr::future<> open(
@@ -228,9 +230,14 @@ public:
   read_ertr::future<> read(
     uint64_t offset,
     bufferptr &bptr) final;
+  read_ertr::future<> _readv(
+    uint64_t offset,
+    std::vector<bufferptr> ptrs) final;
 
   read_ertr::future<> nvme_read(
     uint64_t offset, size_t len, void *buffer_ptr);
+  read_ertr::future<> nvme_readv(
+    uint64_t offset, std::vector<bufferptr> ptrs);
 
   close_ertr::future<> close() override;
 
@@ -264,14 +271,7 @@ public:
 
     auto size = co_await file.size();
     stat.size = size;
-    std::optional<nvme_identify_namespace_data_t> id_ns_data =
-      co_await identify_namespace(file
-      ).safe_then([] (auto id_namespace_data) mutable {
-	return std::optional<nvme_identify_namespace_data_t>(id_namespace_data);
-      }).handle_error(crimson::ct_error::input_output_error::handle([]{
-	return std::nullopt;
-      }));
-
+    auto id_ns_data = co_await identify_namespace(file);
     if (id_ns_data) {
       // LBA format provides LBA size which is power of 2. LBA is the
       // minimum size of read and write.
@@ -289,17 +289,11 @@ public:
     return device_path;
   }
 
-  seastar::future<> start() final {
-    return shard_devices.start(device_path);
-  }
+  seastar::future<> start(uint32_t shard_nums) final;
 
-  seastar::future<> stop() final {
-    return shard_devices.stop();
-  }
+  seastar::future<> stop() final;
 
-  Device& get_sharded_device() final {
-    return shard_devices.local();
-  }
+  Device& get_sharded_device(store_index_t store_index = 0) final;
 
   uint64_t get_preffered_write_granularity() const { return write_granularity; }
   uint64_t get_preffered_write_alignment() const { return write_alignment; }
@@ -358,9 +352,9 @@ public:
 private:
   // identify_controller/namespace are used to get SSD internal information such
   // as supported features, NPWG and NPWA
-  nvme_command_ertr::future<nvme_identify_controller_data_t> 
+  seastar::future<std::optional<nvme_identify_controller_data_t>>
     identify_controller(seastar::file f);
-  nvme_command_ertr::future<nvme_identify_namespace_data_t>
+  seastar::future<std::optional<nvme_identify_namespace_data_t>>
     identify_namespace(seastar::file f);
   nvme_command_ertr::future<int> get_nsid(seastar::file f);
   open_ertr::future<> open_for_io(
@@ -379,7 +373,26 @@ private:
 
   int namespace_id; // TODO: multi namespaces
   std::string device_path;
-  seastar::sharded<NVMeBlockDevice> shard_devices;
+
+  class MultiShardDevices {
+    public:
+      std::vector<std::unique_ptr<NVMeBlockDevice>> mshard_devices;
+
+    public:
+    MultiShardDevices(size_t count,
+                      const std::string path)
+    : mshard_devices() {
+      mshard_devices.reserve(count);
+      for (size_t store_index = 0; store_index < count; ++store_index) {
+        mshard_devices.emplace_back(std::make_unique<NVMeBlockDevice>(
+          path, store_index));
+      }
+    }
+    ~MultiShardDevices() {
+     mshard_devices.clear();
+    }
+  };
+  seastar::sharded<MultiShardDevices> shard_devices;
 };
 
 }

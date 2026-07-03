@@ -193,17 +193,6 @@ target_link_libraries(ceph_omapbench
   ceph-common
   Boost::program_options)
 
-if(WITH_KVS)
-  # ceph_kvstorebench
-  set(kvstorebench_srcs
-    kv_store_bench.cc
-    ${CMAKE_SOURCE_DIR}/src/key_value_store/kv_flat_btree_async.cc
-    )
-  add_executable(ceph_kvstorebench ${kvstorebench_srcs})
-  target_link_libraries(ceph_kvstorebench librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
-  install(TARGETS ceph_kvstorebench DESTINATION bin)
-endif(WITH_KVS)
-
 if(NOT WIN32)
   # ceph_objectstore_bench
   add_executable(ceph_objectstore_bench objectstore_bench.cc)
@@ -225,8 +214,38 @@ if(${WITH_RADOSGW})
     ${EXPAT_LIBRARIES}
     ${CMAKE_DL_LIBS} ${UNITTEST_LIBS})
 
+  # ceph_test_cls_rgw_admin_account_quota_set
+  set(test_cls_rgw_admin_account_quota_set_srcs 
+    test_rgw_admin_account_quota_set.cc
+    test_rgw_admin_helper.cc
+  )
+  add_executable(ceph_test_cls_rgw_admin_account_quota_set
+    ${test_cls_rgw_admin_account_quota_set_srcs}
+    )
+  target_link_libraries(ceph_test_cls_rgw_admin_account_quota_set
+    librados
+    ${rgw_libs}
+    global
+    cls_version_client
+    cls_log_client
+    cls_refcount_client
+    cls_rgw_client
+    cls_user_client
+    cls_lock_client
+    ${BLKID_LIBRARIES}
+    ${CURL_LIBRARIES}
+    ${EXPAT_LIBRARIES}
+    ${CMAKE_DL_LIBS} ${UNITTEST_LIBS} ${CRYPTO_LIBS})
+
+  install(TARGETS
+    ceph_test_cls_rgw_admin_account_quota_set
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
+
   # ceph_test_cls_rgw_meta
-  set(test_cls_rgw_meta_srcs test_rgw_admin_meta.cc)
+  set(test_cls_rgw_meta_srcs
+    test_rgw_admin_meta.cc
+    test_rgw_admin_helper.cc
+  )
   add_executable(ceph_test_cls_rgw_meta
     ${test_cls_rgw_meta_srcs}
     )
@@ -292,6 +311,7 @@ install(TARGETS ceph_test_librgw_file DESTINATION ${CMAKE_INSTALL_BINDIR})
 add_dependencies(ceph_test_librgw_file
   ceph_test_librgw_file_cd
   ceph_test_librgw_file_gp
+  ceph_test_librgw_file_cpref
   ceph_test_librgw_file_rename
   ceph_test_librgw_file_nfsns
   ceph_test_librgw_file_aw
@@ -324,6 +344,20 @@ target_link_libraries(ceph_test_librgw_file_gp
   ${ALLOC_LIBS}
   )
 install(TARGETS ceph_test_librgw_file_gp DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# ceph_test_librgw_file_cpref (a special case common-prefix enumeration test)
+add_executable(ceph_test_librgw_file_cpref
+  librgw_file_cpref.cc
+  )
+target_link_libraries(ceph_test_librgw_file_cpref
+  rgw
+  librados
+  ceph-common
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  ${ALLOC_LIBS}
+  )
+install(TARGETS ceph_test_librgw_file_cpref DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_nfsns (nfs namespace tests)
 add_executable(ceph_test_librgw_file_nfsns
@@ -593,14 +627,16 @@ if(NOT WIN32)
   ceph_snappy
   cls_lock
   ceph_test_objectstore
-  ceph_test_bluefs
   ceph_erasure_code_non_regression
   cython_modules
   crushtool
   monmaptool)
 
+if (WITH_BLUESTORE)
+  add_dependencies(tests ceph_test_bluefs)
+endif()
 if (WITH_CEPHFS)
-  add_dependencies(tests ceph-mds)
+  add_dependencies(tests ceph-mds cephfs-tool)
 endif()
 if(WITH_MGR)
   add_dependencies(tests ceph-mgr)
@@ -647,10 +683,6 @@ add_ceph_test(run-cli-tests ${CMAKE_CURRENT_SOURCE_DIR}/run-cli-tests)
 #add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
 
 add_ceph_test(smoke.sh ${CMAKE_CURRENT_SOURCE_DIR}/smoke.sh)
-
-set_property(
-  TEST ${tox_tests}
-  PROPERTY ENVIRONMENT ${env_vars_for_tox_tests})
 
 # unittest_admin_socket
 add_executable(unittest_admin_socket
@@ -983,6 +1015,12 @@ add_executable(unittest_not_before_queue
 add_ceph_unittest(unittest_not_before_queue)
 target_link_libraries(unittest_not_before_queue ceph-common)
 
+# unittest_mode_collector
+add_executable(unittest_mode_collector
+  test_mode_collector.cc)
+add_ceph_unittest(unittest_mode_collector)
+target_link_libraries(unittest_mode_collector ceph-common)
+
 if(NOT WIN32)
 # unittest_on_exit
 add_executable(unittest_on_exit
@@ -1041,5 +1079,28 @@ add_executable(unittest_ceph_assert
   ceph_assert.cc)
 add_ceph_unittest(unittest_ceph_assert)
 target_link_libraries(unittest_ceph_assert ceph-common global)
-endif()
+endif(NOT WIN32)
+
+find_package(benchmark QUIET)
+if (benchmark_FOUND)
+  add_executable(bench_lrus
+  bench_lrus.cc
+  )
+  target_link_libraries(bench_lrus ceph-common global-static benchmark::benchmark Boost::context)
+
+  add_executable(bench_secmem
+  bench_secmem.cc
+  )
+  target_link_libraries(bench_secmem ceph-common global-static benchmark::benchmark keyutils::keyutils)
+else()
+  message(STATUS "The google/benchmark library was not found. Skipping micro benchmark tests")
+endif(benchmark_FOUND)
+
+add_executable(test_nvmeof_gw_utils
+  test_nvmeof_gw_utils.cc
+  ../nvmeof/NVMeofGwUtils.cc
+  )
+target_link_libraries(test_nvmeof_gw_utils
+  mon ceph-common global-static
+  )
 

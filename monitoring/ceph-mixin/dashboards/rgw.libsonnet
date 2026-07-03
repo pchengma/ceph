@@ -26,7 +26,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } };
 
     $.dashboardSchema(
-      'RGW Sync Overview',
+      'Ceph Object - Sync Overview',
       '',
       'rgw-sync-overview',
       'now-1h',
@@ -71,19 +71,6 @@ local g = import 'grafonnet/grafana.libsonnet';
     )
     .addTemplate(
       $.addClusterTemplate()
-    )
-
-    .addTemplate(
-      $.addTemplateSchema(
-        'rgw_servers',
-        '$datasource',
-        'label_values(ceph_rgw_metadata{%(matchers)s}, ceph_daemon)' % $.matchers(),
-        1,
-        true,
-        1,
-        null,
-        'rgw.(.*)'
-      )
     )
     .addPanels([
       RgwSyncOverviewPanel(
@@ -157,7 +144,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       .addTargets(
         [
           $.addTargetSchema(
-            expr='rate(ceph_rgw_sync_delta_sync_delta[$__rate_interval])',
+            expr='rate(ceph_rgw_sync_delta_sync_delta{%(matchers)s}[$__rate_interval])',
             datasource='$datasource',
             instant=false,
             legendFormat='{{instance_id}} - {{shard_id}}',
@@ -211,7 +198,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } };
 
     $.dashboardSchema(
-      'RGW Overview',
+      'Ceph Object - Overview',
       '',
       'WAkugZpiz',
       'now-1h',
@@ -313,7 +300,7 @@ local g = import 'grafonnet/grafana.libsonnet';
     .addPanels([
       $.addRowSchema(false,
                      true,
-                     'RGW Overview - All Gateways') +
+                     'Object Overview - All Gateways') +
       {
         gridPos: { x: 0, y: 0, w: 24, h: 1 },
       },
@@ -443,7 +430,7 @@ local g = import 'grafonnet/grafana.libsonnet';
         6
       ),
       $.addRowSchema(
-        false, true, 'RGW Overview - HAProxy Metrics'
+        false, true, 'Object Overview - HAProxy Metrics'
       ) + { gridPos: { x: 0, y: 12, w: 9, h: 12 } },
       RgwOverviewPanel(
         'Total responses by HTTP code',
@@ -703,7 +690,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ]),
       $.addRowSchema(false,
                      true,
-                     'RGW Overview - Bucket Notification') +
+                     'Object Overview - Bucket Notification') +
       {
         gridPos: { x: 0, y: 27, w: 24, h: 1 },
       },
@@ -773,7 +760,7 @@ local g = import 'grafonnet/grafana.libsonnet';
       ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } };
 
     $.dashboardSchema(
-      'RGW Instance Detail',
+      'Ceph Object - Instance Details',
       '',
       'x5ARzZtmk',
       'now-1h',

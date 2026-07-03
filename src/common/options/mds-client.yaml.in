@@ -320,7 +320,7 @@ options:
   desc: set the directory size as the number of file bytes recursively used
   long_desc: This option enables a CephFS feature that stores the recursive directory
     size (the bytes used by files in the directory and its descendents) in the st_size
-    field of the stat structure.
+    field of the stat structure. May confuse programs such as ``rsync``.
   default: true
   services:
   - mds_client
@@ -333,6 +333,8 @@ options:
   default: false
   services:
   - mds_client
+  flags:
+  - startup
 - name: fuse_use_invalidate_cb
   type: bool
   level: advanced
@@ -618,3 +620,23 @@ options:
   services:
   - mds_client
   min: 0
+- name: client_fscrypt_as
+  type: bool
+  level: advanced
+  desc: Enable fscrypt access semantics
+  long_desc: Enable fscrypt access semantics for locked/unlocked states.
+  default: true
+  services:
+  - mds_client
+  flags:
+  - runtime
+- name: client_fscrypt_dummy_encryption
+  type: bool
+  level: dev
+  desc: Enable fscrypt dummy encryption
+  long_desc: Enable fscrypt dummy encryption
+  default: false
+  services:
+  - mds_client
+  flags:
+  - runtime

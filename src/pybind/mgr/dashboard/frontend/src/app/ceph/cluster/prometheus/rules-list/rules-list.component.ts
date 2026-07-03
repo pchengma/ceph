@@ -15,7 +15,8 @@ import { PrometheusAlertService } from '~/app/shared/services/prometheus-alert.s
 @Component({
   selector: 'cd-rules-list',
   templateUrl: './rules-list.component.html',
-  styleUrls: ['./rules-list.component.scss']
+  styleUrls: ['./rules-list.component.scss'],
+  standalone: false
 })
 export class RulesListComponent extends PrometheusListHelper implements OnInit, OnDestroy {
   columns: CdTableColumn[];
@@ -50,11 +51,11 @@ export class RulesListComponent extends PrometheusListHelper implements OnInit, 
         prop: 'labels.severity',
         name: $localize`Severity`,
         flexGrow: 1,
-        cellTransformation: CellTemplate.badge,
+        cellTransformation: CellTemplate.tag,
         customTemplateConfig: {
           map: {
-            critical: { class: 'badge-danger' },
-            warning: { class: 'badge-warning' }
+            critical: { class: 'tag-danger' },
+            warning: { class: 'tag-warning' }
           }
         }
       },
@@ -62,7 +63,7 @@ export class RulesListComponent extends PrometheusListHelper implements OnInit, 
         prop: 'group',
         name: $localize`Group`,
         flexGrow: 1,
-        cellTransformation: CellTemplate.badge
+        cellTransformation: CellTemplate.tag
       },
       { prop: 'duration', name: $localize`Duration`, pipe: new DurationPipe(), flexGrow: 1 },
       { prop: 'query', name: $localize`Query`, isHidden: true, flexGrow: 1 },

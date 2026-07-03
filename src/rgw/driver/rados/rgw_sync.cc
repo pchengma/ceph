@@ -33,9 +33,7 @@ RGWSyncErrorLogger::RGWSyncErrorLogger(rgw::sal::RadosStore* _store, const strin
   }
 }
 string RGWSyncErrorLogger::get_shard_oid(const string& oid_prefix, int shard_id) {
-  char buf[oid_prefix.size() + 16];
-  snprintf(buf, sizeof(buf), "%s.%d", oid_prefix.c_str(), shard_id);
-  return string(buf);
+  return fmt::format("{}.{}", oid_prefix, shard_id);
 }
 
 RGWCoroutine *RGWSyncErrorLogger::log_error_cr(const DoutPrefixProvider *dpp, const string& source_zone, const string& section, const string& name, uint32_t error_code, const string& message) {
@@ -239,6 +237,17 @@ public:
   bool spawn_next() override;
 };
 
+RGWRemoteMetaLog::~RGWRemoteMetaLog()
+{
+  delete error_logger;
+}
+
+void RGWRemoteMetaLog::finish()
+{
+  going_down = true;
+  stop();
+}
+
 int RGWRemoteMetaLog::read_log_info(const DoutPrefixProvider *dpp, rgw_mdlog_info *log_info)
 {
   rgw_http_param_pair pairs[] = { { "type", "metadata" },
@@ -296,6 +305,18 @@ int RGWRemoteMetaLog::init()
   tn = sync_env.sync_tracer->add_node(sync_env.sync_tracer->root_node, "meta");
 
   return 0;
+}
+
+RGWMetaSyncStatusManager::~RGWMetaSyncStatusManager(){}
+
+std::ostream&  RGWMetaSyncStatusManager::gen_prefix(std::ostream& out) const
+{
+  return out << "meta sync: ";
+}
+
+unsigned RGWMetaSyncStatusManager::get_subsys() const
+{
+  return dout_subsys;
 }
 
 #define CLONE_MAX_ENTRIES 100
@@ -369,10 +390,7 @@ string RGWMetaSyncEnv::status_oid()
 
 string RGWMetaSyncEnv::shard_obj_name(int shard_id)
 {
-  char buf[mdlog_sync_status_shard_prefix.size() + 16];
-  snprintf(buf, sizeof(buf), "%s.%d", mdlog_sync_status_shard_prefix.c_str(), shard_id);
-
-  return string(buf);
+  return fmt::format("{}.{}", mdlog_sync_status_shard_prefix, shard_id);
 }
 
 class RGWAsyncReadMDLogEntries : public RGWAsyncRadosRequest {
@@ -1027,9 +1045,7 @@ public:
 
 static string full_sync_index_shard_oid(int shard_id)
 {
-  char buf[mdlog_sync_full_sync_index_prefix.size() + 16];
-  snprintf(buf, sizeof(buf), "%s.%d", mdlog_sync_full_sync_index_prefix.c_str(), shard_id);
-  return string(buf);
+  return fmt::format("{}.{}", mdlog_sync_full_sync_index_prefix, shard_id);
 }
 
 class RGWReadRemoteMetadataCR : public RGWCoroutine {

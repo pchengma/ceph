@@ -329,6 +329,13 @@ options:
     under most load conditions.
   default: 10.0
   with_legacy: true
+- name: osd_scrub_queued_snaptrims_limit
+  type: uint
+  level: advanced
+  desc: Do not initiate periodic scrubs when the total snap-trim queues across all
+    PGs exceeds this value. A value of '0' disables this limit.
+  default: 500
+  with_legacy: false
 - name: osd_scrub_min_interval
   type: float
   level: advanced
@@ -379,8 +386,9 @@ options:
   type: int
   level: advanced
   desc: Minimum number of objects to deep-scrub in a single chunk
-  fmt_desc: The minimal number of object store chunks to scrub during single operation.
-    Ceph blocks writes to single chunk during scrub.
+  fmt_desc: The minimum number of objects to scrub during single operation. Also
+    serves as a minimal chunk size even after scrubbing is preempted by client
+    operations and the effective chunk size is halved.
   default: 5
   see_also:
   - osd_scrub_chunk_max
@@ -518,7 +526,7 @@ options:
   level: advanced
   desc: Number of bytes to read from an object at a time during deep scrub
   fmt_desc: Read size when doing a deep scrub.
-  default: 512_K
+  default: 4_M
   with_legacy: true
 - name: osd_deep_scrub_keys
   type: int
@@ -1559,13 +1567,13 @@ options:
   type: int
   level: advanced
   default: 512
-  fmt_desc: The maximum number of objects per backfill scan.p
+  fmt_desc: The maximum number of objects per backfill scan.
   with_legacy: true
 - name: osd_extblkdev_plugins
   type: str
   level: advanced
   desc: extended block device plugins to load, provide compression feedback at runtime
-  default: vdo
+  default: vdo fcm
   flags:
   - startup
 # minimum number of peers

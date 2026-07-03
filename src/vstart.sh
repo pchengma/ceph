@@ -64,6 +64,14 @@ if [ -e CMakeCache.txt ]; then
     CEPH_ROOT=$(get_cmake_variable ceph_SOURCE_DIR)
     CEPH_BUILD_DIR=`pwd`
     [ -z "$MGR_PYTHON_PATH" ] && MGR_PYTHON_PATH=$CEPH_ROOT/src/pybind/mgr
+
+    # Point the sanitizers at the in-tree suppression files so vstart daemons
+    # ignore the same still-reachable third-party leaks AddCephTest.cmake suppresses for
+    # unittests. Without this `ceph-mon --mkfs` aborts on LeakSanitizer.
+    if [ "$(get_cmake_variable WITH_ASAN)" = "ON" ]; then
+        [ -z "$ASAN_OPTIONS" ] && export ASAN_OPTIONS="suppressions=$CEPH_ROOT/qa/asan.supp,detect_odr_violation=0"
+        [ -z "$LSAN_OPTIONS" ] && export LSAN_OPTIONS="suppressions=$CEPH_ROOT/qa/lsan.supp,print_suppressions=0"
+    fi
 fi
 
 # use CEPH_BUILD_ROOT to vstart from a 'make install'
@@ -194,7 +202,6 @@ if [[ "$(get_cmake_variable WITH_MGR_DASHBOARD_FRONTEND)" != "ON" ]] ||
     with_mgr_dashboard=false
 fi
 
-kstore_path=
 declare -a block_devs
 declare -a bluestore_db_devs
 declare -a bluestore_wal_devs
@@ -244,7 +251,6 @@ options:
 	--rgw_store storage backend: rados|dbstore|posix
 	--seastore use seastore as crimson osd backend
 	-b, --bluestore use bluestore as the osd objectstore backend (default)
-	-K, --kstore use kstore as the osd objectstore backend
 	--cyanstore use cyanstore as the osd objectstore backend
 	--memstore use memstore as the osd objectstore backend
 	--cache <pool>: enable cache tiering on pool
@@ -283,6 +289,7 @@ options:
 	--osds-per-host: populate crush_location as each host holds the specified number of osds if set
 	--require-osd-and-client-version: if supplied, do set-require-min-compat-client and require-osd-release to specified value
 	--use-crush-tunables: if supplied, set tunables to specified value
+	--reactor-backend: configre seastar reactor backend options like io_uring or linux-aio
 \n
 EOF
 
@@ -533,10 +540,6 @@ case $1 in
         rgw_store=$2
         shift
         ;;
-    --kstore_path)
-        kstore_path=$2
-        shift
-        ;;
     -m)
         [ -z "$2" ] && usage_exit
         MON_ADDR=$2
@@ -574,9 +577,6 @@ case $1 in
         ;;
     -b | --bluestore)
         objectstore="bluestore"
-        ;;
-    -K | --kstore)
-        objectstore="kstore"
         ;;
     --hitset)
         hitset="$hitset $2 $3"
@@ -623,6 +623,10 @@ case $1 in
         ;;
     --crimson-smp)
         crimson_smp=$2
+        shift
+        ;;
+    --reactor-backend)
+        crimson_reactor_backend=$2
         shift
         ;;
     --crimson-alien-num-threads)
@@ -787,8 +791,6 @@ do_rgw_conf() {
 [client.rgw.${current_port}]
         rgw frontends = $rgw_frontend port=${current_port}${flight_conf:+,arrow_flight}
         admin socket = ${CEPH_OUT_DIR}/radosgw.${current_port}.asok
-        debug rgw_flight = 20
-        debug rgw_notification = 20
 EOF
         current_port=$((current_port + 1))
         unset flight_conf
@@ -1032,13 +1034,9 @@ $DAEMONOPTS
 
         bluestore fsck on mount = true
         bluestore block create = true
-        bluestore allocator = bitmap
-        bluestore alloc favor spatial locality = false
         
 $BLUESTORE_OPTS
 
-        ; kstore
-        kstore fsck on mount = true
         osd objectstore = $objectstore
 $SEASTORE_OPTS
 $COSDSHORT
@@ -1167,6 +1165,7 @@ start_mon() {
 [mon.$f]
         host = $HOSTNAME
         mon data = $CEPH_DEV_DIR/mon.$f
+        mon backup path = $CEPH_DEV_DIR/mon.$f-backup
 EOF
             count=$(($count + 2))
         done
@@ -1271,6 +1270,10 @@ start_osd() {
             echo "$CEPH_BIN/ceph -c $conf_fn config set osd.$osd crimson_poll_mode true"
             $CEPH_BIN/ceph -c $conf_fn config set "osd.$osd" crimson_poll_mode true
         fi
+        if [ -n "$crimson_reactor_backend" ]; then
+            echo "$CEPH_BIN/ceph -c $conf_fn config set osd.$osd crimson_reactor_backend $crimson_reactor_backend"
+            $CEPH_BIN/ceph -c $conf_fn config set osd.$osd crimson_reactor_backend $crimson_reactor_backend
+        fi
     fi
 	if [ "$new" -eq 1 -o $inc_osd_num -gt 0 ]; then
             wconf <<EOF
@@ -1297,27 +1300,23 @@ EOF
             if command -v btrfs > /dev/null; then
                 for f in $CEPH_DEV_DIR/osd$osd/*; do btrfs sub delete $f &> /dev/null || true; done
             fi
-            if [ -n "$kstore_path" ]; then
-                ln -s $kstore_path $CEPH_DEV_DIR/osd$osd
-            else
-                mkdir -p $CEPH_DEV_DIR/osd$osd
-                if [ -n "${block_devs[$osd]}" ]; then
-                    dd if=/dev/zero of=${block_devs[$osd]} bs=1M count=1
-                    ln -s ${block_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block
-                fi
-                if [ -n "${bluestore_db_devs[$osd]}" ]; then
-                    dd if=/dev/zero of=${bluestore_db_devs[$osd]} bs=1M count=1
-                    ln -s ${bluestore_db_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block.db
-                fi
-                if [ -n "${bluestore_wal_devs[$osd]}" ]; then
-                    dd if=/dev/zero of=${bluestore_wal_devs[$osd]} bs=1M count=1
-                    ln -s ${bluestore_wal_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block.wal
-                fi
-                if [ -n "${secondary_block_devs[$osd]}" ]; then
-                    dd if=/dev/zero of=${secondary_block_devs[$osd]} bs=1M count=1
-                    mkdir -p $CEPH_DEV_DIR/osd$osd/block.${secondary_block_devs_type}.1
-                    ln -s ${secondary_block_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block.${secondary_block_devs_type}.1/block
-                fi
+            mkdir -p $CEPH_DEV_DIR/osd$osd
+            if [ -n "${block_devs[$osd]}" ]; then
+                dd if=/dev/zero of=${block_devs[$osd]} bs=1M count=1
+                ln -s ${block_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block
+            fi
+            if [ -n "${bluestore_db_devs[$osd]}" ]; then
+                dd if=/dev/zero of=${bluestore_db_devs[$osd]} bs=1M count=1
+                ln -s ${bluestore_db_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block.db
+            fi
+            if [ -n "${bluestore_wal_devs[$osd]}" ]; then
+                dd if=/dev/zero of=${bluestore_wal_devs[$osd]} bs=1M count=1
+                ln -s ${bluestore_wal_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block.wal
+            fi
+            if [ -n "${secondary_block_devs[$osd]}" ]; then
+                dd if=/dev/zero of=${secondary_block_devs[$osd]} bs=1M count=1
+                mkdir -p $CEPH_DEV_DIR/osd$osd/block.${secondary_block_devs_type}.1
+                ln -s ${secondary_block_devs[$osd]} $CEPH_DEV_DIR/osd$osd/block.${secondary_block_devs_type}.1/block
             fi
             if [ "$objectstore" == "bluestore" ]; then
                 wconf <<EOF
@@ -1483,6 +1482,19 @@ EOF
     fi
 }
 
+create_fs_volume() {
+    local name=$1
+    if [ "$CEPH_NUM_MGR" -gt 0 ]; then
+        ceph_adm fs volume create ${name}
+    else
+        local meta_pool="cephfs.${name}.meta"
+        local data_pool="cephfs.${name}.data"
+        ceph_adm osd pool create "$meta_pool"
+        ceph_adm osd pool create "$data_pool" --bulk
+        ceph_adm fs new ${name} "$meta_pool" "$data_pool"
+    fi
+}
+
 start_mds() {
     local mds=0
     for name in a b c d e f g h i j k l m n o p
@@ -1533,12 +1545,15 @@ EOF
                 ceph_adm fs flag set enable_multiple true --yes-i-really-mean-it
             fi
 
-	    # wait for volume module to load
-	    while ! ceph_adm fs volume ls ; do sleep 1 ; done
+            if [ "$CEPH_NUM_MGR" -gt 0 ]; then
+                # wait for volume module to load
+                while ! ceph_adm fs volume ls ; do sleep 1 ; done
+            fi
+
             local fs=0
             for name in a b c d e f g h i j k l m n o p
             do
-                ceph_adm fs volume create ${name}
+                create_fs_volume ${name}
                 ceph_adm fs authorize ${name} "client.fs_${name}" / rwp >> "$keyring_fn"
                 fs=$(($fs + 1))
                 [ $fs -eq $CEPH_NUM_FS ] && break
@@ -1592,6 +1607,7 @@ start_ganesha() {
             Enable_RQUOTA = false;
             Protocols = 4;
             NFS_Port = $port;
+            allow_set_io_flusher_fail = true;
         }
 
         MDCACHE {
@@ -1599,20 +1615,20 @@ start_ganesha() {
         }
 
         NFSv4 {
-           RecoveryBackend = rados_cluster;
+           RecoveryBackend = "\"rados_cluster\"";
            Minor_Versions = 1, 2;
         }
 
         RADOS_KV {
-           pool = '$pool_name';
-           namespace = $namespace;
-           UserId = $test_user;
+           pool = "\"$pool_name\"";
+           namespace = "\"$namespace\"";
+           UserId = "\"$test_user\"";
            nodeid = $name;
         }
 
         RADOS_URLS {
-	   Userid = $test_user;
-	   watch_url = '$url';
+	   Userid = "\"$test_user\"";
+	   watch_url = "\"$url\"";
         }
 
 	%url $url" > "$ganesha_dir/ganesha-$name.conf"
@@ -1656,7 +1672,9 @@ else
         debug mgrc = 20
         debug ms = 1'
     CCLIENTDEBUG='
-        debug client = 20'
+        debug client = 20
+        debug rgw_flight = 20
+        debug rgw_notification = 20'
     CMDSDEBUG='
         debug mds = 20'
 fi
@@ -1677,7 +1695,7 @@ if [ -z "$CEPH_PORT" ]; then
     while [ true ]
     do
         CEPH_PORT="$(echo $(( RANDOM % 1000 + 40000 )))"
-        ss -a -n | egrep "\<LISTEN\>.+:${CEPH_PORT}\s+" 1>/dev/null 2>&1 || break
+        ss -a -n | grep -E "\<LISTEN\>.+:${CEPH_PORT}\s+" 1>/dev/null 2>&1 || break
     done
 fi
 
@@ -2023,7 +2041,7 @@ do_rgw()
 
     RGWDEBUG=""
     if [ "$debug" -ne 0 ]; then
-        RGWDEBUG="--debug-rgw=20 --debug-ms=1"
+        RGWDEBUG="--debug-rgw=20 --debug-rgw-lifecycle=20 --debug-ms=1"
     fi
 
     local CEPH_RGW_PORT_NUM="${CEPH_RGW_PORT}"

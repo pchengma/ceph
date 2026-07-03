@@ -10,7 +10,7 @@ of those transitioned objects from the remote S3 endpoints into the local
 RGW deployment.
 
 This feature currently enables the restoration of objects transitioned to
-S3-compatible cloud services. In order to faciliate this,
+S3-compatible cloud services. In order to facilitate this,
 the ``retain_head_object`` option should be set to ``true``
 in the ``tier-config`` when configuring the storage class.
 
@@ -32,13 +32,14 @@ objects as well::
 
     {
       "access_key": <access>,
-      "secret": <secret>,`
+      "secret": <secret>,
       "endpoint": <endpoint>,
       "region": <region>,
       "host_style": <path | virtual>,
       "acls": [ { "type": <id | email | uri>,
                   "source_id": <source_id>,
                   "dest_id": <dest_id> } ... ],
+      "location_constraint": <location-constraint>,
       "target_path": <target_path>,
       "target_storage_class": <target-storage-class>,
       "multipart_sync_threshold": {object_size},
@@ -94,10 +95,12 @@ the following configurables should be set accordingly:
 
   The duration for which the objects are to be restored on the remote cloud service.
 
-* ``glacier_restore_tier_type`` (``Standard`` | ``Expedited``)
+* ``glacier_restore_tier_type`` (``Standard`` | ``Expedited`` | ``NoTier``)
 
   The type of retrieval within the cloud service, which may represent different
-  pricing. Supported options are ``Standard`` and ``Expedited``.
+  pricing. Supported options are ``Standard``, ``Expedited`` and ``NoTier``.
+
+  ``NoTier`` for the s3 servers which does not follow options in ``Tier`` as per s3 protocol.
 
 
 For example:
@@ -224,8 +227,10 @@ Example 3:
 
 This will restore the object ``doc3.rtf`` for ``read_through_restore_days`` days.
 
-.. note:: The above CLI command may time out if object restoration takes too long.
-          You can verify the restore status before reissuing the command.
+The ``rgw_read_through_timeout_ms`` configuration option controls how long the
+``GET`` request will wait for restore completion before returning a timeout error.
+The default is 10000 milliseconds (10 seconds). Setting this to 0 disables waiting,
+requiring clients to poll for completion by retrying the ``GET`` request.
 
 
 Verifying the Restoration Status

@@ -40,6 +40,8 @@ import { XmlPipe } from './xml.pipe';
 import { MbpersecondPipe } from './mbpersecond.pipe';
 import { PipeFunctionPipe } from './pipe-function.pipe';
 import { DimlessBinaryPerMinutePipe } from './dimless-binary-per-minute.pipe';
+import { RedirectLinkResolverPipe } from './redirect-link-resolver.pipe';
+import { CephVersionPipe } from './ceph-version.pipe';
 
 @NgModule({
   imports: [CommonModule],
@@ -82,7 +84,9 @@ import { DimlessBinaryPerMinutePipe } from './dimless-binary-per-minute.pipe';
     XmlPipe,
     MbpersecondPipe,
     PipeFunctionPipe,
-    DimlessBinaryPerMinutePipe
+    DimlessBinaryPerMinutePipe,
+    RedirectLinkResolverPipe,
+    CephVersionPipe
   ],
   exports: [
     ArrayPipe,
@@ -123,7 +127,9 @@ import { DimlessBinaryPerMinutePipe } from './dimless-binary-per-minute.pipe';
     XmlPipe,
     MbpersecondPipe,
     PipeFunctionPipe,
-    DimlessBinaryPerMinutePipe
+    DimlessBinaryPerMinutePipe,
+    RedirectLinkResolverPipe,
+    CephVersionPipe
   ],
   providers: [
     ArrayPipe,
@@ -155,7 +161,9 @@ import { DimlessBinaryPerMinutePipe } from './dimless-binary-per-minute.pipe';
     MgrSummaryPipe,
     OctalToHumanReadablePipe,
     MbpersecondPipe,
-    DimlessBinaryPerMinutePipe
+    DimlessBinaryPerMinutePipe,
+    RedirectLinkResolverPipe,
+    CephVersionPipe
   ]
 })
 export class PipesModule {}

@@ -12,7 +12,6 @@ import {
   NgbTimepickerModule,
   NgbTooltipModule
 } from '@ng-bootstrap/ng-bootstrap';
-import { ClickOutsideModule } from 'ng-click-outside';
 import { provideCharts, withDefaultRegisterables, BaseChartDirective } from 'ng2-charts';
 import { SimplebarAngularModule } from 'simplebar-angular';
 import {
@@ -40,9 +39,13 @@ import {
   LayoutModule,
   TilesModule,
   PopoverModule,
-  InlineLoadingModule
+  InlineLoadingModule,
+  TagModule,
+  LinkModule,
+  LayerModule,
+  ThemeModule
 } from 'carbon-components-angular';
-import EditIcon from '@carbon/icons/es/edit/20';
+import EditIcon from '@carbon/icons/es/edit/16';
 import CodeIcon from '@carbon/icons/es/code/16';
 import { MotdComponent } from '~/app/shared/components/motd/motd.component';
 import { DirectivesModule } from '../directives/directives.module';
@@ -66,7 +69,6 @@ import { HelperComponent } from './helper/helper.component';
 import { LanguageSelectorComponent } from './language-selector/language-selector.component';
 import { LoadingPanelComponent } from './loading-panel/loading-panel.component';
 import { ModalComponent } from './modal/modal.component';
-import { NotificationsSidebarComponent } from './notifications-sidebar/notifications-sidebar.component';
 import { OrchestratorDocPanelComponent } from './orchestrator-doc-panel/orchestrator-doc-panel.component';
 import { PwdExpirationNotificationComponent } from './pwd-expiration-notification/pwd-expiration-notification.component';
 import { SelectBadgesComponent } from './select-badges/select-badges.component';
@@ -83,7 +85,6 @@ import { VerticalNavigationComponent } from './vertical-navigation/vertical-navi
 import { CardGroupComponent } from './card-group/card-group.component';
 import { HelpTextComponent } from './help-text/help-text.component';
 import { FormAdvancedFieldsetComponent } from './form-advanced-fieldset/form-advanced-fieldset.component';
-import { UpgradableComponent } from './upgradable/upgradable.component';
 import { ProgressComponent } from './progress/progress.component';
 import { SidePanelComponent } from './side-panel/side-panel.component';
 import { ChartsModule } from '@carbon/charts-angular';
@@ -91,17 +92,57 @@ import { InlineMessageComponent } from './inline-message/inline-message.componen
 import { IconComponent } from './icon/icon.component';
 import { DetailsCardComponent } from './details-card/details-card.component';
 import { ToastComponent } from './notification-toast/notification-toast.component';
+import { TearsheetComponent } from './tearsheet/tearsheet.component';
 
 // Icons
 import InfoIcon from '@carbon/icons/es/information/16';
 import CopyIcon from '@carbon/icons/es/copy/32';
 import downloadIcon from '@carbon/icons/es/download/16';
-import IdeaIcon from '@carbon/icons/es/idea/20';
-import CloseIcon from '@carbon/icons/es/close/16';
+import CheckmarkFilledIcon from '@carbon/icons/es/checkmark--filled/16';
+import ErrorFilledIcon from '@carbon/icons/es/error--filled/16';
+import InformationFilledIcon from '@carbon/icons/es/information--filled/16';
+import WarningFilledIcon from '@carbon/icons/es/warning--filled/16';
+import NotificationFilledIcon from '@carbon/icons/es/notification--filled/16';
+import DataViewAlt16 from '@carbon/icons/es/data--view--alt/16';
+import DataCenter16 from '@carbon/icons/es/data--center/16';
+import Upgrade16 from '@carbon/icons/es/upgrade/16';
+import Close16 from '@carbon/icons/es/close/16';
+import WarningAltFilled16 from '@carbon/icons/es/warning--alt--filled/16';
+import WarningAltFilled32 from '@carbon/icons/es/warning--alt--filled/32';
+import Help16 from '@carbon/icons/es/help/16';
+import IncidentReporter16 from '@carbon/icons/es/incident-reporter/16';
+import IbmStreamSets16 from '@carbon/icons/es/ibm--streamsets/16';
+import DataEnrichment16 from '@carbon/icons/es/data-enrichment/16';
+import Network116 from '@carbon/icons/es/network--1/16';
+import Chip16 from '@carbon/icons/es/chip/16';
+import Plug16 from '@carbon/icons/es/plug/16';
+import VmdkDisk16 from '@carbon/icons/es/vmdk-disk/16';
+import WarningAlt16 from '@carbon/icons/es/warning--alt/16';
+import CheckMarkOutline16 from '@carbon/icons/es/checkmark--outline/16';
+import ArrowUpRight16 from '@carbon/icons/es/arrow--up-right/16';
+import InProgress16 from '@carbon/icons/es/in-progress/16';
+import ArrowDown16 from '@carbon/icons/es/arrow--down/16';
+import Launch16 from '@carbon/icons/es/launch/16';
+import Cube16 from '@carbon/icons/es/cube/16';
+import ChevronLeft16 from '@carbon/icons/es/chevron--left/16';
+import ChevronRight16 from '@carbon/icons/es/chevron--right/16';
+import CaretLeft16 from '@carbon/icons/es/caret--left/16';
+import CaretRight16 from '@carbon/icons/es/caret--right/16';
+import Locked16 from '@carbon/icons/es/locked/16';
+import WebServicesCluster20 from '@carbon/icons/es/web-services--cluster/20';
+import WebServicesCluster32 from '@carbon/icons/es/web-services--cluster/32';
+import CloudMonitoring16 from '@carbon/icons/es/cloud--monitoring/16';
+
+import { TearsheetStepComponent } from './tearsheet-step/tearsheet-step.component';
+import { PageHeaderComponent } from './page-header/page-header.component';
+import { SidebarLayoutComponent } from './sidebar-layout/sidebar-layout.component';
+import { NumberWithUnitComponent } from './number-with-unit/number-with-unit.component';
+import { ProductiveCardComponent } from './productive-card/productive-card.component';
 
 @NgModule({
   imports: [
     CommonModule,
+    ProductiveCardComponent,
     FormsModule,
     ReactiveFormsModule,
     NgbAlertModule,
@@ -112,7 +153,6 @@ import CloseIcon from '@carbon/icons/es/close/16';
     PipesModule,
     DirectivesModule,
     NgbDropdownModule,
-    ClickOutsideModule,
     SimplebarAngularModule,
     RouterModule,
     NgbDatepickerModule,
@@ -142,7 +182,11 @@ import CloseIcon from '@carbon/icons/es/close/16';
     LayoutModule,
     TilesModule,
     PopoverModule,
-    InlineLoadingModule
+    InlineLoadingModule,
+    TagModule,
+    LinkModule,
+    LayerModule,
+    ThemeModule
   ],
   declarations: [
     SparklineComponent,
@@ -152,7 +196,6 @@ import CloseIcon from '@carbon/icons/es/close/16';
     UsageBarComponent,
     LoadingPanelComponent,
     ModalComponent,
-    NotificationsSidebarComponent,
     DeleteConfirmationModalComponent,
     ConfirmationModalComponent,
     LanguageSelectorComponent,
@@ -182,13 +225,17 @@ import CloseIcon from '@carbon/icons/es/close/16';
     CardGroupComponent,
     HelpTextComponent,
     FormAdvancedFieldsetComponent,
-    UpgradableComponent,
     ProgressComponent,
     SidePanelComponent,
     IconComponent,
     InlineMessageComponent,
     DetailsCardComponent,
-    ToastComponent
+    ToastComponent,
+    TearsheetComponent,
+    TearsheetStepComponent,
+    PageHeaderComponent,
+    SidebarLayoutComponent,
+    NumberWithUnitComponent
   ],
   providers: [provideCharts(withDefaultRegisterables())],
   exports: [
@@ -200,7 +247,6 @@ import CloseIcon from '@carbon/icons/es/close/16';
     LoadingPanelComponent,
     UsageBarComponent,
     ModalComponent,
-    NotificationsSidebarComponent,
     LanguageSelectorComponent,
     GrafanaComponent,
     SelectComponent,
@@ -225,13 +271,18 @@ import CloseIcon from '@carbon/icons/es/close/16';
     CardGroupComponent,
     HelpTextComponent,
     FormAdvancedFieldsetComponent,
-    UpgradableComponent,
     ProgressComponent,
     SidePanelComponent,
     IconComponent,
     InlineMessageComponent,
     DetailsCardComponent,
-    ToastComponent
+    ToastComponent,
+    TearsheetComponent,
+    TearsheetStepComponent,
+    PageHeaderComponent,
+    SidebarLayoutComponent,
+    NumberWithUnitComponent,
+    ProductiveCardComponent
   ]
 })
 export class ComponentsModule {
@@ -242,8 +293,40 @@ export class ComponentsModule {
       EditIcon,
       CodeIcon,
       downloadIcon,
-      IdeaIcon,
-      CloseIcon
+      CheckmarkFilledIcon,
+      ErrorFilledIcon,
+      InformationFilledIcon,
+      WarningFilledIcon,
+      NotificationFilledIcon,
+      Close16,
+      DataViewAlt16,
+      DataCenter16,
+      Upgrade16,
+      WarningAltFilled16,
+      WarningAltFilled32,
+      Help16,
+      IncidentReporter16,
+      IbmStreamSets16,
+      DataEnrichment16,
+      Network116,
+      Chip16,
+      Plug16,
+      VmdkDisk16,
+      WarningAlt16,
+      CheckMarkOutline16,
+      ArrowUpRight16,
+      InProgress16,
+      ArrowDown16,
+      Launch16,
+      Cube16,
+      ChevronLeft16,
+      ChevronRight16,
+      CaretLeft16,
+      CaretRight16,
+      Locked16,
+      WebServicesCluster20,
+      WebServicesCluster32,
+      CloudMonitoring16
     ]);
   }
 }

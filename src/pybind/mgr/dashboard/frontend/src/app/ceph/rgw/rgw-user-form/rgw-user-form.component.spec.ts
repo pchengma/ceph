@@ -6,7 +6,7 @@ import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap';
 import { PipesModule } from '~/app/shared/pipes/pipes.module';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of as observableOf, throwError } from 'rxjs';
 
 import { RgwUserService } from '~/app/shared/api/rgw-user.service';
@@ -24,6 +24,7 @@ import { RgwRateLimitComponent } from '../rgw-rate-limit/rgw-rate-limit.componen
 import { By } from '@angular/platform-browser';
 import { CheckboxModule, NumberModule, SelectModule } from 'carbon-components-angular';
 import { LoadingStatus } from '~/app/shared/forms/cd-form';
+import { USER } from '~/app/shared/constants/app.constants';
 
 describe('RgwUserFormComponent', () => {
   let component: RgwUserFormComponent;
@@ -39,7 +40,6 @@ describe('RgwUserFormComponent', () => {
       ReactiveFormsModule,
       RouterTestingModule,
       SharedModule,
-      ToastrModule.forRoot(),
       NgbTooltipModule,
       PipesModule,
       CheckboxModule,
@@ -580,7 +580,7 @@ describe('RgwUserFormComponent', () => {
 
       // Assertions
       expect(result).toEqual({
-        quota_type: 'user',
+        quota_type: USER,
         enabled: true,
         max_size_kb: -1,
         max_objects: -1
@@ -604,7 +604,7 @@ describe('RgwUserFormComponent', () => {
       const result = component._getUserQuotaArgs();
       expect(toBytesSpy).toHaveBeenCalledWith(2048);
       expect(result).toEqual({
-        quota_type: 'user',
+        quota_type: USER,
         enabled: true,
         max_size_kb: '2048', // Expect the converted KB value
         max_objects: -1
@@ -624,7 +624,7 @@ describe('RgwUserFormComponent', () => {
       const result = component._getUserQuotaArgs();
 
       expect(result).toEqual({
-        quota_type: 'user',
+        quota_type: USER,
         enabled: true,
         max_size_kb: -1,
         max_objects: 1000

@@ -511,8 +511,14 @@ public:
   const_reference value(int i) const { return params_type::element(slot(i)); }
 
   // Getters/setter for the child at position i in the node.
-  btree_node* child(int i) const { return GetField<&internal_fields::children>()[i]; }
-  btree_node*& mutable_child(int i) { return GetField<&internal_fields::children>()[i]; }
+  btree_node* child(int i) const {
+    auto* p = GetField<&internal_fields::children>();
+    return p[i];
+  }
+  btree_node*& mutable_child(int i) {
+    auto* p = GetField<&internal_fields::children>();
+    return p[i];
+  }
   void clear_child(int i) {
 #ifndef NDEBUG
     memset(&mutable_child(i), 0, sizeof(btree_node*));
@@ -1326,8 +1332,10 @@ class btree {
     deallocate(node_type::InternalSize(), node);
   }
   void delete_leaf_node(node_type *node) {
-    node->destroy(mutable_allocator());
-    deallocate(node_type::LeafSize(node->max_count()), node);
+    if (node != EmptyNode()) {
+      node->destroy(mutable_allocator());
+      deallocate(node_type::LeafSize(node->max_count()), node);
+    }
   }
 
   // Rebalances or splits the node iter points to.

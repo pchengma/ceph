@@ -1,8 +1,10 @@
 <div class="cd-navbar-main">
   <!-- ************************ -->
-  <!-- NOTIFICATIONS     -->
+  <!-- NOTIFICATION PANEL     -->
   <!-- ************************ -->
-  <cd-notifications-sidebar></cd-notifications-sidebar>
+   @if(notificationService.panelState$ | async; as isNotifPanelOpen) {
+  <cd-notification-panel></cd-notification-panel>
+   }
   <!-- ************************ -->
   <!-- HEADER                   -->
   <!-- ************************ -->
@@ -28,13 +30,13 @@
         </ng-container>
       </cds-header-menu>
     </cds-header-navigation>
-
     <cds-header-global>
       <cds-header-navigation>
         <cd-language-selector class="d-flex"></cd-language-selector>
       </cds-header-navigation>
       <div class="cds--btn cds--btn--icon-only cds--header__action"
-           (click)="toggleSidebar()">
+           data-testid="header-notification-icon"
+           (click)="onNotificationSelected($event)">
         <cd-notifications></cd-notifications>
       </div>
       <div class="cds--btn cds--btn--icon-only cds--header__action">
@@ -54,7 +56,7 @@
   <!-- ***************************** -->
   <ng-template #brandTemplate>
     <a class="cds--header__name navbar-brand ms-3"
-       routerLink="/dashboard">
+       routerLink="/overview">
       <img src="assets/Ceph_Ceph_Logo_with_text_white.svg"
            alt="Ceph" />
     </a>
@@ -83,20 +85,20 @@
                    class="mt-5"
                    (click)="onMenuClick($event)"
                    #sidenavContainer>
-        <!-- Dashboard -->
-        <cds-sidenav-item route="/dashboard"
+        <!-- Overview -->
+        <cds-sidenav-item route="/overview"
                           [useRouter]="true"
-                          title="Dashboard"
+                          title="Overview"
                           i18n-title
-                          class="nav-item tc_menuitem_dashboard">
+                          class="nav-item tc_menuitem_overview">
           <svg cdsIcon="template"
                icon
                size="20"></svg>
           <span i18n>
-            Dashboard</span>
+            Overview</span>
         </cds-sidenav-item>
         <!-- Multi-cluster Dashboard -->
-        <cds-sidenav-menu title="Multi-Cluster"
+        <cds-sidenav-menu title="Multi-cluster"
                           *ngIf="permissions.configOpt.read"
                           i18n-title>
           <svg cdsIcon="edge-cluster"
@@ -108,10 +110,10 @@
                             [useRouter]="true"
                             class="tc_submenuitem tc_submenuitem_multiCluster_overview"><span i18n>Overview</span></cds-sidenav-item>
           <cds-sidenav-item route="/multi-cluster/manage-clusters"
-                            title="Manage Clusters"
+                            title="Manage clusters"
                             i18n-title
                             [useRouter]="true"
-                            class="tc_submenuitem tc_submenuitem_multiCluster_manage_clusters"><span i18n>Manage Clusters</span></cds-sidenav-item>
+                            class="tc_submenuitem tc_submenuitem_multiCluster_manage_clusters"><span i18n>Manage clusters</span></cds-sidenav-item>
         </cds-sidenav-menu>
         <!-- Cluster -->
         <cds-sidenav-menu title="Cluster"
@@ -141,16 +143,16 @@
                             class="tc_submenuitem tc_submenuitem_cluster_osds"><span i18n>OSDs</span></cds-sidenav-item>
           <cds-sidenav-item route="/inventory"
                             [useRouter]="true"
-                            title="Physical Disks"
+                            title="Physical disks"
                             i18n-title
                             *ngIf="permissions.hosts.read"
-                            class="tc_submenuitem tc_submenuitem_cluster_inventory"><span i18n>Physical Disks</span></cds-sidenav-item>
+                            class="tc_submenuitem tc_submenuitem_cluster_inventory"><span i18n>Physical disks</span></cds-sidenav-item>
           <cds-sidenav-item route="/crush-map"
                             [useRouter]="true"
-                            title="CRUSH Map"
+                            title="CRUSH map"
                             i18n-title
                             *ngIf="permissions.osd.read"
-                            class="tc_submenuitem tc_submenuitem_cluster_crush"><span i18n>CRUSH Map</span></cds-sidenav-item>
+                            class="tc_submenuitem tc_submenuitem_cluster_crush"><span i18n>CRUSH map</span></cds-sidenav-item>
           <cds-sidenav-item route="/monitor"
                             [useRouter]="true"
                             title="Monitors"
@@ -179,10 +181,14 @@
                             *ngIf="permissions.rbdMirroring.read && enabledFeature.mirroring"
                             class="tc_submenuitem tc_submenuitem_block_mirroring">
             <span i18n>Mirroring
-              <small *ngIf="summaryData?.rbd_mirroring?.warnings !== 0"
-                     class="badge badge-warning">{{ summaryData?.rbd_mirroring?.warnings }}</small>
-              <small *ngIf="summaryData?.rbd_mirroring?.errors !== 0"
-                     class="badge badge-danger">{{ summaryData?.rbd_mirroring?.errors }}</small>
+              <cds-tag *ngIf="summaryData?.rbd_mirroring?.warnings !== 0"
+                       class="tag-warning content-theme">
+                {{ summaryData?.rbd_mirroring?.warnings }}
+              </cds-tag>
+              <cds-tag *ngIf="summaryData?.rbd_mirroring?.errors !== 0"
+                       class="tag-danger content-theme">
+                {{ summaryData?.rbd_mirroring?.errors }}
+              </cds-tag>
             </span>
           </cds-sidenav-item>
           <cds-sidenav-item route="/block/iscsi"
@@ -262,10 +268,18 @@
                size="20"></svg>
           <cds-sidenav-item route="/cephfs/fs"
                             [useRouter]="true"
-                            title="File Systems"
+                            title="File systems"
                             i18n-title
                             *ngIf="permissions.cephfs.read && enabledFeature.cephfs"
-                            class="tc_submenuitem tc_submenuitem_file_cephfs"><span i18n>File Systems</span></cds-sidenav-item>
+                            class="tc_submenuitem tc_submenuitem_file_cephfs"><span i18n>File systems</span></cds-sidenav-item>
+          <!-- Removed for umbrella release, will be re-enabled in next release
+          <cds-sidenav-item route="/cephfs/mirroring"
+                            [useRouter]="true"
+                            title="Mirroring"
+                            i18n-title
+                            *ngIf="permissions.cephfs.read && enabledFeature.cephfs"
+                            class="tc_submenuitem tc_submenuitem_file_cephfs"><span i18n>Mirroring</span></cds-sidenav-item>
+          -->
           <cds-sidenav-item route="/cephfs/nfs"
                             [useRouter]="true"
                             title="NFS"
@@ -301,10 +315,10 @@
                             class="tc_submenuitem tc_submenuitem_observe_monitoring">
             <span i18n>
               <ng-container>Alerts</ng-container>
-              <small *ngIf="prometheusAlertService.activeCriticalAlerts > 0"
-                     class="badge badge-danger ms-1">{{ prometheusAlertService.activeCriticalAlerts }}</small>
-              <small *ngIf="prometheusAlertService.activeWarningAlerts > 0"
-                     class="badge badge-warning ms-1">{{ prometheusAlertService.activeWarningAlerts }}</small>
+              <cds-tag *ngIf="prometheusAlertService.activeCriticalAlerts > 0"
+                     class="tag-danger ms-1 content-theme">{{ prometheusAlertService.activeCriticalAlerts }}</cds-tag>
+              <cds-tag *ngIf="prometheusAlertService.activeWarningAlerts > 0"
+                     class="tag-warning ms-1 content-theme">{{ prometheusAlertService.activeWarningAlerts }}</cds-tag>
             </span>
           </cds-sidenav-item>
         </cds-sidenav-menu>
@@ -330,16 +344,16 @@
                             class="tc_submenuitem tc_submenuitem_admin_upgrade"><span i18n>Upgrade</span></cds-sidenav-item>
           <cds-sidenav-item route="/ceph-users"
                             [useRouter]="true"
-                            title="Ceph Users"
+                            title="Ceph users"
                             i18n-title
                             *ngIf="permissions.configOpt.read"
-                            class="tc_submenuitem tc_submenuitem_admin_users"><span i18n>Ceph Users</span></cds-sidenav-item>
+                            class="tc_submenuitem tc_submenuitem_admin_users"><span i18n>Ceph users</span></cds-sidenav-item>
           <cds-sidenav-item route="/mgr-modules"
                             [useRouter]="true"
-                            title="Manager Modules"
+                            title="Manager modules"
                             i18n-title
                             *ngIf="permissions.configOpt.read"
-                            class="tc_submenuitem tc_submenuitem_admin_modules"><span i18n>Manager Modules</span></cds-sidenav-item>
+                            class="tc_submenuitem tc_submenuitem_admin_modules"><span i18n>Manager modules</span></cds-sidenav-item>
           <cds-sidenav-item route="/configuration"
                             [useRouter]="true"
                             title="Configuration"

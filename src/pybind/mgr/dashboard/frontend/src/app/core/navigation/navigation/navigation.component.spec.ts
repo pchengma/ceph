@@ -3,7 +3,6 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastrModule } from 'ngx-toastr';
 import { SimplebarAngularModule } from 'simplebar-angular';
 import { of } from 'rxjs';
 
@@ -69,7 +68,6 @@ describe('NavigationComponent', () => {
     imports: [
       HttpClientTestingModule,
       SharedModule,
-      ToastrModule.forRoot(),
       RouterTestingModule,
       SimplebarAngularModule,
       NgbModule,
@@ -227,19 +225,19 @@ describe('NavigationComponent', () => {
       fixture.detectChanges();
 
       const expectedTexts = {
-        '.tc_menuitem_dashboard': 'Dashboard',
+        '.tc_menuitem_overview': 'Overview',
         '.tc_submenuitem_multiCluster_overview': 'Overview',
-        '.tc_submenuitem_multiCluster_manage_clusters': 'Manage Clusters',
+        '.tc_submenuitem_multiCluster_manage_clusters': 'Manage clusters',
         '.tc_submenuitem_cluster_pool': 'Pools',
         '.tc_submenuitem_cluster_hosts': 'Hosts',
-        '.tc_submenuitem_cluster_inventory': 'Physical Disks',
+        '.tc_submenuitem_cluster_inventory': 'Physical disks',
         '.tc_submenuitem_admin_services': 'Services',
         '.tc_submenuitem_cluster_monitor': 'Monitors',
         '.tc_submenuitem_cluster_osds': 'OSDs',
-        '.tc_submenuitem_cluster_crush': 'CRUSH Map',
+        '.tc_submenuitem_cluster_crush': 'CRUSH map',
         '.tc_submenuitem_admin_configuration': 'Configuration',
-        '.tc_submenuitem_admin_modules': 'Manager Modules',
-        '.tc_submenuitem_admin_users': 'Ceph Users',
+        '.tc_submenuitem_admin_modules': 'Manager modules',
+        '.tc_submenuitem_admin_users': 'Ceph users',
         '.tc_submenuitem_admin_upgrade': 'Upgrade',
         '.tc_submenuitem_observe_log': 'Logs',
         '.tc_submenuitem_observe_monitoring': 'Alerts',
@@ -255,7 +253,7 @@ describe('NavigationComponent', () => {
         '.tc_submenuitem_rgw_daemons': 'Gateways',
         '.tc_submenuitem_rgw_nfs': 'NFS',
         '.tc_submenuitem_rgw_configuration': 'Configuration',
-        '.tc_submenuitem_file_cephfs': 'File Systems',
+        '.tc_submenuitem_file_cephfs': 'File systems',
         '.tc_submenuitem_file_nfs': 'NFS'
       };
 

@@ -5,12 +5,14 @@ import string
 from typing import List, Dict, Any, Tuple, cast, Optional, TYPE_CHECKING
 
 from ceph.deployment.service_spec import ServiceSpec, IngressSpec, MonitorCertSource
+from ceph.deployment.utils import is_ipv6
 from mgr_util import build_url
 from cephadm import utils
 from orchestrator import OrchestratorError, DaemonDescription
-from cephadm.services.cephadmservice import CephadmDaemonDeploySpec, CephService
+from cephadm.services.cephadmservice import CephadmDaemonDeploySpec, CephService, CephadmService
 from .service_registry import register_cephadm_service
 from cephadm.tlsobject_types import TLSCredentials
+from cephadm.schedule import get_placement_hosts
 
 if TYPE_CHECKING:
     from ..module import CephadmOrchestrator
@@ -116,13 +118,13 @@ class IngressService(CephService):
         assert ingress_spec.backend_service
         daemons = mgr.cache.get_daemons_by_service(ingress_spec.backend_service)
         deps = [d.name() for d in daemons]
-        for attr in ['ssl_cert', 'ssl_key']:
-            ssl_cert_key = getattr(ingress_spec, attr, None)
-            if ssl_cert_key:
-                assert isinstance(ssl_cert_key, str)
-                deps.append(f'ssl-cert-key:{str(utils.md5_hash(ssl_cert_key))}')
+        backend_spec = mgr.spec_store[ingress_spec.backend_service].spec
+        if backend_spec.service_type == 'nfs':
+            hosts = get_placement_hosts(spec, mgr.cache.get_schedulable_hosts(), mgr.cache.get_draining_hosts())
+            deps.append(f'placement_hosts:{",".join(sorted(h.hostname for h in hosts))}')
 
-        return sorted(deps)
+        parent_deps = CephadmService.get_dependencies(mgr, spec)
+        return sorted(deps + parent_deps)
 
     def haproxy_generate_config(
             self,
@@ -150,6 +152,7 @@ class IngressService(CephService):
         if spec.monitor_password:
             password = spec.monitor_password
 
+        peer_hosts = {}
         if backend_spec.service_type == 'nfs':
             mode = 'tcp'
             # we need to get the nfs daemon with the highest rank_generation for
@@ -202,8 +205,20 @@ class IngressService(CephService):
                         'ip': '0.0.0.0',
                         'port': 0,
                     })
+            # Get peer hosts for haproxy active-active configuration using placement hosts
+            hosts = get_placement_hosts(
+                spec,
+                self.mgr.cache.get_schedulable_hosts(),
+                self.mgr.cache.get_draining_hosts()
+            )
+            if hosts:
+                for host in hosts:
+                    peer_ip = self.mgr.inventory.get_addr(host.hostname)
+                    peer_hosts[host.hostname] = peer_ip
+                logger.debug(f"HAProxy peer hosts for {spec.service_name()}: {peer_hosts}")
+
         else:
-            mode = 'http'
+            mode = 'tcp' if spec.use_tcp_mode_over_rgw else 'http'
             servers = [
                 {
                     'name': d.name(),
@@ -254,9 +269,11 @@ class IngressService(CephService):
                 'frontend_port': frontend_port,
                 'monitor_port': spec.monitor_port,
                 'default_server_opts': server_opts,
-                'health_check_interval': spec.health_check_interval or '2s',
+                'health_check_interval': spec.health_check_interval or ('30s' if backend_spec.service_type == 'nfs' else '2s'),
                 'v4v6_flag': v4v6_flag,
                 'monitor_ssl_file': monitor_ssl_file,
+                'peer_hosts': peer_hosts,
+                'is_ipv6': is_ipv6(ip)
             }
         )
         config_files = {
@@ -509,3 +526,71 @@ class IngressService(CephService):
             if not monitor_addr:
                 logger.debug(f"No IP address found in the network {spec.monitor_networks} on host {host}.")
         return monitor_addr, monitor_port
+
+    def has_placement_changed(self, deps: List[str], spec: ServiceSpec) -> bool:
+        """Check if placement hosts have changed"""
+        def extract_hosts(deps: List[str]) -> List[str]:
+            for dep in deps:
+                if dep.startswith('placement_hosts:'):
+                    host_string = dep.split(':', 1)[1]
+                    return host_string.split(',') if host_string else []
+            return []
+
+        hosts = extract_hosts(deps)
+        current_hosts = get_placement_hosts(
+            spec,
+            self.mgr.cache.get_schedulable_hosts(),
+            self.mgr.cache.get_draining_hosts()
+        )
+        current_hosts = sorted(h.hostname for h in current_hosts)
+        if current_hosts != hosts:
+            logger.debug(f'Placement has changed for {spec.service_name()} from {hosts} -> {current_hosts}')
+            return True
+        return False
+
+    def choose_next_action(
+        self,
+        scheduled_action: utils.Action,
+        daemon_type: Optional[str],
+        spec: Optional[ServiceSpec],
+        curr_deps: List[str],
+        last_deps: List[str],
+    ) -> utils.NextDaemonStep:
+        """Given the scheduled_action, service spec, daemon_type, and
+        current and previous dependency lists return the next action that
+        this service would prefer cephadm take.
+        """
+        step = super().choose_next_action(
+            scheduled_action, daemon_type, spec, curr_deps, last_deps
+        )
+        action = step.action
+        if (
+            action is not utils.Action.REDEPLOY
+            and daemon_type == 'haproxy'
+            and spec
+            and hasattr(spec, 'backend_service')
+        ):
+            backend_spec = self.mgr.spec_store[spec.backend_service].spec
+            if backend_spec.service_type == 'nfs':
+                if self.has_placement_changed(last_deps, spec):
+                    logger.debug(
+                        'Redeploy wanted %s: placement has changed',
+                        spec.service_name(),
+                    )
+                    return utils.NextDaemonStep(utils.Action.REDEPLOY)
+                sym_diff = set(curr_deps).symmetric_difference(last_deps)
+                if sym_diff and all(
+                    s.startswith(f'nfs.{backend_spec.service_id}')
+                    for s in sym_diff
+                ):
+                    logger.debug(
+                        'Reconfigure HAProxy with SIGHUP due to change in NFS backend '
+                        '(%s)',
+                        spec.service_name(),
+                    )
+                    return utils.NextDaemonStep(
+                        utils.Action.RECONFIG,
+                        skip_restart_for_reconfig=True,
+                        send_signal_to_daemon='SIGHUP',
+                    )
+        return step

@@ -51,6 +51,7 @@ class RGWZonePlacementInfo;
 struct rgw_pubsub_topic;
 struct RGWOIDCProviderInfo;
 struct RGWRoleInfo;
+class RGWGetObj_Filter;
 
 using RGWBucketListNameFilter = std::function<bool (const std::string&)>;
 
@@ -63,6 +64,10 @@ namespace rgw {
 namespace rgw::restore {
   class Restore;
   struct RestoreEntry;
+}
+
+namespace rgw::lua {
+  class Background;
 }
 
 class RGWGetDataCB {
@@ -262,6 +267,29 @@ struct TopicList {
   std::vector<std::string> topics;
   /// The next marker to resume listing, or empty
   std::string next_marker;
+};
+
+/**
+ * @brief A factory for DataProcessor instances
+ *
+ * This factory is used to create DataProcessor instances that can process data
+ * in a streaming fashion. It is used by the RGWGetDataCB interface to allow
+ * data to be processed as it is read from the backing store.
+ * The factory is responsible for passing the read data to the DataProcessor
+ * passed through the set_writer() method.
+ */
+class DataProcessorFactory {
+ public:
+  DataProcessorFactory() {}
+  virtual ~DataProcessorFactory() {}
+
+  virtual int set_writer(DataProcessor* writer,
+                         Attrs& attrs,
+                         const DoutPrefixProvider *dpp,
+                         optional_yield y) = 0;
+  virtual RGWGetObj_Filter* get_filter() = 0;
+  virtual bool need_copy_data() = 0;
+  virtual void finalize_attrs(Attrs& attrs) { /* default implementation does nothing */ }
 };
 
 /**
@@ -651,12 +679,14 @@ class Driver {
     virtual int store_oidc_provider(const DoutPrefixProvider* dpp,
                                     optional_yield y,
                                     const RGWOIDCProviderInfo& info,
-                                    bool exclusive) = 0;
+                                    bool exclusive,
+                                    RGWObjVersionTracker* objv_tracker) = 0;
     virtual int load_oidc_provider(const DoutPrefixProvider* dpp,
                                    optional_yield y,
                                    std::string_view tenant,
                                    std::string_view url,
-                                   RGWOIDCProviderInfo& info) = 0;
+                                   RGWOIDCProviderInfo& info,
+                                   RGWObjVersionTracker* objv_tracker) = 0;
     virtual int delete_oidc_provider(const DoutPrefixProvider* dpp,
                                      optional_yield y,
                                      std::string_view tenant,
@@ -1050,12 +1080,15 @@ class Bucket {
         RGWObjVersionTracker* objv_tracker) = 0;
     /** Move the pending bucket logging object into the bucket
      if "last_committed" is not null, it will be set to the name of the last committed object
+     if async is true, write the entry to the commit lists to be processed by the BucketLoggingManager
      * */
-    virtual int commit_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp, const std::string& prefix, std::string* last_committed) = 0;
+    virtual int commit_logging_object(const std::string& obj_name, optional_yield y,
+	const DoutPrefixProvider *dpp, const std::string& prefix,
+	std::string* last_committed, bool async) = 0;
     //** Remove the pending bucket logging object */
-    virtual int remove_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp) = 0;
+    virtual int remove_logging_object(const std::string& obj_name, const std::string& prefix, optional_yield y, const DoutPrefixProvider *dpp) = 0;
     /** Write a record to the pending bucket logging object */
-    virtual int write_logging_object(const std::string& obj_name, const std::string& record, optional_yield y, const DoutPrefixProvider *dpp, bool async_completion) = 0;
+    virtual int write_logging_object(const std::string& obj_name, const std::string& record, const std::string& prefix, optional_yield y, const DoutPrefixProvider *dpp, bool async_completion) = 0;
 
     /* dang - This is temporary, until the API is completed */
     virtual rgw_bucket& get_key() = 0;
@@ -1207,6 +1240,7 @@ class Object {
 	       boost::optional<ceph::real_time> delete_at,
                std::string* version_id, std::string* tag, std::string* etag,
                void (*progress_cb)(off_t, void *), void* progress_data,
+               DataProcessorFactory* dp_factory,
                const DoutPrefixProvider* dpp, optional_yield y) = 0;
 
     /** return logging subsystem */
@@ -1248,7 +1282,7 @@ class Object {
      * deleted.  @note the attribute APIs may be revisited in the future. */
     virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs, Attrs* delattrs, optional_yield y, uint32_t flags) = 0;
     /** Get attributes for this object */
-    virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp, rgw_obj* target_obj = NULL) = 0;
+    virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp) = 0;
     /** Modify attributes for this object. */
     virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val, optional_yield y, const DoutPrefixProvider* dpp,
                                  uint32_t flags = rgw::sal::FLAG_LOG_OP) = 0;
@@ -1259,7 +1293,7 @@ class Object {
     /** Create a randomized instance ID for this object */
     virtual void gen_rand_obj_instance_name() = 0;
     /** Get a multipart serializer for this object */
-    virtual std::unique_ptr<MPSerializer> get_serializer(const DoutPrefixProvider *dpp,
+    virtual std::unique_ptr<MPSerializer> get_serializer(const DoutPrefixProvider *dpp, optional_yield y,
 							 const std::string& lock_name) = 0;
     /** Move the data of an object to new placement storage */
     virtual int transition(Bucket* bucket,
@@ -1283,6 +1317,7 @@ class Object {
 			   CephContext* cct,
 		           std::optional<uint64_t> days,
    	 		   bool& in_progress,
+			   uint64_t& size,
 			   const DoutPrefixProvider* dpp,
 			   optional_yield y) = 0;
     /** Check to see if two placement rules match */
@@ -1508,6 +1543,9 @@ public:
   /** Get the Object that represents this upload */
   virtual std::unique_ptr<rgw::sal::Object> get_meta_obj() = 0;
 
+  /** True if this store persists per-part GCM salts; gates AEAD UploadPart salt emission. */
+  virtual bool supports_crypt_part_salts() const { return false; }
+
   /** Initialize this upload */
   virtual int init(const DoutPrefixProvider* dpp, optional_yield y, ACLOwner& owner, rgw_placement_rule& dest_placement, rgw::sal::Attrs& attrs) = 0;
   /** List all the parts of this upload, filling the parts cache */
@@ -1579,7 +1617,7 @@ public:
   virtual ~Serializer() = default;
 
   /** Try to take the lock for the given amount of time. */
-  virtual int try_lock(const DoutPrefixProvider *dpp, utime_t dur, optional_yield y) = 0;
+  virtual int try_lock(const DoutPrefixProvider *dpp, ceph::timespan dur, optional_yield y) = 0;
   /** Unlock the lock */
   virtual int unlock(const DoutPrefixProvider *dpp, optional_yield y)  = 0;
 
@@ -1893,6 +1931,8 @@ public:
 
   /** Get a script named with the given key from the backing store */
   virtual int get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script) = 0;
+  /** Get a copy of the lua bytecode if it exists, else the script named with the given key from the backing store */
+  virtual std::tuple<rgw::lua::LuaCodeType, int> get_script_or_bytecode(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key) = 0;
   /** Put a script named with the given key to the backing store */
   virtual int put_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& script) = 0;
   /** Delete a script named with the given key from the backing store */
@@ -1909,6 +1949,8 @@ public:
   virtual const std::string& luarocks_path() const = 0;
   /** Set the path to the loarocks install location **/
   virtual void set_luarocks_path(const std::string& path) = 0;
+
+  virtual void set_lua_background(rgw::lua::Background* background) = 0;
 };
 
 /** @} namespace rgw::sal in group RGWSAL */
@@ -1945,6 +1987,7 @@ public:
 				      bool run_sync_thread,
 				      bool run_reshard_thread,
 				      bool run_notification_thread,
+				      bool run_bucket_logging_thread,
 				      bool background_tasks,
 				      optional_yield y,
               rgw::sal::ConfigStore* cfgstore,
@@ -1960,6 +2003,7 @@ public:
 						   run_sync_thread,
 						   run_reshard_thread,
                run_notification_thread,
+				                   run_bucket_logging_thread,
 						   use_cache, use_gc,
 						   background_tasks, y, cfgstore, admin);
     return driver;
@@ -1988,7 +2032,8 @@ public:
 						bool quota_threads,
 						bool run_sync_thread,
 						bool run_reshard_thread,
-            bool run_notification_thread,
+                                                bool run_notification_thread,
+                                                bool run_bucket_logging_thread,
 						bool use_metadata_cache,
 						bool use_gc, bool background_tasks,
 						optional_yield y, rgw::sal::ConfigStore* cfgstore, bool admin);

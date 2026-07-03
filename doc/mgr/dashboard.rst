@@ -244,6 +244,19 @@ For example, a key pair can be generated with a command similar to:
    -subj "/O=IT/CN=ceph-mgr-dashboard" -days 3650 \
    -keyout dashboard.key -out dashboard.crt -extensions v3_ca
 
+.. note::
+
+   Currently, the Ceph Dashboard supports only RSA private keys for SSL/TLS
+   certificates. If you attempt to configure the dashboard with an ECDSA/EC
+   key, the module will fail to start with an error similar to:
+
+   ``MGR_MODULE_ERROR: Module 'dashboard' has failed: key type unsupported``
+
+   This limitation exists because the verification routine in the Ceph Manager
+   uses pyOpenSSL, which supports only RSA keys in its
+   ``PKey.check()`` method. Until this restriction is lifted, generate or
+   request certificates with RSA keys.
+
 The ``dashboard.crt`` file should then be signed by a CA. Once that is done, you
 can enable it for Ceph manager instances by running the following commands:
 
@@ -808,6 +821,29 @@ To enable SSO:
 .. prompt:: bash $
 
    ceph dashboard sso enable oauth2
+
+Automatic SSO Disable on Service Failure
+"""""""""""""""""""""""""""""""""""""""""
+
+OAuth2 SSO depends on ``oauth2-proxy`` service being active.
+Cephadm continuously monitors this service and will **automatically disable OAuth2 SSO**
+in the Dashboard if the service goes down or is removed.
+A warning is recorded in the Ceph log when this happens:
+
+.. code-block:: text
+
+   OAuth2 SSO has been automatically disabled because oauth2-proxy is no longer running.
+
+Once the required services are back up and running, SSO must be **re-enabled manually**:
+
+.. prompt:: bash $
+
+   ceph dashboard sso enable oauth2
+
+.. note::
+
+   Enabling OAuth2 SSO is blocked if cephadm detects that ``oauth2-proxy`` is not currently running. Deploy and start this service before
+   attempting to enable SSO.
 
 .. _dashboard-alerting:
 

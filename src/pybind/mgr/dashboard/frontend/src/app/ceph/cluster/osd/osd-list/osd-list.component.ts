@@ -1,4 +1,12 @@
-import { Component, OnInit, TemplateRef, ViewChild } from '@angular/core';
+import {
+  Component,
+  EventEmitter,
+  Input,
+  OnInit,
+  Output,
+  TemplateRef,
+  ViewChild
+} from '@angular/core';
 import { UntypedFormControl } from '@angular/forms';
 import { Router } from '@angular/router';
 
@@ -49,9 +57,13 @@ const BASE_URL = 'osd';
   selector: 'cd-osd-list',
   templateUrl: './osd-list.component.html',
   styleUrls: ['./osd-list.component.scss'],
-  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }]
+  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }],
+  standalone: false
 })
 export class OsdListComponent extends ListWithDetails implements OnInit {
+  @Input() showTabs = true;
+  @Output() createAction = new EventEmitter<void>();
+
   @ViewChild('osdUsageTpl', { static: true })
   osdUsageTpl: TemplateRef<any>;
   @ViewChild('markOsdConfirmationTpl', { static: true })
@@ -124,7 +136,17 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
         name: this.actionLabels.CREATE,
         permission: 'create',
         icon: Icons.add,
-        click: () => this.router.navigate([this.urlBuilder.getCreate()]),
+        click: () => {
+          if (this.createAction.observers.length > 0) {
+            this.createAction.emit();
+          } else {
+            this.router.navigate([this.urlBuilder.getCreate()], {
+              state: {
+                returnUrl: this.router.url
+              }
+            });
+          }
+        },
         disable: (selection: CdTableSelection) => this.getDisable('create', selection),
         canBePrimary: (selection: CdTableSelection) => !selection.hasSelection
       },
@@ -290,14 +312,14 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
         prop: 'collectedStates',
         name: $localize`Status`,
         flexGrow: 1,
-        cellTransformation: CellTemplate.badge,
+        cellTransformation: CellTemplate.tag,
         customTemplateConfig: {
           map: {
-            in: { class: 'badge-success' },
-            up: { class: 'badge-success' },
-            down: { class: 'badge-danger' },
-            out: { class: 'badge-danger' },
-            destroyed: { class: 'badge-danger' }
+            in: { class: 'tag-success' },
+            up: { class: 'tag-success' },
+            down: { class: 'tag-danger' },
+            out: { class: 'tag-danger' },
+            destroyed: { class: 'tag-danger' }
           }
         }
       },
@@ -305,11 +327,11 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
         prop: 'tree.device_class',
         name: $localize`Device class`,
         flexGrow: 1.2,
-        cellTransformation: CellTemplate.badge,
+        cellTransformation: CellTemplate.tag,
         customTemplateConfig: {
           map: {
-            hdd: { class: 'badge-hdd' },
-            ssd: { class: 'badge-ssd' }
+            hdd: { class: 'tag-hdd' },
+            ssd: { class: 'tag-ssd' }
           }
         }
       },
@@ -494,14 +516,14 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
   }
 
   configureFlagsAction() {
-    this.bsModalRef = this.modalService.show(OsdFlagsModalComponent);
+    this.bsModalRef = this.cdsModalService.show(OsdFlagsModalComponent);
   }
 
   configureFlagsIndivAction() {
     const initialState = {
       selected: this.getSelectedOsds()
     };
-    this.bsModalRef = this.modalService.show(OsdFlagsIndivModalComponent, initialState);
+    this.bsModalRef = this.cdsModalService.show(OsdFlagsIndivModalComponent, initialState);
   }
 
   showConfirmationModal(markAction: string, onSubmit: (id: number) => Observable<any>) {

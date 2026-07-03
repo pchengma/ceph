@@ -4,7 +4,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
-from typing import NamedTuple, Optional
+from typing import List, NamedTuple, Optional
 
 import requests
 
@@ -108,7 +108,17 @@ class PrometheusRESTController(RESTController):
         return response
 
     def get_access_info(self, module_name):
-        # type (str, str, str, str, str)
+        """
+        Fetches credentials and certificate files for Prometheus/Alertmanager API access.
+        Cases handled:
+        - If secure_monitoring_stack and/or mgmt_gateway enabled:
+                fetch credentials (user, password, certs).
+        - If oauth2-proxy enabled: fetch credentials,
+                but only certs are used (user/password ignored).
+        - If not cephadm backend: returns credentials with all fields as None.
+        Returns:
+            Credentials namedtuple with user, password, ca_cert_file, cert_file, pkey_file.
+        """
 
         def write_to_tmp_file(content):
             # type (str)
@@ -139,11 +149,11 @@ class PrometheusRESTController(RESTController):
         cached_creds = self._get_cached_credentials(module_name)
         if cached_creds:
             return cached_creds
-
-        secure_monitoring_stack = mgr.get_module_option_ex('cephadm', 'secure_monitoring_stack')
-        if not secure_monitoring_stack:
-            return Credentials(user, password, ca_cert_file, cert_file, pkey_file)
         orch_client = OrchClient.instance()
+        security_config = orch_client.monitoring.get_security_config()
+        if not security_config.get('security_enabled', False):
+            return Credentials(user, password, ca_cert_file, cert_file, pkey_file)
+
         if orch_client.available():
             if module_name == 'prometheus':
                 access_info = orch_client.monitoring.get_prometheus_access_info()
@@ -250,6 +260,17 @@ class Prometheus(PrometheusRESTController):
                 raise DashboardException("Cluster fsid not found", component='prometheus')
             return self.alert_proxy('GET', f'/alerts/groups?filter=cluster={fsid}', params)
         return self.alert_proxy('GET', '/alerts/groups', params)
+
+    @RESTController.Collection(method='PUT', path='/set_remote_write')
+    def set_remote_write(self, remote_write_url: str, remote_write_allowed_metrics: List[str]):
+        orch_client = OrchClient.instance()
+        return orch_client.monitoring.set_prometheus_remote_write(remote_write_url,
+                                                                  remote_write_allowed_metrics)
+
+    @RESTController.Collection(method='PUT', path='/remove_remote_write')
+    def remove_remote_write(self, url: str):
+        orch_client = OrchClient.instance()
+        return orch_client.monitoring.remove_prometheus_remote_write(url)
 
     @RESTController.Collection(method='GET', path='/prometheus_query_data')
     def get_prometeus_query_data(self, **params):

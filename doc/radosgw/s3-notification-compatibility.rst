@@ -4,7 +4,7 @@
 S3 Bucket Notifications Compatibility
 =====================================
 
-Ceph's `Bucket Notifications`_ API follows `AWS S3 Bucket Notifications API`_.
+Ceph's :ref:`radosgw-notifications` API follows `AWS S3 Bucket Notifications API`_.
 However, some differences exist, as listed below.
 
 
@@ -29,7 +29,7 @@ Notification Configuration XML
 Following tags (and the tags inside them) are not supported:
 
 +-----------------------------------+----------------------------------------------+
-| Tag                               | Remaks                                       |
+| Tag                               | Remarks                                      |
 +===================================+==============================================+
 | ``<QueueConfiguration>``          | not needed, we treat all destinations as SNS |
 +-----------------------------------+----------------------------------------------+
@@ -142,9 +142,13 @@ Event Types
 +--------------------------------------------------------+-------------------------------------------+
 | ``s3:Replication:DeletionMarkerCreated``               | Defined, Supported (not generated)        |
 +--------------------------------------------------------+-------------------------------------------+
-| ``s3:ObjectRestore:Post``                              | Not applicable                            |
+| ``s3:ObjectRestore:*``                                 | Supported                                 |
 +--------------------------------------------------------+-------------------------------------------+
-| ``s3:ObjectRestore:Complete``                          | Not applicable                            |
+| ``s3:ObjectRestore:Post``                              | Supported                                 |
++--------------------------------------------------------+-------------------------------------------+
+| ``s3:ObjectRestore:Completed``                         | Supported                                 |
++--------------------------------------------------------+-------------------------------------------+
+| ``s3:ObjectRestore:Delete``                            | Supported                                 |
 +--------------------------------------------------------+-------------------------------------------+
 | ``s3:ReducedRedundancyLostObject``                     | Not applicable                            |
 +--------------------------------------------------------+-------------------------------------------+
@@ -189,5 +193,3 @@ We also have the following extensions to topic configuration:
 .. _AWS Simple Notification Service API: https://docs.aws.amazon.com/sns/latest/api/API_Operations.html
 .. _AWS S3 Bucket Notifications API: https://docs.aws.amazon.com/AmazonS3/latest/dev/NotificationHowTo.html
 .. _Event Message Structure: https://docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
-.. _`Bucket Notifications`: ../notifications
-.. _`boto3 SDK filter extensions`: https://github.com/ceph/ceph/tree/main/examples/rgw/boto3

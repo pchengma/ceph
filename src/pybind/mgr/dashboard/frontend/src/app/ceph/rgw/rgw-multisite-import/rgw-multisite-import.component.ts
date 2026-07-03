@@ -18,7 +18,8 @@ import { debounceTime, distinctUntilChanged, filter, map } from 'rxjs/operators'
 @Component({
   selector: 'cd-rgw-multisite-import',
   templateUrl: './rgw-multisite-import.component.html',
-  styleUrls: ['./rgw-multisite-import.component.scss']
+  styleUrls: ['./rgw-multisite-import.component.scss'],
+  standalone: false
 })
 export class RgwMultisiteImportComponent implements OnInit {
   readonly endpoints = /^((https?:\/\/)|(www.))(?:([a-zA-Z]+)|(\d+\.\d+.\d+.\d+)):\d{2,4}$/;
@@ -101,7 +102,8 @@ export class RgwMultisiteImportComponent implements OnInit {
       ]),
       hosts: new FormControl([]),
       count: new FormControl(null, [CdValidators.number(false)]),
-      unmanaged: new FormControl(false)
+      unmanaged: new FormControl(false),
+      archive_zone: new FormControl(false)
     });
   }
 
@@ -110,6 +112,7 @@ export class RgwMultisiteImportComponent implements OnInit {
     const placementSpec: object = {
       placement: {}
     };
+    const tier_type: string = values['archive_zone'] ? 'archive' : '';
     if (!values['unmanaged']) {
       switch (values['placement']) {
         case 'hosts':
@@ -130,7 +133,8 @@ export class RgwMultisiteImportComponent implements OnInit {
         values['realmToken'],
         values['zoneName'],
         values['rgw_frontend_port'],
-        placementSpec
+        placementSpec,
+        tier_type
       )
       .subscribe(
         () => {

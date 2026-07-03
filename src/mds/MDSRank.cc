@@ -17,6 +17,10 @@
 #include "osdc/Journaler.h"
 
 #include <typeinfo>
+#include <fstream>
+#include <iterator>
+#include <vector>
+#include <cstdlib>
 #include "common/DecayCounter.h"
 #include "common/debug.h"
 #include "common/errno.h"
@@ -506,6 +510,7 @@ MDSRank::MDSRank(
   purge_queue.update_op_limit(*mdsmap);
 
   objecter->unset_honor_pool_full();
+  objecter->set_balanced_budget();
 
   finisher = new Finisher(cct, "MDSRank", "mds-rank-fin");
 
@@ -693,7 +698,7 @@ void MDSRank::set_mdsmap_multimds_snaps_allowed()
   dout(0) << __func__ << ": sending mon command: " << cmd[0] << dendl;
 
   C_MDS_MonCommand *fin = new C_MDS_MonCommand(this, cmd[0]);
-  monc->start_mon_command(cmd, {}, nullptr, &fin->outs, new C_IO_Wrapper(this, fin));
+  monc->start_mon_command(std::move(cmd), {}, nullptr, &fin->outs, new C_IO_Wrapper(this, fin));
 
   already_sent = true;
 }
@@ -3103,19 +3108,9 @@ void MDSRankDispatcher::handle_asok_command(
   } else if (command == "dump stray") {
     dout(10) << "dump_stray start" <<  dendl;
     // the context is a wrapper for formatter to be used while scanning stray dir
-    auto context = std::make_unique<MDCache::C_MDS_DumpStrayDirCtx>(mdcache, f,
-     [this,on_finish](int r) {
-      // completion callback, will be called when scan is done
-      dout(10) << "dump_stray done" <<  dendl;
-      bufferlist bl;
-      on_finish(r, "", bl);
-    });
+    auto ctx = new MDCache::C_MDS_DumpStrayDirCtx(mdcache, f, on_finish);
     std::lock_guard l(mds_lock);
-    r = mdcache->stray_status(std::move(context));
-    // since the scanning op can be async, we want to know it, for better semantics
-    if (r == -EAGAIN) {
-     dout(10) << "dump_stray wait" << dendl;
-    }
+    mdcache->stray_status(ctx);
     return;
   } else {
     r = -ENOSYS;
@@ -3989,7 +3984,7 @@ bool MDSRank::evict_client(int64_t session_id,
     }
   };
 
-  auto apply_blocklist = [this, cmd](std::function<void ()> fn){
+  auto apply_blocklist = [this, &cmd](std::function<void ()> fn){
     ceph_assert(ceph_mutex_is_locked_by_me(mds_lock));
 
     Context *on_blocklist_done = new LambdaContext([this, fn](int r) {
@@ -4009,7 +4004,7 @@ bool MDSRank::evict_client(int64_t session_id,
     });
 
     dout(4) << "Sending mon blocklist command: " << cmd[0] << dendl;
-    monc->start_mon_command(cmd, {}, nullptr, nullptr, on_blocklist_done);
+    monc->start_mon_command(std::move(cmd), {}, nullptr, nullptr, on_blocklist_done);
   };
 
   if (wait) {
@@ -4083,6 +4078,14 @@ std::string MDSRank::get_path(inodeno_t ino) {
   std::string res;
   inode->make_path_string(res);
   return res;
+}
+
+uint64_t MDSRank::get_inode_rbytes(inodeno_t ino) {
+  std::lock_guard locker(mds_lock);
+  CInode* inode = mdcache->get_inode(ino);
+  if (!inode) return 0;
+  const auto& pi = inode->get_projected_inode();
+  return pi->rstat.rbytes > 0 ? static_cast<uint64_t>(pi->rstat.rbytes) : 0;
 }
 
 std::vector<std::string> MDSRankDispatcher::get_tracked_keys()
@@ -4271,7 +4274,7 @@ void MDSRank::get_task_status(std::map<std::string, std::string> *status) {
   std::string_view scrub_summary = scrubstack->scrub_summary();
   if (!ScrubStack::is_idle(scrub_summary)) {
     send_status = true;
-    status->emplace(SCRUB_STATUS_KEY, std::move(scrub_summary));
+    status->emplace(SCRUB_STATUS_KEY, scrub_summary);
   }
 }
 

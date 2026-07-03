@@ -375,6 +375,8 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
     transport_type = "rdma";
   else if (type.find("dpdk") != std::string::npos)
     transport_type = "dpdk";
+  else if (type.find("smc") != std::string::npos)
+    transport_type = "smc";
 
   auto single = &cct->lookup_or_create_singleton_object<StackSingleton>(
     "AsyncMessenger::NetworkStack::" + transport_type, true, cct);
@@ -1058,6 +1060,40 @@ void AsyncMessenger::mark_down_addrs(const entity_addrvec_t& addrs)
   } else {
     ldout(cct, 1) << __func__ << " " << addrs << " -- connection dne" << dendl;
   }
+}
+
+__u32 AsyncMessenger::get_global_seq(__u32 old_global_seq)
+{
+  __u32 ret;
+  // These are only used for logging.
+  __u32 prev_global = 0;
+  __u32 updated_to = 0;
+  bool did_update_to_old = false;
+
+  { // acquire lock
+    std::lock_guard<ceph::spinlock> lg(global_seq_lock);
+
+    if (old_global_seq > global_seq) {
+      // These are all for logging purposes
+      prev_global = global_seq;
+      updated_to = old_global_seq;
+      did_update_to_old = true;
+      // global_seq and ret are the only that matters.
+      global_seq = old_global_seq;
+    }
+    ret = ++global_seq;
+  } // release lock
+
+  if (did_update_to_old) {
+    ldout(cct, 10) 
+      << __func__ << " old_global_seq=" << old_global_seq
+      << " > global_seq=" << global_seq
+      << "; new global_seq=" << updated_to
+      << " (was " << prev_global << ")"
+      << dendl;
+  }
+  ldout(cct, 10) << __func__ << " increment to global_seq=" << global_seq << dendl;
+  return ret;
 }
 
 int AsyncMessenger::get_proto_version(int peer_type, bool connect) const

@@ -364,8 +364,9 @@ options:
     Policy for determining which OSD will receive read operations.
     If set to ``default``, each PG's primary OSD will always be used
     for read operations. If set to ``balance``, read operations will
-    be sent to a randomly selected OSD within the replica set. If set
-    to ``localize``, read operations will be sent to the closest OSD
+    be sent to a randomly selected OSD within the replica set for replica
+    pools or directly to the shard storing the data for erasure-coded pools.
+    If set to ``localize``, read operations will be sent to the closest OSD
     as determined by the CRUSH map. Unlike ``rbd_balance_snap_reads``
     and ``rbd_localize_snap_reads`` or ``rbd_balance_parent_reads`` and
     ``rbd_localize_parent_reads``, it affects all read operations, not
@@ -514,12 +515,12 @@ options:
   type: str
   level: advanced
   desc: default internal format for handling clones
-  long_desc: This sets the internal format for tracking cloned images. The setting
-    of '1' requires attaching to protected snapshots that cannot be removed until
-    the clone is removed/flattened. The setting of '2' will allow clones to be attached
+  long_desc: This sets the internal format for tracking cloned images. The value
+    of ``1`` requires attaching to protected snapshots that cannot be removed until
+    the clone is removed or flattened. The value of ``2`` will allow clones to be attached
     to any snapshot and permits removing in-use parent snapshots but requires Mimic
-    or later clients. The default setting of 'auto' will use the v2 format if the
-    cluster is configured to require mimic or later clients.
+    or later clients. The default value of ``auto`` will use the v2 format if the
+    cluster is configured to require Mimic or later clients.
   default: auto
   services:
   - rbd

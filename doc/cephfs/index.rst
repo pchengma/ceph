@@ -90,8 +90,10 @@ Administration
     Health messages <health-messages>
     Upgrading old file systems <upgrading>
     CephFS Top Utility <cephfs-top>
+    cephfs-tool <cephfs-tool>
     Scheduled Snapshots <snap-schedule>
     CephFS Snapshot Mirroring <cephfs-mirroring>
+    CephFS Snapshot Mirroring Checkpoints <cephfs-mirroring-checkpoints>
     Purge Queue <purge-queue>
 
 .. raw:: html
@@ -149,6 +151,7 @@ CephFS Concepts
     Directory fragmentation <dirfrags>
     Multiple active MDS daemons <multimds>
     Snapshots <snapshots>
+    fscrypt <fscrypt>
 
 
 .. raw:: html
@@ -172,7 +175,7 @@ Troubleshooting and Disaster Recovery
     Troubleshooting <troubleshooting>
     Disaster recovery <disaster-recovery>
     cephfs-journal-tool <cephfs-journal-tool>
-    Recovering file system after monitor store loss <recover-fs-after-mon-store-loss>
+    Recovering file system after Monitor store loss <recover-fs-after-mon-store-loss>
 
 
 .. raw:: html

@@ -456,12 +456,14 @@ public:
   int store_oidc_provider(const DoutPrefixProvider* dpp,
                           optional_yield y,
                           const RGWOIDCProviderInfo& info,
-                          bool exclusive) override;
+                          bool exclusive,
+                          RGWObjVersionTracker* objv_tracker) override;
   int load_oidc_provider(const DoutPrefixProvider* dpp,
                          optional_yield y,
                          std::string_view tenant,
                          std::string_view url,
-                         RGWOIDCProviderInfo& info) override;
+                         RGWOIDCProviderInfo& info,
+                         RGWObjVersionTracker* objv_tracker) override;
   int delete_oidc_provider(const DoutPrefixProvider* dpp,
                            optional_yield y,
                            std::string_view tenant,
@@ -697,14 +699,14 @@ public:
       RGWObjVersionTracker* objv_tracker) override {
     return next->remove_logging_object_name(prefix, y, dpp, objv_tracker);
   }
-  int commit_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp, const std::string& prefix, std::string* last_committed) override {
-    return next->commit_logging_object(obj_name, y, dpp, prefix, last_committed);
+  int commit_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp, const std::string& prefix, std::string* last_committed, bool async) override {
+    return next->commit_logging_object(obj_name, y, dpp, prefix, last_committed, async);
   }
-  int remove_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp) override {
-    return next->remove_logging_object(obj_name, y, dpp);
+  int remove_logging_object(const std::string& obj_name, const std::string& prefix, optional_yield y, const DoutPrefixProvider *dpp) override {
+    return next->remove_logging_object(obj_name, prefix, y, dpp);
   }
-  int write_logging_object(const std::string& obj_name, const std::string& record, optional_yield y, const DoutPrefixProvider *dpp, bool async_completion) override {
-    return next->write_logging_object(obj_name, record, y, dpp, async_completion);
+  int write_logging_object(const std::string& obj_name, const std::string& record, const std::string& prefix, optional_yield y, const DoutPrefixProvider *dpp, bool async_completion) override {
+    return next->write_logging_object(obj_name, record, prefix, y, dpp, async_completion);
   }
 
   virtual rgw_bucket& get_key() override { return next->get_key(); }
@@ -782,6 +784,7 @@ public:
 	       boost::optional<ceph::real_time> delete_at,
                std::string* version_id, std::string* tag, std::string* etag,
                void (*progress_cb)(off_t, void *), void* progress_data,
+               rgw::sal::DataProcessorFactory* dp_factory,
                const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual RGWAccessControlPolicy& get_acl(void) override;
   virtual int set_acl(const RGWAccessControlPolicy& acl) override { return next->set_acl(acl); }
@@ -810,8 +813,7 @@ public:
                              bool follow_olh = true) override;
   virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
 			    Attrs* delattrs, optional_yield y, uint32_t flags) override;
-  virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp,
-			    rgw_obj* target_obj = NULL) override;
+  virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp) override;
   virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val,
 			       optional_yield y, const DoutPrefixProvider* dpp,
 			       uint32_t flags = rgw::sal::FLAG_LOG_OP) override;
@@ -819,7 +821,7 @@ public:
 			       optional_yield y) override;
   virtual bool is_expired() override;
   virtual void gen_rand_obj_instance_name() override;
-  virtual std::unique_ptr<MPSerializer> get_serializer(const DoutPrefixProvider *dpp,
+  virtual std::unique_ptr<MPSerializer> get_serializer(const DoutPrefixProvider *dpp, optional_yield y,
 						       const std::string& lock_name) override;
   virtual int transition(Bucket* bucket,
 			 const rgw_placement_rule& placement_rule,
@@ -841,6 +843,7 @@ public:
 			   CephContext* cct,
 		           std::optional<uint64_t> days,
 			   bool& in_progress,
+			   uint64_t& size,
 			   const DoutPrefixProvider* dpp,
 			   optional_yield y) override;
   virtual bool placement_rules_match(rgw_placement_rule& r1, rgw_placement_rule& r2) override;
@@ -963,6 +966,8 @@ public:
 
   virtual std::unique_ptr<rgw::sal::Object> get_meta_obj() override;
 
+  virtual bool supports_crypt_part_salts() const override { return next->supports_crypt_part_salts(); }
+
   virtual int init(const DoutPrefixProvider* dpp, optional_yield y, ACLOwner& owner, rgw_placement_rule& dest_placement, rgw::sal::Attrs& attrs) override;
   virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 			 int num_parts, int marker,
@@ -1009,7 +1014,7 @@ public:
   FilterMPSerializer(std::unique_ptr<MPSerializer> _next) : next(std::move(_next)) {}
   virtual ~FilterMPSerializer() = default;
 
-  virtual int try_lock(const DoutPrefixProvider *dpp, utime_t dur, optional_yield y) override;
+  virtual int try_lock(const DoutPrefixProvider *dpp, ceph::timespan dur, optional_yield y) override;
   virtual int unlock(const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual void clear_locked() override { next->clear_locked(); }
   virtual bool is_locked() override { return next->is_locked(); }
@@ -1024,7 +1029,7 @@ public:
   FilterLCSerializer(std::unique_ptr<LCSerializer> _next) : next(std::move(_next)) {}
   virtual ~FilterLCSerializer() = default;
 
-  virtual int try_lock(const DoutPrefixProvider *dpp, utime_t dur, optional_yield y) override;
+  virtual int try_lock(const DoutPrefixProvider *dpp, ceph::timespan dur, optional_yield y) override;
   virtual int unlock(const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual void print(std::ostream& out) const override { return next->print(out); }
 };
@@ -1069,7 +1074,7 @@ protected:
 public:
   FilterRestoreSerializer(std::unique_ptr<RestoreSerializer> _next) : next(std::move(_next)) {}
   virtual ~FilterRestoreSerializer() = default;
-  virtual int try_lock(const DoutPrefixProvider *dpp, utime_t dur, optional_yield y) override;
+  virtual int try_lock(const DoutPrefixProvider *dpp, ceph::timespan dur, optional_yield y) override;
   virtual int unlock(const DoutPrefixProvider* dpp, optional_yield y) override
  	{ return next->unlock(dpp, y); }
   virtual void print(std::ostream& out) const override { return next->print(out); }
@@ -1155,6 +1160,8 @@ public:
   virtual ~FilterLuaManager() = default;
 
   virtual int get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script) override;
+  virtual std::tuple<rgw::lua::LuaCodeType, int> get_script_or_bytecode(const DoutPrefixProvider* dpp, optional_yield y,
+                                                                        const std::string& key) override;
   virtual int put_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& script) override;
   virtual int del_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key) override;
   virtual int add_package(const DoutPrefixProvider* dpp, optional_yield y, const std::string& package_name) override;
@@ -1164,6 +1171,7 @@ public:
   const std::string& luarocks_path() const override;
   void set_luarocks_path(const std::string& path) override;
 
+  void set_lua_background(rgw::lua::Background* background) override;
 };
 
 } } // namespace rgw::sal

@@ -5,7 +5,7 @@ import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of as observableOf } from 'rxjs';
 import { RgwZonegroupService } from '~/app/shared/api/rgw-zonegroup.service';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
@@ -21,13 +21,7 @@ describe('RgwMultisiteZonegroupFormComponent', () => {
   let rgwZonegroupService: RgwZonegroupService;
 
   configureTestBed({
-    imports: [
-      SharedModule,
-      ReactiveFormsModule,
-      RouterTestingModule,
-      HttpClientTestingModule,
-      ToastrModule.forRoot()
-    ],
+    imports: [SharedModule, ReactiveFormsModule, RouterTestingModule, HttpClientTestingModule],
     providers: [NgbActiveModal],
     declarations: [RgwMultisiteZonegroupFormComponent]
   });
@@ -35,6 +29,7 @@ describe('RgwMultisiteZonegroupFormComponent', () => {
   beforeEach(() => {
     fixture = TestBed.createComponent(RgwMultisiteZonegroupFormComponent);
     component = fixture.componentInstance;
+    component.actionLabels = { CREATE: 'create', EDIT: 'edit' } as any;
     fixture.detectChanges();
   });
 
@@ -68,6 +63,7 @@ describe('RgwMultisiteZonegroupFormComponent', () => {
 
     it('tests create success notification', () => {
       spyOn(rgwZonegroupService, 'create').and.returnValue(observableOf([]));
+      component.actionLabels = { CREATE: 'create', EDIT: 'edit' } as any;
       component.action = 'create';
       component.multisiteZonegroupForm.markAsDirty();
       component.multisiteZonegroupForm._get('zonegroupName').setValue('zg-1');
@@ -84,9 +80,18 @@ describe('RgwMultisiteZonegroupFormComponent', () => {
     it('tests update success notification', () => {
       spyOn(rgwZonegroupService, 'update').and.returnValue(observableOf([]));
       component.action = 'edit';
+      component.actionLabels = { EDIT: 'edit', CREATE: 'create', DELETE: 'delete' } as any;
       component.info = {
-        data: { name: 'zg-1', zones: ['z1'] }
+        data: {
+          name: 'zg-1',
+          zones: [{ id: 'z1', name: 'zone-1' }],
+          master_zone: 'z1',
+          endpoints: [],
+          placement_targets: []
+        }
       };
+      component.zgZoneNames = ['zone-1'];
+      component.zonegroupZoneNames = ['zone-1'];
       component.multisiteZonegroupForm._get('zonegroupName').setValue('zg-1');
       component.multisiteZonegroupForm
         ._get('zonegroup_endpoints')

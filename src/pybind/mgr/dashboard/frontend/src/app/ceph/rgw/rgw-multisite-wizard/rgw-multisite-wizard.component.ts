@@ -37,6 +37,11 @@ interface DaemonStats {
   };
 }
 
+interface RealmsInfo {
+  default_info: string;
+  realms: string[];
+}
+
 interface EndpointInfo {
   hostname: string;
   port: number;
@@ -56,7 +61,8 @@ enum ConfigType {
 @Component({
   selector: 'cd-rgw-multisite-wizard',
   templateUrl: './rgw-multisite-wizard.component.html',
-  styleUrls: ['./rgw-multisite-wizard.component.scss']
+  styleUrls: ['./rgw-multisite-wizard.component.scss'],
+  standalone: false
 })
 export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
   multisiteSetupForm: CdFormGroup;
@@ -153,8 +159,8 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
       this.stepsToSkip[step.label] = false;
     });
 
-    this.rgwRealmService.list().subscribe((realms: string[]) => {
-      this.realmList = realms;
+    this.rgwRealmService.list().subscribe((realmsInfo: RealmsInfo) => {
+      this.realmList = realmsInfo?.realms || [];
       this.showConfigType = this.realmList.length > 0;
       if (this.showConfigType) {
         this.multisiteSetupForm.get('selectedRealm')?.setValue(this.realmList[0]);
@@ -230,7 +236,8 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
         validators: [Validators.required]
       }),
       configType: new UntypedFormControl(ConfigType.NewRealm, {}),
-      selectedRealm: new UntypedFormControl(null, {})
+      selectedRealm: new UntypedFormControl(null, {}),
+      secondary_archive_zone: new UntypedFormControl(false, {})
     });
 
     if (!this.isMultiClusterConfigured) {
@@ -290,7 +297,6 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
       const zoneName = values['zoneName'];
       const zoneEndpoints = this.rgwEndpoints.value.join(',');
       const username = values['username'];
-
       if (!this.isMultiClusterConfigured || this.stepsToSkip['Select Cluster']) {
         this.rgwMultisiteService
           .setUpMultisiteReplication(
@@ -301,7 +307,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
             zoneEndpoints,
             username
           )
-          .subscribe((data: object[]) => {
+          .subscribe((data: object) => {
             this.setupCompleted = true;
             this.rgwMultisiteService.setRestartGatewayMessage(false);
             this.loading = false;
@@ -311,6 +317,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
       } else {
         const cluster = values['cluster'];
         const replicationZoneName = values['replicationZoneName'];
+        const secondaryTierType = values['secondary_archive_zone'] ? 'archive' : '';
         let selectedRealmName = '';
 
         if (this.multisiteSetupForm.get('configType').value === ConfigType.ExistingRealm) {
@@ -327,6 +334,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
             username,
             cluster,
             replicationZoneName,
+            secondaryTierType,
             this.clusterDetailsArray,
             selectedRealmName
           )

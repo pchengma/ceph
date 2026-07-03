@@ -30,7 +30,7 @@ function TEST_bluestore() {
     CEPH_ARGS+="--bluestore_block_size=2147483648 "
     CEPH_ARGS+="--bluestore_block_db_create=true "
     CEPH_ARGS+="--bluestore_block_db_size=1073741824 "
-    CEPH_ARGS+="--bluestore_block_wal_size=536870912 "
+    CEPH_ARGS+="--bluestore_block_wal_size=1073741824 "
     CEPH_ARGS+="--bluestore_block_wal_create=true "
     CEPH_ARGS+="--bluestore_fsck_on_mount=true "
     #choosing randomly allocation from file
@@ -52,7 +52,7 @@ function TEST_bluestore() {
     create_pool foo 16
 
     # write some objects
-    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+    timeout 60 rados bench -p foo 15 write -b 4096 --no-cleanup #|| return 1
 
     echo "after bench"
 
@@ -152,7 +152,7 @@ function TEST_bluestore() {
     wait_for_clean || return 1
 
     # write some objects
-    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+    timeout 60 rados bench -p foo 15 write -b 4096 --no-cleanup #|| return 1
 
     # kill
     while kill $osd_pid0; do sleep 1 ; done
@@ -167,7 +167,7 @@ function TEST_bluestore() {
     # slow, DB -> slow, DB, WAL
     ceph-bluestore-tool --path $dir/0 fsck || return 1
 
-    dd if=/dev/zero  of=$dir/0/wal count=512 bs=1M
+    dd if=/dev/zero  of=$dir/0/wal count=1024 bs=1M
     ceph-bluestore-tool --path $dir/0 \
       --dev-target $dir/0/wal \
       --command bluefs-bdev-new-wal || return 1
@@ -180,7 +180,8 @@ function TEST_bluestore() {
     dd if=/dev/zero  of=$dir/1/db count=1024 bs=1M
     ceph-bluestore-tool --path $dir/1 \
       --dev-target $dir/1/db \
-      --command bluefs-bdev-new-db || return 1
+      --command bluefs-bdev-new-db \
+      --log-file $dir/bluestore_tool.log || return 1
 
     ceph-bluestore-tool --path $dir/1 \
       --devs-source $dir/1/block \
@@ -228,7 +229,7 @@ function TEST_bluestore() {
     osd_pid3=$(cat $dir/osd.3.pid)
 
     # write some objects
-    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+    timeout 60 rados bench -p foo 15 write -b 4096 --no-cleanup #|| return 1
 
     # kill
     while kill $osd_pid0; do sleep 1 ; done
@@ -253,7 +254,7 @@ function TEST_bluestore() {
 
     # slow, DB, WAL1 -> slow, DB, WAL2
 
-    dd if=/dev/zero  of=$dir/0/wal2 count=512 bs=1M
+    dd if=/dev/zero  of=$dir/0/wal2 count=1024 bs=1M
     ceph-bluestore-tool --path $dir/0 \
       --devs-source $dir/0/block.wal \
       --dev-target $dir/0/wal2 \
@@ -334,7 +335,7 @@ function TEST_bluestore() {
     osd_pid3=$(cat $dir/osd.3.pid)
 
     # write some objects
-    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+    timeout 60 rados bench -p foo 15 write -b 4096 --no-cleanup #|| return 1
 
     wait_for_clean || return 1
 }
@@ -431,7 +432,7 @@ function TEST_bluestore_expand() {
     create_pool foo 16
 
     # write some objects
-    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+    timeout 60 rados bench -p foo 10 write -b 4096 --no-cleanup #|| return 1
     sleep 5
     
     total_space_before=$( ceph tell osd.0 perf dump bluefs | jq ".bluefs.slow_total_bytes" )
@@ -447,7 +448,7 @@ function TEST_bluestore_expand() {
     # expand slow devices
     ceph-bluestore-tool --log-file $dir/bluestore_tool.log --path $dir/0 fsck || return 1
 
-    requested_space=4294967296 # 4GB
+    requested_space=5368709120 # 5GB
     truncate $dir/0/block -s $requested_space
     ceph-bluestore-tool --log-file $dir/bluestore_tool.log --path $dir/0 bluefs-bdev-expand || return 1
 
@@ -467,22 +468,16 @@ function TEST_bluestore_expand() {
     total_space_after=$( ceph tell osd.0 perf dump bluefs | jq ".bluefs.slow_total_bytes" )
     free_space_after=`ceph tell osd.0 bluestore bluefs device info | grep "BDEV_SLOW" -A 2 | grep free | cut -d':' -f 2 | cut -d"," -f 1 | cut -d' ' -f 2`
 
-    if [ $total_space_after != $requested_space ]; then
-	echo "total_space_after = $total_space_after"
-	echo "requested_space   = $requested_space"
-	return 1;
+    if [ $total_space_after -ne $requested_space ]; then
+        echo "total_space_after = $total_space_after"
+        echo "requested_space   = $requested_space"
+        return 1;
     fi
 
-    total_space_added=$((total_space_after - total_space_before))
-    free_space_added=$((free_space_after - free_space_before))
-
-    let new_used_space=($total_space_added - $free_space_added)
-    echo $new_used_space
-    # allow upto 128KB to be consumed
-    if [ $new_used_space -gt 131072 ]; then
-	echo "total_space_added = $total_space_added"
-	echo "free_space_added  = $free_space_added"
-	return 1;
+    if [ $free_space_after -le $free_space_before ]; then
+       echo "total_space_after = $total_space_after"
+       echo "requested_space   = $requested_space"
+       return 1;
     fi
     
     # kill
@@ -490,6 +485,93 @@ function TEST_bluestore_expand() {
     ceph osd down 0
 
     ceph-bluestore-tool --log-file $dir/bluestore_tool.log --path $dir/0 qfsck || return 1
+}
+
+function TEST_bluestore_expand_online() {
+    local dir=$1
+
+    local flimit=$(ulimit -n)
+    if [ $flimit -lt 1536 ]; then
+        echo "Low open file limit ($flimit), test may fail. Increase to 1536 or higher and retry if that happens."
+    fi
+    export CEPH_MON="127.0.0.1:7146" # git grep '\<7146\>' : there must be only one
+    export CEPH_ARGS
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--mon-host=$CEPH_MON "
+    CEPH_ARGS+="--bluestore_block_size=2147483648 "
+    CEPH_ARGS+="--bluestore_block_db_create=true "
+    CEPH_ARGS+="--bluestore_block_db_size=536870912 "
+    CEPH_ARGS+="--bluestore_block_wal_create=true "
+    CEPH_ARGS+="--bluestore_block_wal_size=268435456 "
+    CEPH_ARGS+="--bluestore_fsck_on_mount=true "
+
+    run_mon $dir a || return 1
+    run_mgr $dir x || return 1
+    run_osd $dir 0 || return 1
+    osd_pid0=$(cat $dir/osd.0.pid)
+    run_osd $dir 1 || return 1
+    osd_pid1=$(cat $dir/osd.1.pid)
+    run_osd $dir 2 || return 1
+    osd_pid2=$(cat $dir/osd.2.pid)
+    run_osd $dir 3 || return 1
+    osd_pid3=$(cat $dir/osd.3.pid)
+
+    sleep 5
+    create_pool foo 16
+
+    # no device expansion sanity check
+    ceph tell osd.0 bluestore bluefs-bdev-expand || return 1
+    ceph tell osd.1 bluestore bluefs-bdev-expand || return 1
+    ceph tell osd.2 bluestore bluefs-bdev-expand || return 1
+    ceph tell osd.3 bluestore bluefs-bdev-expand || return 1
+
+    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+
+    # expand slow devices while OSDs are running
+    truncate $dir/0/block -s 4294967296 # 4GB
+    ceph tell osd.0 bluestore bluefs-bdev-expand || return 1
+
+    truncate $dir/1/block -s 11811160064 # 11GB
+    ceph tell osd.1 bluestore bluefs-bdev-expand || return 1
+
+    truncate $dir/2/block -s 4295099392 # 4GB + 129KB
+    ceph tell osd.2 bluestore bluefs-bdev-expand || return 1
+
+    truncate $dir/3/block -s 4293918720 # 4GB - 1MB
+    ceph tell osd.3 bluestore bluefs-bdev-expand || return 1
+
+    # expand DB devices while OSDs are running
+    truncate $dir/0/block.db -s 1073741824 # 1GB
+    ceph tell osd.0 bluestore bluefs-bdev-expand || return 1
+
+    truncate $dir/1/block.db -s 1073741824 # 1GB
+    ceph tell osd.1 bluestore bluefs-bdev-expand || return 1
+
+    # write more objects to use the new space
+    timeout 60 rados bench -p foo 30 write -b 4096 --no-cleanup #|| return 1
+
+    wait_for_clean || return 1
+
+    ceph tell osd.0 bluestore bluefs device info
+    ceph tell osd.1 bluestore bluefs device info
+    ceph tell osd.2 bluestore bluefs device info
+    ceph tell osd.3 bluestore bluefs device info
+
+    # kill and verify with fsck
+    while kill $osd_pid0; do sleep 1 ; done
+    ceph osd down 0
+    while kill $osd_pid1; do sleep 1 ; done
+    ceph osd down 1
+    while kill $osd_pid2; do sleep 1 ; done
+    ceph osd down 2
+    while kill $osd_pid3; do sleep 1 ; done
+    ceph osd down 3
+
+    ceph-bluestore-tool --path $dir/0 fsck || return 1
+    ceph-bluestore-tool --path $dir/1 fsck || return 1
+    ceph-bluestore-tool --path $dir/2 fsck || return 1
+    ceph-bluestore-tool --path $dir/3 fsck || return 1
+
 }
 
 main osd-bluefs-volume-ops "$@"

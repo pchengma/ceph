@@ -1073,7 +1073,9 @@ public:
 
   TestDriver(std::string _base_path) : POSIXDriver(nullptr), driver_base(_base_path)
   { }
-  virtual ~TestDriver() = default;
+  virtual ~TestDriver() {
+    RGWQuotaHandler::free_handler(quota_handler);
+  }
 
   int init(const DoutPrefixProvider* dpp)
   {
@@ -1097,7 +1099,7 @@ public:
         }
       }
     }
-
+    quota_handler = RGWQuotaHandler::generate_handler(env->dpp, this, false);
     /* ordered listing cache */
     bucket_cache.reset(new BucketCache(
         this, base_path, cache_base, 100, 3, 3, 3));
@@ -1541,6 +1543,7 @@ TEST_F(POSIXObjectTest, ObjectCopy)
 	   &tag,
 	   nullptr,
 	   nullptr,
+	   nullptr,
 	   env->dpp,
 	   null_yield);
   EXPECT_EQ(ret, 0);
@@ -1847,6 +1850,7 @@ TEST_F(POSIXMPObjectTest, MPUploadCopy)
 	   nullptr,
 	   &tag, /* use req_id as tag */
 	   &tag,
+	   nullptr,
 	   nullptr,
 	   nullptr,
 	   env->dpp,
@@ -2298,6 +2302,7 @@ TEST_F(POSIXVerObjectTest, ObjectCopy)
 	   &tag,
 	   nullptr,
 	   nullptr,
+	   nullptr,
 	   env->dpp,
 	   null_yield);
   EXPECT_EQ(ret, 0);
@@ -2373,6 +2378,7 @@ TEST_F(POSIXVerObjectTest, CopyVersion)
 	   nullptr,
 	   &tag, /* use req_id as tag */
 	   &tag,
+	   nullptr,
 	   nullptr,
 	   nullptr,
 	   env->dpp,

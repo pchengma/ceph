@@ -710,9 +710,6 @@ public:
   unsigned int scrub_requeue_priority(Scrub::scrub_prio_t with_priority) const;
 
 private:
-  // auxiliaries used by sched_scrub():
-  double next_deepscrub_interval() const;
-
   using ScrubAPI = void (ScrubPgIF::*)(epoch_t epoch_queued);
   void forward_scrub_event(ScrubAPI fn, epoch_t epoch_queued, std::string_view desc);
   // and for events that carry a meaningful 'activation token'
@@ -1147,6 +1144,9 @@ protected:
     void trim(const pg_log_entry_t &entry) override {
       pg->get_pgbackend()->trim(entry, t);
     }
+    void trim_after_remove(const pg_log_entry_t &entry) override {
+      pg->get_pgbackend()->trim_after_remove(entry, t);
+    }
     void partial_write(pg_info_t *info, eversion_t previous_version,
                        const pg_log_entry_t &entry
       ) override {
@@ -1228,7 +1228,15 @@ protected:
   [[nodiscard]] bool ops_blocked_by_scrub() const;
   [[nodiscard]] Scrub::scrub_prio_t is_scrub_blocking_ops() const;
 
-  void _scan_rollback_obs(const std::vector<ghobject_t> &rollback_obs);
+
+  /**
+   * Scan the given list of rollback objects for obsolete entries.
+   * If found - the obsolete entries are removed.
+   *
+   * @return 'true' if a transaction was issued.
+   */
+  bool _scan_rollback_obs(const std::vector<ghobject_t> &rollback_obs);
+
   /**
    * returns true if [begin, end) is good to scrub at this time
    * a false return value obliges the implementer to requeue scrub when the
@@ -1415,8 +1423,9 @@ public:
  }
 
  uint64_t logical_to_ondisk_size(uint64_t logical_size,
-                                 shard_id_t shard_id) const final {
-   return get_pgbackend()->be_get_ondisk_size(logical_size, shard_id_t(shard_id));
+                                 shard_id_t shard_id,
+                                 bool object_is_legacy_ec) const final {
+   return get_pgbackend()->be_get_ondisk_size(logical_size, shard_id_t(shard_id), object_is_legacy_ec);
  }
 
  bool ec_can_decode(const shard_id_set &available_shards) const final {

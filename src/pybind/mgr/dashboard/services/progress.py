@@ -9,12 +9,12 @@ using the same structure of dashboard tasks
 
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .. import mgr
 from . import rbd  # pylint: disable=no-name-in-module
 
-logger = logging.getLogger('progress')
+logger = logging.getLogger(__name__)
 
 
 def _progress_event_to_dashboard_task_common(event, task):
@@ -40,18 +40,34 @@ def _progress_event_to_dashboard_task_common(event, task):
             task.update({
                 'name': "rbd/{}".format(action),
                 'metadata': metadata,
-                'begin_time': "{}Z".format(datetime.fromtimestamp(event["started_at"])
-                                           .isoformat()),
+                'begin_time': datetime.fromtimestamp(
+                    event["started_at"], tz=timezone.utc).isoformat(),
             })
             return
+
+    refs = event.get('refs', {})
+
+    if isinstance(refs, dict):
+        metadata = refs
+    elif isinstance(refs, (list, tuple)):
+        if all(isinstance(i, (list, tuple)) and len(i) == 2 for i in refs):
+            metadata = dict(refs)
+        else:
+            metadata = {"raw_refs": refs}
+    elif isinstance(refs, str):
+        metadata = {"raw_refs": refs}
+    elif refs is None:
+        metadata = {}
+    else:
+        metadata = {"raw_refs": refs}
 
     task.update({
         # we're prepending the "progress/" prefix to tag tasks that come
         # from the progress module
         'name': "progress/{}".format(event['message']),
-        'metadata': dict(event.get('refs', {})),
-        'begin_time': "{}Z".format(datetime.fromtimestamp(event["started_at"])
-                                   .isoformat()),
+        'metadata': metadata,
+        'begin_time': datetime.fromtimestamp(
+            event["started_at"], tz=timezone.utc).isoformat(),
     })
 
 
@@ -64,8 +80,8 @@ def _progress_event_to_dashboard_task(event, completed=False):
         })
     else:
         task.update({
-            'end_time': "{}Z".format(datetime.fromtimestamp(event['finished_at'])
-                                     .isoformat()),
+            'end_time': datetime.fromtimestamp(
+                event['finished_at'], tz=timezone.utc).isoformat(),
             'duration': event['finished_at'] - event['started_at'],
             'progress': 100,
             'success': 'failed' not in event,

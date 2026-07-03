@@ -4,6 +4,12 @@ set -e
 source $(dirname $0)/../detect-build-env-vars.sh
 source $CEPH_ROOT/qa/standalone/ceph-helpers.sh
 
+if ldd $(command -v ceph-dencoder) 2>/dev/null | grep -q libasan; then
+  # Per-object leak checks dominate runtime here (~10s vs ~1s each on riscv64)
+  # and this test only checks encode/decode, so disable them; keep other checks.
+  export ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
+fi
+
 dir=$1
 
 test_selected_type() {
@@ -53,7 +59,7 @@ test_selected_type() {
             echo "**** $type test $n dump_json check failed ****"
             echo "   ceph-dencoder type $type select_test $n dump_json > $tmp1"
             echo "   ceph-dencoder type $type select_test $n encode decode dump_json > $tmp2"
-            diff $tmp1 $tmp2
+            diff -au $tmp1 $tmp2
             failed=$(($failed + 1))
         fi
 
@@ -61,7 +67,7 @@ test_selected_type() {
             echo "**** $type test $n copy dump_json check failed ****"
             echo "   ceph-dencoder type $type select_test $n dump_json > $tmp1"
             echo "   ceph-dencoder type $type select_test $n copy dump_json > $tmp2"
-            diff $tmp1 $tmp2
+            diff -au $tmp1 $tmp2
             failed=$(($failed + 1))
         fi
 
@@ -69,7 +75,7 @@ test_selected_type() {
             echo "**** $type test $n copy_ctor dump_json check failed ****"
             echo "   ceph-dencoder type $type select_test $n dump_json > $tmp1"
             echo "   ceph-dencoder type $type select_test $n copy_ctor dump_json > $tmp2"
-            diff $tmp1 $tmp2
+            diff -au $tmp1 $tmp2
             failed=$(($failed + 1))
         fi
 
@@ -82,7 +88,7 @@ test_selected_type() {
                 echo "**** $type test $n binary reencode check failed ****"
                 echo "   ceph-dencoder type $type select_test $n encode export $tmp1"
                 echo "   ceph-dencoder type $type select_test $n encode decode encode export $tmp2"
-                diff <(hexdump -C $tmp1) <(hexdump -C $tmp2)
+                diff -au <(hexdump -C $tmp1) <(hexdump -C $tmp2)
                 failed=$(($failed + 1))
             fi
         fi

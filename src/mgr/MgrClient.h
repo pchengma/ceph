@@ -109,6 +109,7 @@ protected:
 
 public:
   MgrClient(CephContext *cct_, Messenger *msgr_, MonMap *monmap);
+  ~MgrClient();
 
   void set_messenger(Messenger *msgr_) { msgr = msgr_; }
 
@@ -148,12 +149,12 @@ public:
   }
 
   int start_command(
-    const std::vector<std::string>& cmd, const ceph::buffer::list& inbl,
+    std::vector<std::string>&& cmd, ceph::buffer::list&& inbl,
     ceph::buffer::list *outbl, std::string *outs,
     Context *onfinish);
   int start_tell_command(
-    const std::string& name,
-    const std::vector<std::string>& cmd, const ceph::buffer::list& inbl,
+    std::string&& name,
+    std::vector<std::string>&& cmd, ceph::buffer::list&& inbl,
     ceph::buffer::list *outbl, std::string *outs,
     Context *onfinish);
 

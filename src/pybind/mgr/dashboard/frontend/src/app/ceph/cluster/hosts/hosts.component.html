@@ -12,11 +12,9 @@
                 (fetchData)="getHosts($event)"
                 selectionType="single"
                 [searchableObjects]="true"
-                [hasDetails]="hasTableDetails"
                 [serverSide]="true"
                 [count]="count"
                 [maxLimit]="25"
-                (setExpandedRow)="setExpandedRow($event)"
                 (updateSelection)="updateSelection($event)"
                 [toolHeader]="!hideToolHeader">
         <div class="table-actions">
@@ -33,10 +31,6 @@
                             [tableActions]="expandClusterActions">
           </cd-table-actions>
         </div>
-        <cd-host-details *cdTableDetail
-                         [permissions]="permissions"
-                         [selection]="expandedRow">
-        </cd-host-details>
       </cd-table>
     </ng-template>
   </ng-container>
@@ -50,7 +44,7 @@
     <ng-template ngbNavContent>
       <cd-grafana i18n-title
                   title="Host overview"
-                  [grafanaPath]="'host-overview?'"
+                  [grafanaPath]="'ceph-hosts-overview?'"
                   [type]="'metrics'"
                   uid="y0KGL0iZz"
                   grafanaStyle="two">
@@ -72,11 +66,16 @@
 
 <ng-template #hostNameTpl
              let-row="data.row">
-  <span [ngClass]="row">
-    {{ row.hostname }}
+  <span data-testid="hostname">
+    <a cdsLink
+       [routerLink]="[viewUrl, row.hostname | encodeUri]"
+       (click)="$event.stopPropagation()">
+      {{ row.hostname }}
+    </a>
   </span><br>
   <span class="text-muted fst-italic"
-        *ngIf="row.addr">
+        *ngIf="row.addr"
+        data-testid="ip-address">
     ({{ row.addr }})
   </span>
 </ng-template>

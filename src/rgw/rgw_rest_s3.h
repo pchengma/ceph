@@ -150,6 +150,7 @@ class RGWListBucket_ObjStore_S3 : public RGWListBucket_ObjStore {
 protected:
   bool objs_container;
   bool encode_key {false};
+  bool fetch_restore_status {false};
   int get_common_params();
   void send_common_response();
   void send_common_versioned_response();
@@ -510,6 +511,8 @@ public:
 };
 
 class RGWCompleteMultipart_ObjStore_S3 : public RGWCompleteMultipart_ObjStore {
+private:
+  std::map<std::string, std::string> crypt_http_responses;
 public:
   RGWCompleteMultipart_ObjStore_S3() {}
   ~RGWCompleteMultipart_ObjStore_S3() override {}
@@ -708,6 +711,7 @@ protected:
     return s->info.args.exists("usage");
   }
   RGWOp *op_get() override;
+  RGWOp *op_options() override;
   RGWOp *op_head() override;
 public:
    RGWHandler_REST_Service_S3(const rgw::auth::StrategyRegistry& auth_registry) :
@@ -818,26 +822,28 @@ public:
   ~RGWHandler_REST_Obj_S3() override = default;
 };
 
+class RGWRESTMgr_S3Control;
+class RGWRESTMgr_S3Website;
+
 class RGWRESTMgr_S3 : public RGWRESTMgr {
 private:
-  const bool enable_s3website;
+  std::unique_ptr<RGWRESTMgr_S3Control> s3control;
+  std::unique_ptr<RGWRESTMgr_S3Website> s3website;
   const bool enable_sts;
   const bool enable_iam;
   const bool enable_pubsub;
 public:
-  explicit RGWRESTMgr_S3(bool _enable_s3website=false, bool _enable_sts=false, bool _enable_iam=false, bool _enable_pubsub=false)
-    : enable_s3website(_enable_s3website),
-      enable_sts(_enable_sts),
-      enable_iam(_enable_iam),
-      enable_pubsub(_enable_pubsub) {
-  }
-
-  ~RGWRESTMgr_S3() override = default;
+  RGWRESTMgr_S3(bool enable_s3control, bool _enable_s3website, bool _enable_sts, bool _enable_iam, bool _enable_pubsub);
+  ~RGWRESTMgr_S3() override;
 
   RGWHandler_REST *get_handler(rgw::sal::Driver* driver,
 			       req_state* s,
                                const rgw::auth::StrategyRegistry& auth_registry,
                                const std::string& frontend_prefix) override;
+
+  RGWRESTMgr* get_resource_mgr_as_default(req_state* const s,
+                                          const std::string& uri,
+                                          std::string* our_uri) override;
 };
 
 class RGWHandler_REST_Obj_S3Website;
@@ -958,13 +964,14 @@ public:
     static constexpr size_t DIGEST_SIZE_V2 = CEPH_CRYPTO_HMACSHA1_DIGESTSIZE;
     static constexpr size_t DIGEST_SIZE_V4 = CEPH_CRYPTO_HMACSHA256_DIGESTSIZE;
 
+  public:
+
     /* Knowing the signature max size allows us to employ the sstring, and thus
      * avoid dynamic allocations. The multiplier comes from representing digest
      * in the base64-encoded form. */
     static constexpr size_t SIGNATURE_MAX_SIZE = \
       std::max(DIGEST_SIZE_V2, DIGEST_SIZE_V4) * 2 + sizeof('\0');
 
-  public:
     virtual ~VersionAbstractor() {};
 
     using access_key_id_t = std::string_view;

@@ -21,11 +21,12 @@ import { BaseModal } from 'carbon-components-angular';
 @Component({
   selector: 'cd-crud-table',
   templateUrl: './crud-table.component.html',
-  styleUrls: ['./crud-table.component.scss']
+  styleUrls: ['./crud-table.component.scss'],
+  standalone: false
 })
 export class CRUDTableComponent implements OnInit {
-  @ViewChild('badgeDictTpl')
-  public badgeDictTpl: TemplateRef<any>;
+  @ViewChild('tagDictTpl')
+  public tagDictTpl: TemplateRef<any>;
   @ViewChild('dateTpl')
   public dateTpl: TemplateRef<any>;
   @ViewChild('durationTpl')
@@ -89,7 +90,7 @@ export class CRUDTableComponent implements OnInit {
         );
     this.permission = this.permissions[toCamelCase(meta.permissions[0])];
     const templates = {
-      badgeDict: this.badgeDictTpl,
+      badgeDict: this.tagDictTpl,
       date: this.dateTpl,
       duration: this.durationTpl
     };

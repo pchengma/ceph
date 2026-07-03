@@ -34,6 +34,7 @@
 #include "ReplicatedBackend.h"
 #include "PGTransaction.h"
 #include "cls/cas/cls_cas_ops.h"
+#include "Coroutines.h"
 
 class CopyFromCallback;
 class PromoteCallback;
@@ -535,15 +536,15 @@ public:
       projected_log.skip_can_rollback_to_to_head();
       projected_log.trim(cct, last->version, nullptr, nullptr, nullptr);
     }
-    if (!is_primary() && !is_ec_pg()) {
-      replica_clear_repop_obc(logv, t);
+    if (!is_primary()) {
+      clear_repop_obc(logv, t);
     }
     recovery_state.append_log(
       std::move(logv), trim_to, roll_forward_to, pg_committed_to,
       t, transaction_applied, async);
   }
 
-  void replica_clear_repop_obc(
+  void clear_repop_obc(
     const std::vector<pg_log_entry_t> &logv,
     ObjectStore::Transaction &t);
 
@@ -633,10 +634,10 @@ public:
     osd->send_message_osd_cluster(m, con);
   }
   void start_mon_command(
-    const std::vector<std::string>& cmd, const bufferlist& inbl,
+    std::vector<std::string>&& cmd, bufferlist&& inbl,
     bufferlist *outbl, std::string *outs,
     Context *onfinish) override {
-    osd->monc->start_mon_command(cmd, inbl, outbl, outs, onfinish);
+    osd->monc->start_mon_command(std::move(cmd), std::move(inbl), outbl, outs, onfinish);
   }
   ConnectionRef get_con_osd_cluster(int peer, epoch_t from_epoch) override;
   entity_name_t get_cluster_msgr_name() override {
@@ -696,6 +697,7 @@ public:
     bool ignore_cache;    ///< true if IGNORE_CACHE flag is std::set
     bool ignore_log_op_stats;  // don't log op stats
     bool update_log_only; ///< this is a write that returned an error - just record in pg log for dup detection
+    bool use_replace_op = false;  ///< use REPLACE op type instead of MODIFY/DELETE (set by finish_copyfrom)
     ObjectCleanRegions clean_regions;
 
     // side effects
@@ -936,6 +938,12 @@ public:
 
 
 protected:
+
+  OpRequestRef active_coro_op = nullptr;
+  std::unique_ptr<resume_token_t> coro_resumer = nullptr;
+  bool coro_op_in_flight = false;
+  std::list<OpRequestRef> waiting_for_coro_op;
+  OpContext* active_coro_ctx = nullptr;
 
   /**
    * Grabs locks for OpContext, should be cleaned up in close_op_ctx
@@ -1562,7 +1570,10 @@ public:
   void do_request(
     OpRequestRef& op,
     ThreadPool::TPHandle &handle) override;
+  bool should_use_coroutine(MOSDOp* m);
+  void do_op_impl(OpRequestRef op);
   void do_op(OpRequestRef& op);
+  void on_coroutine_complete();
   void record_write_error(OpRequestRef op, const hobject_t &soid,
 			  MOSDOpReply *orig_reply, int r,
 			  OpContext *ctx_for_op_returns=nullptr);
@@ -2011,6 +2022,8 @@ public:
   int getattrs_maybe_cache(
     ObjectContextRef obc,
     std::map<std::string, ceph::buffer::list, std::less<>> *out);
+  int get_internal_versions(const hobject_t& soid,
+                            std::map<shard_id_t, eversion_t>* out);
 
 public:
   void set_dynamic_perf_stats_queries(

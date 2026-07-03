@@ -1,6 +1,5 @@
 {
   grafanaDashboards+::
-    (import 'dashboards/cephfs.libsonnet') +
     (import 'dashboards/cephfsdashboard.libsonnet') +
     (import 'dashboards/host.libsonnet') +
     (import 'dashboards/osd.libsonnet') +
@@ -13,5 +12,6 @@
     (import 'dashboards/smb-overview.libsonnet') +
     (import 'dashboards/ceph-nvmeof.libsonnet') +
     (import 'dashboards/ceph-nvmeof-performance.libsonnet') +
+    (import 'dashboards/hardware.libsonnet') +
     { _config:: $._config },
 }

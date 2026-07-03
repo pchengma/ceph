@@ -30,7 +30,7 @@ describe('RgwSyncDataInfoComponent', () => {
       timestamp: null
     };
     fixture.detectChanges();
-    const upToDateBadge = fixture.debugElement.query(By.css('.badge-success'));
+    const upToDateBadge = fixture.debugElement.query(By.css('cds-tag.tag-success'));
     expect(upToDateBadge).toBeTruthy();
     expect(upToDateBadge.nativeElement.textContent).toEqual('Up to Date');
   });
@@ -39,13 +39,13 @@ describe('RgwSyncDataInfoComponent', () => {
     component.zone = { syncstatus: 'Syncing', timestamp: new Date(Date.now() - 10 * 60 * 1000) };
     fixture.detectChanges();
 
-    const statusElement = fixture.debugElement.query(By.css('li b'));
+    const statusElement = fixture.debugElement.query(By.css('.cds--type-label-01'));
     expect(statusElement.nativeElement.textContent).toContain('Status:');
 
-    const lastSyncedElement = fixture.debugElement.query(By.css('li.mt-4.fw-bold'));
+    const lastSyncedElement = fixture.debugElement.query(By.css('.sync-info__last-synced'));
     expect(lastSyncedElement.nativeElement.textContent).toContain('Last Synced:');
-    const lastSyncedTimestamp = fixture.debugElement.query(By.css('.badge-info'));
-    expect(lastSyncedTimestamp.nativeElement.textContent).toEqual('10 minutes ago');
+    const lastSyncedTimestamp = fixture.debugElement.query(By.css('cds-tag.tag-info'));
+    expect(lastSyncedTimestamp.nativeElement.textContent.trim()).toEqual('10 minutes ago');
   }));
 
   it('should display sync status in the popover', () => {
@@ -59,16 +59,16 @@ describe('RgwSyncDataInfoComponent', () => {
       ]
     };
     fixture.detectChanges();
-    const syncStatus = fixture.debugElement.query(By.css('.text-primary'));
+    const syncStatus = fixture.debugElement.query(By.css('.cds--link'));
     expect(syncStatus).toBeTruthy();
     expect(syncStatus.nativeElement.textContent).toEqual('Syncing');
     const syncPopover = fixture.nativeElement.querySelector('a');
     syncPopover.dispatchEvent(new Event('click'));
     fixture.detectChanges();
     expect(syncPopover).toBeTruthy();
-    const syncPopoverText = fixture.debugElement.query(By.css('.text-center'));
-    expect(syncPopoverText.nativeElement.textContent).toEqual(
-      'Sync Status:Full Sync:0/128 Shards Incremental Sync:128/128 Shards: Data Is Behind On 31 Shards'
-    );
+    const syncPopoverText = fixture.debugElement.query(By.css('.toggletip-content'));
+    expect(syncPopoverText.nativeElement.textContent).toContain('Full Sync');
+    expect(syncPopoverText.nativeElement.textContent).toContain('0/128 Shards');
+    expect(syncPopoverText.nativeElement.textContent).toContain('Data Is Behind On 31 Shards');
   });
 });

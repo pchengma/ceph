@@ -1,14 +1,20 @@
-<legend>
-  <cd-help-text>
-    An NVMe namespace is a quantity of non-volatile storage that can be formatted into logical blocks and presented to a host as a standard block device.
-  </cd-help-text>
-</legend>
-<cd-table [data]="namespaces"
-          columnMode="flex"
-          (fetchData)="listNamespaces()"
-          [columns]="namespacesColumns"
-          selectionType="single"
-          (updateSelection)="updateSelection($event)">
+<cd-nvmeof-gateway-group-filter
+  (groupChange)="onGroupChange($event)">
+</cd-nvmeof-gateway-group-filter>
+
+<ng-container *ngIf="namespaces$ | async as namespaces">
+  <cd-table [data]="namespaces"
+            columnMode="flex"
+            (fetchData)="fetchData()"
+            [columns]="namespacesColumns"
+            identifier="unique_id"
+            [forceIdentifier]="true"
+            selectionType="single"
+            (updateSelection)="updateSelection($event)"
+            emptyStateTitle="No namespaces created."
+            i18n-emptyStateTitle
+            emptyStateMessage="Namespaces are storage volumes mapped to subsystems for host access. Create a namespace to start provisioning storage within a subsystem."
+            i18n-emptyStateMessage>
 
   <div class="table-actions">
     <cd-table-actions [permission]="permission"
@@ -18,3 +24,6 @@
     </cd-table-actions>
   </div>
 </cd-table>
+</ng-container>
+
+<router-outlet name="modal"></router-outlet>

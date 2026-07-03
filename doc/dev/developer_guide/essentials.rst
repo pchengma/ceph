@@ -35,7 +35,7 @@ terms of the LGPL2.1 or LGPL3.0. For full details, see the file
 `COPYING`_ in the top-level directory of the source-code tree.
 
 .. _`COPYING`:
-  https://github.com/ceph/ceph/blob/master/COPYING
+  https://github.com/ceph/ceph/blob/main/COPYING
 
 Source code repositories
 ------------------------
@@ -90,7 +90,7 @@ Mailing lists
 
 Ceph developers and users discuss the project on `Ceph-related mailing lists`_.
 
-.. _`Ceph-related mailing lists`: https://ceph.com/en/community/connect
+.. _`Ceph-related mailing lists`: https://ceph.io/en/community/connect/
 
 Ceph Development Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -259,12 +259,46 @@ public:
   }
 
   int objects_read_sync(const hobject_t &hoid, uint64_t off, uint64_t len,
-                        uint32_t op_flags, ceph::buffer::list *bl) override
+                        uint32_t op_flags, ceph::buffer::list *bl, uint64_t object_size,
+                        std::optional<CoroHandles> coro) override
+  {
+    // Sync reads are only supported in FastEC, and from a coroutine
+    if (!is_optimized() || !coro.has_value()) {
+      return -EOPNOTSUPP;
+    }
+
+    ec_align_t align{off, len, op_flags};
+    std::list<std::pair<ec_align_t, std::pair<bufferlist*, Context*>>> to_read;
+    to_read.push_back({ align, { bl, nullptr } });
+    return optimized.objects_read_sync(hoid, object_size, to_read, *coro);
+  }
+
+  int objects_read_local(const hobject_t &hoid, uint64_t off, uint64_t len,
+                      uint32_t op_flags, ceph::buffer::list *bl) override
   {
     if (is_optimized()) {
-      return optimized.objects_read_sync(hoid, off, len, op_flags, bl);
+      return optimized.objects_read_local(hoid, off, len, op_flags, bl);
     }
-    return legacy.objects_read_sync(hoid, off, len, op_flags, bl);
+    return -EOPNOTSUPP;
+  }
+
+  int objects_readv_sync(const hobject_t &hoid,
+     std::map<uint64_t, uint64_t>& m,
+     uint32_t op_flags,
+     ceph::buffer::list *bl) override
+  {
+    if (is_optimized()) {
+      return optimized.objects_readv_sync(hoid, m, op_flags, bl);
+    }
+    ceph_abort_msg("Sync reads legacy EC");
+  }
+
+  std::pair<uint64_t, uint64_t> extent_to_shard_extent(
+    uint64_t off, uint64_t len) override {
+    if (is_optimized()) {
+      return optimized.extent_to_shard_extent(off, len);
+    }
+    ceph_abort_msg("Extent conversion not supported in legacy EC");
   }
 
   void objects_read_async(
@@ -294,10 +328,11 @@ public:
   }
 
   uint64_t be_get_ondisk_size(uint64_t logical_size,
-                              shard_id_t shard_id) const final {
+                              shard_id_t shard_id,
+                              bool object_is_legacy_ec) const final {
     if (is_optimized())
     {
-      return optimized.be_get_ondisk_size(logical_size, shard_id);
+      return optimized.be_get_ondisk_size(logical_size, shard_id, object_is_legacy_ec);
     }
     return legacy.be_get_ondisk_size(logical_size);
   }
@@ -416,5 +451,80 @@ public:
   }
   bool get_is_ec_optimized() const final {
     return is_optimized();
+  }
+  bool remove_ec_omap_journal_entry(const hobject_t &hoid, const ECOmapJournalEntry &entry) override {
+    ceph_assert(is_optimized());
+    return optimized.remove_ec_omap_journal_entry(hoid, entry);
+  }
+
+  std::pair<gen_t, bool> omap_get_generation(const hobject_t &hoid) override {
+    ceph_assert(is_optimized());
+    return optimized.omap_get_generation(hoid);
+  }
+
+  void omap_trim_delete_from_journal(const hobject_t &hoid, const version_t version) override {
+    ceph_assert(is_optimized());
+    optimized.omap_trim_delete_from_journal(hoid, version);
+  }
+
+  int omap_iterate (
+    ObjectStore::CollectionHandle &c_, ///< [in] collection
+    const ghobject_t &oid, ///< [in] object
+    const ObjectStore::omap_iter_seek_t &start_from,
+    ///^ [in] where the iterator should point to at the beginning
+    const OmapIterFunction &f ///< [in] function to call for each key/value pair
+  ) override {
+    if (!is_optimized()) {
+      return store->omap_iterate(c_, oid, start_from, f);
+    }
+    return optimized.omap_iterate(c_, oid, start_from, f, store);
+  }
+
+  int omap_get_values(
+    ObjectStore::CollectionHandle &c_, ///< [in] collection
+    const ghobject_t &oid, ///< [in] object
+    const std::set<std::string> &keys, ///< [in] keys to get
+    std::map<std::string, ceph::buffer::list> *out ///< [out] returned key/values
+  ) override {
+    if (!is_optimized()) {
+      return store->omap_get_values(c_, oid, keys, out);
+    }
+    return optimized.omap_get_values(c_, oid, keys, out, store);
+  }
+
+  int omap_get_header(
+    ObjectStore::CollectionHandle &c_, ///< [in] Collection containing oid
+    const ghobject_t &oid, ///< [in] Object containing omap
+    ceph::buffer::list *header, ///< [out] omap header
+    bool allow_eio ///< [in] don't assert on eio
+  ) override {
+    if (!is_optimized()) {
+      return store->omap_get_header(c_, oid, header, allow_eio);
+    }
+    return optimized.omap_get_header(c_, oid, header, allow_eio, store);
+  }
+
+  int omap_get(
+    ObjectStore::CollectionHandle &c_, ///< [in] Collection containing oid
+    const ghobject_t &oid, ///< [in] Object containing omap
+    ceph::buffer::list *header, ///< [out] omap header
+    std::map<std::string, ceph::buffer::list> *out /// < [out] Key to value map
+  ) override {
+    if (!is_optimized()) {
+      return store->omap_get(c_, oid, header, out);
+    }
+    return optimized.omap_get(c_, oid, header, out, store);
+  }
+
+  int omap_check_keys(
+    ObjectStore::CollectionHandle &c_, ///< [in] Collection containing oid
+    const ghobject_t &oid, ///< [in] Object containing omap
+    const std::set<std::string> &keys, ///< [in] Keys to check
+    std::set<std::string> *out ///< [out] Subset of keys defined on oid
+  ) override {
+    if (!is_optimized()) {
+      return store->omap_check_keys(c_, oid, keys, out);
+    }
+    return optimized.omap_check_keys(c_, oid, keys, out, store);
   }
 };

@@ -1509,8 +1509,6 @@ public:
   eversion_t  last_update_applied;  ///< last_update readable
   /// last version to which rollback_info trimming has been applied
   eversion_t  last_rollback_info_trimmed_to_applied;
-  // last version in which the stats for a shard were updated
-  std::map<pg_shard_t,eversion_t> stats_last_update;
 
   /// Counter to determine when pending flushes have completed
   unsigned flushes_in_progress = 0;
@@ -1814,6 +1812,7 @@ private:
 
   void update_blocked_by();
   void update_calc_stats();
+  void increment_stats_invalidations_counter(int stats_invalidation_counter, bool invalidation_state);
 
   void add_log_entry(const pg_log_entry_t& e, ObjectStore::Transaction &t, bool applied);
 
@@ -2441,7 +2440,7 @@ public:
   bool needs_recovery() const;
   bool needs_backfill() const;
 
-  bool can_serve_replica_read(const hobject_t &hoid);
+  bool can_serve_read(const hobject_t &hoid);
 
   /**
    * Returns whether the current acting set is able to go active

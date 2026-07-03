@@ -7,7 +7,7 @@
 #include "rgw_bucket.h"
 #include "rgw_log.h"
 #include "rgw_rest.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_process_env.h"
 #include "rgw_sal.h"
 #include "rgw_sal_rados.h"
@@ -128,7 +128,10 @@ void RGWRealmReloader::reload()
           cct->_conf->rgw_enable_quota_threads,
           cct->_conf->rgw_run_sync_thread,
           cct->_conf.get_val<bool>("rgw_dynamic_resharding"),
-	        true, true, null_yield, env.cfgstore, // run notification thread
+          true,
+          true, // run notification thread
+          true, // run bucket logging thread
+          null_yield, env.cfgstore,
           cct->_conf->rgw_cache_enabled);
     }
 
@@ -190,8 +193,12 @@ void RGWRealmReloader::reload()
   if (env.lua.manager.get()) {
     env.lua.manager = env.driver->get_lua_manager(
         env.lua.manager->luarocks_path());
-    if (env.lua.background) {
-      env.lua.background->set_manager(env.lua.manager.get());
+    if (env.driver->get_name() == "rados") {
+      static_cast<rgw::sal::RadosLuaManager*>(env.lua.manager.get())->watch_reload(&dp);
+      if (env.lua.background) {
+        env.lua.background->set_manager(env.lua.manager.get());
+        env.lua.manager.get()->set_lua_background(env.lua.background);
+      }
     }
   }
 

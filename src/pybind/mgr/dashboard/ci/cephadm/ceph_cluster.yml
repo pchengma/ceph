@@ -5,7 +5,7 @@ parameters:
  netmask: 255.255.255.0
  numcpus: 1
  memory: 2048
- image: fedora40
+ image: fedora42
  notify: false
  admin_password: password
  disks:
@@ -46,6 +46,9 @@ parameters:
  # setting up an insecure podman registry and then loading the ceph image to all hosts
  {% if quick_install is defined %}
  - /root/load-podman-image.sh
+ {% endif %}
+ {% if custom_image is defined %}
+ - export CEPHADM_IMAGE={{custom_image}}
  {% endif %}
  - sed -i "s/SELINUX=enforcing/SELINUX=permissive/" /etc/selinux/config
  - setenforce 0

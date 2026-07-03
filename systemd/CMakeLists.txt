@@ -14,7 +14,7 @@ set(CEPH_SYSTEMD_ENV_DIR "/etc/sysconfig"
 set(SYSTEMD_ENV_FILE "${CEPH_SYSTEMD_ENV_DIR}/ceph")
 foreach(service
     ceph-crash
-    ceph-exporter
+    ceph-exporter@
     ceph-fuse@
     ceph-mds@
     ceph-mgr@
@@ -22,6 +22,7 @@ foreach(service
     ceph-osd@
     ceph-radosgw@
     ceph-rbd-mirror@
+    ceph-volume@
     ceph-immutable-object-cache@
     cephfs-mirror@
     rbdmap)
@@ -44,6 +45,5 @@ install(FILES
   ceph-radosgw.target
   ceph-rbd-mirror.target
   ceph-immutable-object-cache.target
-  ceph-volume@.service
   cephfs-mirror.target
   DESTINATION ${SYSTEMD_SYSTEM_UNIT_DIR})

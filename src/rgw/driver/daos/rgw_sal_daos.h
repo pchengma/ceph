@@ -614,8 +614,8 @@ class DaosObject : public StoreObject {
       RGWObjCategory category, uint64_t olh_epoch,
       boost::optional<ceph::real_time> delete_at, std::string* version_id,
       std::string* tag, std::string* etag, void (*progress_cb)(off_t, void*),
-      void* progress_data, const DoutPrefixProvider* dpp,
-      optional_yield y) override;
+      void* progress_data, rgw::sal::DataProcessorFactory* dp_factory,
+      const DoutPrefixProvider* dpp, optional_yield y) override;
   virtual RGWAccessControlPolicy& get_acl(void) override { return acls; }
   virtual int set_acl(const RGWAccessControlPolicy& acl) override {
     acls = acl;
@@ -661,6 +661,7 @@ class DaosObject : public StoreObject {
 			   uint64_t olh_epoch,
 			   std::optional<uint64_t> days,
 		           bool& in_progress,
+		           uint64_t& size,
 			   const DoutPrefixProvider* dpp,
 			   optional_yield y) override;
   virtual bool placement_rules_match(rgw_placement_rule& r1,
@@ -1039,12 +1040,14 @@ class DaosStore : public StoreDriver {
   int store_oidc_provider(const DoutPrefixProvider* dpp,
                           optional_yield y,
                           const RGWOIDCProviderInfo& info,
-                          bool exclusive) override;
+                          bool exclusive,
+                          RGWObjVersionTracker* objv_tracker) override;
   int load_oidc_provider(const DoutPrefixProvider* dpp,
                          optional_yield y,
                          std::string_view tenant,
                          std::string_view url,
-                         RGWOIDCProviderInfo& info) override;
+                         RGWOIDCProviderInfo& info,
+                         RGWObjVersionTracker* objv_tracker) override;
   int delete_oidc_provider(const DoutPrefixProvider* dpp,
                            optional_yield y,
                            std::string_view tenant,

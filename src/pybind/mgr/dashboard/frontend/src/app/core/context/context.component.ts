@@ -17,23 +17,24 @@ import { TimerService } from '~/app/shared/services/timer.service';
 @Component({
   selector: 'cd-context',
   templateUrl: './context.component.html',
-  styleUrls: ['./context.component.scss']
+  styleUrls: ['./context.component.scss'],
+  standalone: false
 })
 export class ContextComponent implements OnInit, OnDestroy {
   readonly REFRESH_INTERVAL = 5000;
   private subs = new Subscription();
   private rgwUrlPrefix = '/rgw';
   private rgwUserUrlPrefix = '/rgw/user';
-  private rgwRoleUrlPrefix = '/rgw/roles';
   private rgwBuckerUrlPrefix = '/rgw/bucket';
   private rgwAccountsUrlPrefix = '/rgw/accounts';
+  private rgwMultisiteSyncPolicyPrefix = '/rgw/multisite/sync-policy';
   permissions: Permissions;
   featureToggleMap$: FeatureTogglesMap$;
   isRgwRoute =
     document.location.href.includes(this.rgwUserUrlPrefix) ||
     document.location.href.includes(this.rgwBuckerUrlPrefix) ||
-    document.location.href.includes(this.rgwRoleUrlPrefix) ||
-    document.location.href.includes(this.rgwAccountsUrlPrefix);
+    document.location.href.includes(this.rgwAccountsUrlPrefix) ||
+    document.location.href.includes(this.rgwMultisiteSyncPolicyPrefix);
 
   constructor(
     private authStorageService: AuthStorageService,
@@ -55,8 +56,8 @@ export class ContextComponent implements OnInit, OnDestroy {
             (this.isRgwRoute = [
               this.rgwBuckerUrlPrefix,
               this.rgwUserUrlPrefix,
-              this.rgwRoleUrlPrefix,
-              this.rgwAccountsUrlPrefix
+              this.rgwAccountsUrlPrefix,
+              this.rgwMultisiteSyncPolicyPrefix
             ].some((urlPrefix) => this.router.url.startsWith(urlPrefix)))
         )
     );

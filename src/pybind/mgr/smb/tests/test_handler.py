@@ -4,6 +4,14 @@ import smb
 from smb.handler import _FakeEarmarkResolver
 
 
+class _FakeToolExecer:
+    """Mock tool executor for testing."""
+
+    def tool_exec(self, cmd: list[str]) -> tuple[int, str, str]:
+        """Mock tool_exec that returns success."""
+        return (0, '{}', '')
+
+
 def _cluster(**kwargs):
     if 'clustering' not in kwargs:
         kwargs['clustering'] = smb.enums.SMBClustering.NEVER
@@ -25,6 +33,8 @@ def thandler():
         # into a single store. Do that to simplify testing a bit.
         public_store=ext_store,
         priv_store=ext_store,
+        mon_cmd_issuer=None,
+        tool_execer=_FakeToolExecer(),
     )
 
 
@@ -328,8 +338,7 @@ def test_generate_config_basic(thandler):
         }
     )
 
-    cfg = thandler.generate_config('foo')
-    assert cfg
+    thandler._sync_clusters(['foo'])
 
 
 def test_generate_config_ad(thandler):
@@ -390,7 +399,8 @@ def test_generate_config_ad(thandler):
         }
     )
 
-    cfg = thandler.generate_config('foo')
+    thandler._sync_clusters(['foo'])
+    cfg = thandler.public_store['foo', 'config.smb'].get()
     assert cfg
     assert cfg['globals']['foo']['options']['realm'] == 'dom1.example.com'
 
@@ -471,7 +481,8 @@ def test_generate_config_with_login_control(thandler):
         }
     )
 
-    cfg = thandler.generate_config('foo')
+    thandler._sync_clusters(['foo'])
+    cfg = thandler.public_store['foo', 'config.smb'].get()
     assert cfg
     assert cfg['shares']['Ess One']['options']
     shopts = cfg['shares']['Ess One']['options']
@@ -543,7 +554,8 @@ def test_generate_config_with_login_control_restricted(thandler):
         }
     )
 
-    cfg = thandler.generate_config('foo')
+    thandler._sync_clusters(['foo'])
+    cfg = thandler.public_store['foo', 'config.smb'].get()
     assert cfg
     assert cfg['shares']['Ess One']['options']
     shopts = cfg['shares']['Ess One']['options']
@@ -1770,3 +1782,45 @@ def test_share_name_in_use(thandler, params):
     assert not results.success
     assert params['error_msg'] in rs['results'][0]['msg']
     assert rs['results'][0]['conflicting_share_id'] in params['conflicts']
+
+
+def test_apply_share_with_qos(thandler):
+    cluster = _cluster(
+        cluster_id='qoscluster',
+        auth_mode=smb.enums.AuthMode.USER,
+        user_group_settings=[
+            smb.resources.UserGroupSource(
+                source_type=smb.resources.UserGroupSourceType.EMPTY,
+            ),
+        ],
+    )
+    share = smb.resources.Share(
+        cluster_id='qoscluster',
+        share_id='qostest',
+        name='QoS Test Share',
+        cephfs=_cephfs(
+            volume='cephfs',
+            path='/',
+            qos=smb.resources.QoSConfig(
+                read_iops_limit=100,
+                write_iops_limit=200,
+                read_bw_limit="1048576",
+                write_bw_limit="2097152",
+                read_burst_mult=20,
+                write_burst_mult=15,
+            ),
+        ),
+    )
+    rg = thandler.apply([cluster, share])
+    assert rg.success, rg.to_simplified()
+
+    # Verify QoS settings were stored
+    share_dict = thandler.internal_store.data[
+        ('shares', 'qoscluster.qostest')
+    ]
+    assert share_dict['cephfs']['qos']['read_iops_limit'] == 100
+    assert share_dict['cephfs']['qos']['write_iops_limit'] == 200
+    assert share_dict['cephfs']['qos']['read_bw_limit'] == "1048576"
+    assert share_dict['cephfs']['qos']['write_bw_limit'] == "2097152"
+    assert share_dict['cephfs']['qos']['read_burst_mult'] == 20
+    assert share_dict['cephfs']['qos']['write_burst_mult'] == 15

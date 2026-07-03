@@ -12,10 +12,9 @@
 #include "rgw_multi.h"
 #include "rgw_op.h"
 #include "rgw_sal.h"
+#ifdef WITH_RADOSGW_RADOS
 #include "rgw_sal_rados.h"
-
-#include "services/svc_sys_obj.h"
-#include "services/svc_tier_rados.h"
+#endif
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -101,5 +100,6 @@ void RGWUploadPartInfo::dump(Formatter *f) const
   utime_t ut(modified);
   encode_json("modified", ut, f);
   encode_json("past_prefixes", past_prefixes, f);
+  encode_json("crypt_salt", crypt_salt, f);
 }
 

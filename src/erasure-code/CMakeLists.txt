@@ -3,8 +3,12 @@
 set(erasure_plugin_dir ${CEPH_INSTALL_PKGLIBDIR}/erasure-code)
 
 #jerasure subdir must be before shec so jerasure & neon obj libs are declared
-include_directories(SYSTEM jerasure/jerasure/include)
-include_directories(SYSTEM jerasure/gf-complete/include)
+if(WITH_SYSTEM_JERASURE)
+  include_directories(SYSTEM ${Jerasure_INCLUDE_DIRS})
+else()
+  include_directories(SYSTEM jerasure/jerasure/include)
+  include_directories(SYSTEM jerasure/gf-complete/include)
+endif()
 include_directories(jerasure)
 
 # legacy jerasure flavors. these are left here for backward compatibility
@@ -23,16 +27,12 @@ add_subdirectory(shec)
 add_subdirectory(clay)
 add_subdirectory(consistency)
 
-if(HAVE_NASM_X64_AVX2 OR HAVE_ARMV8_SIMD)
-  set(WITH_EC_ISA_PLUGIN TRUE CACHE BOOL "")
-endif()
-
 if(WITH_EC_ISA_PLUGIN)
   add_subdirectory(isa)
   set(EC_ISA_LIB ec_isa)
 endif()
 
-add_library(erasure_code STATIC ErasureCodePlugin.cc)
+add_library(erasure_code OBJECT ErasureCodePlugin.cc)
 target_link_libraries(erasure_code $<$<PLATFORM_ID:Windows>:dlfcn_win32>
                       ${CMAKE_DL_LIBS})
 

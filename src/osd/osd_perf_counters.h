@@ -170,6 +170,8 @@ enum osd_counter_idx_t {
   l_osd_scrub_rppool_successful_elapsed, ///< time to complete a successful scrub
   l_osd_scrub_rppool_failed, ///< failed scrubs count
   l_osd_scrub_rppool_failed_elapsed, ///< time from start to failure
+  l_osd_scrub_rppool_write_intersects, ///< client write op intersects chunk range
+  l_osd_scrub_rppool_write_blocked, ///< write op did not preempt the scrub
 
   // ----   scrub reservation process - replicated pools
 
@@ -196,6 +198,8 @@ enum osd_counter_idx_t {
   l_osd_scrub_ec_successful_elapsed, ///< time to complete a successful scrub
   l_osd_scrub_ec_failed, ///< failed scrubs count
   l_osd_scrub_ec_failed_elapsed, ///< time from start to failure
+  l_osd_scrub_ec_write_intersects, ///< client write op intersects chunk range
+  l_osd_scrub_ec_write_blocked, ///< write op did not preempt the scrub
 
   // ----   scrub reservation process - EC
 
@@ -253,6 +257,12 @@ enum {
   rs_getmissing_latency,
   rs_waitupthru_latency,
   rs_notrecovering_latency,
+  rs_process_log_stats_invalidated,
+  rs_pg_split_parent_stats_invalidated,
+  rs_pg_split_child_stats_invalidated,
+  rs_update_stats_invalidated,
+  rs_append_log_stats_invalidated,
+  rs_merge_log_stats_invalidated,
   rs_last,
 };
 
@@ -272,8 +282,6 @@ enum {
   scrbcnt_chunks_busy,
   /// # waiting on object events
   scrbcnt_blocked,
-  /// # write blocked by the scrub
-  scrbcnt_write_blocked,
 
   scrbcnt_last,
 };
