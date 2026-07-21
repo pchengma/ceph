@@ -36,6 +36,8 @@ from .cephadmservice import (
 )
 from ..tlsobject_types import TLSCredentials, EMPTY_TLS_CREDENTIALS
 from ..schedule import DaemonPlacement
+from cephadm import utils
+from dataclasses import replace
 
 if TYPE_CHECKING:
     from ..module import CephadmOrchestrator
@@ -206,15 +208,19 @@ class SMBService(CephService):
             ca_cert=ssl_params.ssl_ca_cert or '',
         )
 
-    def _rgw_creds_uri(self, cluster_id: str) -> Optional[str]:
+    @classmethod
+    def _lookup_rgw_creds_uri(
+        cls, mgr: 'CephadmOrchestrator', cluster_id: str
+    ) -> Optional[str]:
         from smb.external import rgw_config_key as _smb_rgw_config_key
         from smb.mon_store import MonKeyConfigStore
-        _rgw_entry = MonKeyConfigStore(self.mgr)[
-            _smb_rgw_config_key(cluster_id)
-        ]
+        _rgw_entry = MonKeyConfigStore(mgr)[_smb_rgw_config_key(cluster_id)]
         if _rgw_entry.exists():
             return _rgw_entry.uri
         return None
+
+    def _rgw_creds_uri(self, cluster_id: str) -> Optional[str]:
+        return self._lookup_rgw_creds_uri(self.mgr, cluster_id)
 
     def generate_config(
         self, daemon_spec: CephadmDaemonDeploySpec
@@ -300,7 +306,7 @@ class SMBService(CephService):
 
         logger.debug('smb generate_config: %r', config_blobs)
         self._configure_cluster_meta(smb_spec, daemon_spec)
-        deps = self.get_dependencies(self.mgr, smb_spec)
+        deps = sorted(self.get_dependencies(self.mgr, smb_spec))
         return config_blobs, deps
 
     def _cert_or_uri(self, data: Optional[str]) -> Optional[str]:
@@ -384,10 +390,12 @@ class SMBService(CephService):
         logger.debug(
             'found smb pool in uri [pool=%r, ns=%r]: %r', pool, ns, uri
         )
-        # enhanced caps for smb pools to be used for ctdb mgmt
+        # enhanced caps for smb pools to be used for ctdb mgmt.
+        # scoped to this cluster's own namespace given cluster id acts as
+        # a namespace so that a cluster's samba containers can't read
+        # other clusters' config/join/user objects sharing the same pool.
         return [
-            # TODO - restrict this read access to the namespace too?
-            f'allow r pool={pool}',
+            f'allow r pool={pool} namespace={ns}',
             # the x perm is needed to lock the cluster meta object
             f'allow rwx pool={pool} namespace={ns} object_prefix cluster.meta.',
         ]
@@ -534,7 +542,36 @@ class SMBService(CephService):
         for ccc in smb_spec.ceph_cluster_configs or []:
             value = _hash_ceph_cluster_config(ccc)
             out.append(Dep.META(f'ceph_cluster_config.{ccc.alias}', value))
+        # Add features as a dependency
+        out.append(Dep.FIELD('features', ','.join(sorted(smb_spec.features or []))))
+        rgw_creds_uri = cls._lookup_rgw_creds_uri(mgr, smb_spec.cluster_id) or ''
+        out.append(Dep.FIELD('rgw_creds_uri', rgw_creds_uri))
         return out
+
+    def choose_next_action(
+        self,
+        scheduled_action: utils.Action,
+        daemon_type: Optional[str],
+        spec: Optional[ServiceSpec],
+        curr_deps: List[str],
+        last_deps: List[str],
+        daemon: Optional[DaemonDescription] = None,
+    ) -> utils.NextDaemonStep:
+        step = super().choose_next_action(
+            scheduled_action, daemon_type, spec, curr_deps, last_deps)
+        if step.action is utils.Action.RECONFIG:
+            sym_diff = set(curr_deps).symmetric_difference(last_deps)
+            needs_redeploy_prefixes = (
+                Dep.FIELD('features', ''),
+                Dep.FIELD('rgw_creds_uri', ''),
+            )
+            if any(
+                d.startswith(p)
+                for d in sym_diff
+                for p in needs_redeploy_prefixes
+            ):
+                return replace(step, action=utils.Action.REDEPLOY)
+        return step
 
 
 Network = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]

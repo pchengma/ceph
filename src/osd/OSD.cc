@@ -2760,7 +2760,7 @@ int OSD::asok_route_to_pg(
   } catch (const TOPNSPC::common::bad_cmd_get& e) {
     (*target_pg)->unlock();
     ss << e.what();
-    on_finish(ret, ss.str(), outbl);
+    on_finish(-EINVAL, ss.str(), outbl);
     return -EINVAL;
   }
 }
@@ -3419,9 +3419,9 @@ will start to track new ops received afterwards.";
       f->dump_format_unquoted("15min", "%s", fixed_u_to_string(sitem.times[2],3).c_str());
       f->close_section();  // average
       f->open_object_section("min");
-      f->dump_format_unquoted("1min", "%s", fixed_u_to_string(sitem.max[0],3).c_str());
-      f->dump_format_unquoted("5min", "%s", fixed_u_to_string(sitem.max[1],3).c_str());
-      f->dump_format_unquoted("15min", "%s", fixed_u_to_string(sitem.max[2],3).c_str());
+      f->dump_format_unquoted("1min", "%s", fixed_u_to_string(sitem.min[0],3).c_str());
+      f->dump_format_unquoted("5min", "%s", fixed_u_to_string(sitem.min[1],3).c_str());
+      f->dump_format_unquoted("15min", "%s", fixed_u_to_string(sitem.min[2],3).c_str());
       f->close_section();  // min
       f->open_object_section("max");
       f->dump_format_unquoted("1min", "%s", fixed_u_to_string(sitem.max[0],3).c_str());

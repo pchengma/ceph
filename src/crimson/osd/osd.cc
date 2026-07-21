@@ -106,11 +106,19 @@ OSD::OSD(int id, uint32_t nonce,
     mgrc{new crimson::mgr::Client{
       *public_msgr,
       *this,
+      // one lambda to perf-query them all
       [this](const ConfigPayload &config_payload) {
 	return set_perf_queries(config_payload);
       },
+      // one lambda to help _send_report() report them all
       [this] {
 	return get_perf_reports();
+      },
+      // one lambda to log-warn if pg stats report is stuck
+      [this](uint32_t skips) {
+	clog->warn() << fmt::format(
+	  "pg stats report stuck for ~{}s, store may be overloaded",
+	  skips * 5);
       }
     }},
     store{store},
@@ -600,7 +608,8 @@ seastar::future<> OSD::start()
       local_service.local_state.initialize_scheduler(local_service.get_cct(), *is_rotational);
     });
   } else {
-    throw std::runtime_error("No device class is set");
+    WARN("no device class set, defaulting is_rotational to false");
+    is_rotational = false;
   }
   monc->sub_want("osd_pg_creates", last_pg_create_epoch, 0);
   monc->sub_want("mgrmap", 0, 0);
@@ -1189,6 +1198,7 @@ seastar::future<> OSD::_handle_osd_map(Ref<MOSDMap> m)
       co_return co_await get_shard_services().osdmap_subscribe(
         m->cluster_osdmap_trim_lower_bound - 1, true);
     }
+    start = first;
   }
 
   ceph::os::Transaction t;
@@ -1243,8 +1253,11 @@ seastar::future<> OSD::committed_osd_maps(
         co_return;
       }
       DEBUG("osd.{}: mark osd.{} down", whoami, osd_id);
+      // osd_id came from old_map->get_all_osds(); if it was purged in the new
+      // osdmap, osdmap->get_cluster_addrs(osd_id) would ceph_assert(exists()).
+      // old_map is guaranteed to contain osd_id and holds its last-known addr.
       co_await cluster_msgr->mark_down(
-        osdmap->get_cluster_addrs(osd_id).front());
+        old_map->get_cluster_addrs(osd_id).front());
     });
 
     co_await pg_shard_manager.update_map(std::move(o));

@@ -1997,9 +1997,12 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
         }
       }
 
-      // Auto-enable omap support for replicated pools
+      // Auto-enable omap support for replicated and fast EC pools
+      // Omap is not supported by EC pools in crimson
       for (auto& [pool_id, pool] : tmp.get_pools()) {
-        if (!pool.has_flag(pg_pool_t::FLAG_OMAP) && pool.is_replicated()) {
+        if (!pool.has_flag(pg_pool_t::FLAG_OMAP) &&
+            (pool.is_replicated() ||
+             (pool.allows_ecoptimizations() && !pool.is_crimson()))) {
           pg_pool_t p = pool;
           p.flags |= pg_pool_t::FLAG_OMAP;
           pending_inc.new_pools[pool_id] = p;
@@ -4105,7 +4108,7 @@ bool OSDMonitor::prepare_pg_ready_to_merge(MonOpRequestRef op)
     p.last_change = pending_inc.epoch;
   } else {
     // back off the merge attempt!
-    if (!m->ready && !p.has_flag(pg_pool_t::FLAG_CRIMSON)) {
+    if (!m->ready && p.has_flag(pg_pool_t::FLAG_CRIMSON)) {
       mon.clog->warn() << "osd." << m->get_orig_source().num()
                        << " reported pg " << m->pgid
                        << " not ready to merge; backing off pg_num decrease"
@@ -8451,10 +8454,6 @@ int OSDMonitor::prepare_new_pool(string& name,
   if (crimson) {
     pi->set_flag(pg_pool_t::FLAG_CRIMSON);
   }
-  if (pool_type == pg_pool_t::TYPE_REPLICATED
-      && osdmap.require_osd_release >= ceph_release_t::umbrella) {
-    pi->set_flag(pg_pool_t::FLAG_OMAP);
-  }
 
   pi->size = size;
   pi->min_size = min_size;
@@ -8516,9 +8515,7 @@ int OSDMonitor::prepare_new_pool(string& name,
         pi->ec_data_shard_count = erasure_code->get_data_chunk_count();
         pi->ec_coding_shard_count = erasure_code->get_coding_chunk_count();
       } else {
-        if (ss) {
-          *ss << "get_erasure_code failed: " << tmp.str();
-        }
+        *ss << "get_erasure_code failed: " << tmp.str();
         return -EINVAL;
       }
       pi->erasure_code_profile = erasure_code_profile;
@@ -8548,12 +8545,32 @@ int OSDMonitor::prepare_new_pool(string& name,
   pi->cache_min_flush_age = g_conf()->osd_pool_default_cache_min_flush_age;
   pi->cache_min_evict_age = g_conf()->osd_pool_default_cache_min_evict_age;
 
-  if (cct->_conf.get_val<bool>("osd_pool_default_flag_ec_optimizations")) {
-    // This will fail if the pool cannot support ec optimizations.
-    enable_pool_ec_optimizations(*pi, nullptr, true);
+  // for 'Classic' - we support both EC-optimized and non-optimized EC pools.
+  // For Crimson - only EC-optimized pools are supported.
+  if (pi->is_erasure()) {
+    if (crimson) {
+      if (auto r = enable_pool_ec_optimizations(*pi, true); !r) {
+        // for Crimson - failure is not an option
+        *ss << r.error().message;
+        return r.error().error;
+      }
+    } else {
+      if (cct->_conf.get_val<bool>("osd_pool_default_flag_ec_optimizations")) {
+        // Silently fail if the pool cannot support ec optimizations.
+        std::ignore = enable_pool_ec_optimizations(*pi, true);
+      }
+    }
   }
 
   maybe_enable_pool_split_ops(*pi);
+
+  // Auto-enable omap support for replicated and fast EC pools
+  // Omap is not supported by EC pools in crimson
+  if (osdmap.require_osd_release >= ceph_release_t::umbrella &&
+      (pool_type == pg_pool_t::TYPE_REPLICATED ||
+       (pi->allows_ecoptimizations() && !crimson))) {
+    pi->set_flag(pg_pool_t::FLAG_OMAP);
+  }
 
   pending_inc.new_pool_names[pool] = name;
   return 0;
@@ -8585,20 +8602,19 @@ bool OSDMonitor::prepare_unset_flag(MonOpRequestRef op, int flag)
   return true;
 }
 
-int OSDMonitor::enable_pool_ec_optimizations(pg_pool_t &p,
-    stringstream *ss, bool enable) {
+tl::expected<void, ErrorNMessage>
+OSDMonitor::enable_pool_ec_optimizations(pg_pool_t &p, bool enable)
+{
   if (!p.is_erasure()) {
-    if (ss) {
-      *ss << "allow_ec_optimizations can only be enabled for an erasure coded pool";
-    }
-    return -EINVAL;
+    return tl::unexpected(ErrorNMessage{
+	-EINVAL,
+	"allow_ec_optimizations can only be enabled for an erasure coded pool"});
   }
   if (osdmap.require_osd_release < ceph_release_t::tentacle) {
-    if (ss) {
-      *ss << "All OSDs must be upgraded to tentacle or "
-           << "later before setting allow_ec_optimizations";
-    }
-    return -EINVAL;
+    return tl::unexpected(ErrorNMessage{
+	-EINVAL,
+	"All OSDs must be upgraded to tentacle or "
+	"later before setting allow_ec_optimizations"});
   }
   if (enable) {
     ErasureCodeInterfaceRef erasure_code;
@@ -8610,27 +8626,23 @@ int OSDMonitor::enable_pool_ec_optimizations(pg_pool_t &p,
       m = erasure_code->get_coding_chunk_count();
       chunk_size = erasure_code->get_chunk_size(p.get_stripe_width());
     } else {
-      if (ss) {
-        *ss << "get_erasure_code failed: " << tmp.str();
-      }
-      return -EINVAL;
+      return tl::unexpected(ErrorNMessage{
+	  -EINVAL, "get_erasure_code failed: " + tmp.str()});
     }
     if ((erasure_code->get_supported_optimizations() &
-        ErasureCodeInterface::FLAG_EC_PLUGIN_OPTIMIZED_SUPPORTED) == 0) {
-      if (ss) {
-        *ss << "ec optimizations not currently supported for pool profile.";
-      }
-      return -EINVAL;
+	ErasureCodeInterface::FLAG_EC_PLUGIN_OPTIMIZED_SUPPORTED) == 0) {
+      return tl::unexpected(ErrorNMessage{
+	  -EINVAL,
+	  "ec optimizations not currently supported for pool profile."});
     }
 
     if ((chunk_size % 4096) != 0) {
-      if (ss) {
-        *ss << "stripe_unit must be divisible by 4096 to enable ec optimizations";
-      }
-      return -EINVAL;
+      return tl::unexpected(ErrorNMessage{
+	  -EINVAL,
+	  "stripe_unit must be divisible by 4096 to enable ec optimizations"});
     }
     // Restrict the set of shards that can be a primary to the 1st data
-    // raw_shard (raw_shard 0) and the coding parity raw_shards because§
+    // raw_shard (raw_shard 0) and the coding parity raw_shards because
     // the other shards (including local parity for LRC) may not have
     // up to date copies of xattrs including OI
     p.nonprimary_shards.clear();
@@ -8642,19 +8654,24 @@ int OSDMonitor::enable_pool_ec_optimizations(pg_pool_t &p,
 	} else {
 	  shard = shard_id_t(int(raw_shard));
 	}
-        p.nonprimary_shards.insert(shard);
+	p.nonprimary_shards.insert(shard);
       }
     }
     p.flags |= pg_pool_t::FLAG_EC_OPTIMIZATIONS;
+
+    // Automatically enable omap support in fast EC pools
+    // Omap is not supported by EC pools in crimson
+    if (!p.is_crimson() && osdmap.require_osd_release >= ceph_release_t::umbrella) {
+      p.flags |= pg_pool_t::FLAG_OMAP;
+    }
   } else {
     if ((p.flags & pg_pool_t::FLAG_EC_OPTIMIZATIONS) != 0) {
-      if (ss) {
-        *ss << "allow_ec_optimizations cannot be disabled once enabled";
-      }
-      return -EINVAL;
+      return tl::unexpected(ErrorNMessage{
+	  -EINVAL,
+	  "allow_ec_optimizations cannot be disabled once enabled"});
     }
   }
-  return 0;
+  return {};
 }
 
 void OSDMonitor::maybe_enable_pool_split_ops(pg_pool_t &p) {
@@ -9226,9 +9243,9 @@ int OSDMonitor::prepare_command_pool_set(const cmdmap_t& cmdmap,
       return -EINVAL;
     }
     bool was_enabled = p.allows_ecoptimizations();
-    int r = enable_pool_ec_optimizations(p, &ss, enable);
-    if (r != 0) {
-      return r;
+    if (auto r = enable_pool_ec_optimizations(p, enable); !r) {
+      ss << r.error().message;
+      return r.error().error;
     }
     maybe_enable_pool_split_ops(p);
     if (!was_enabled && p.allows_ecoptimizations()) {
@@ -9261,25 +9278,6 @@ int OSDMonitor::prepare_command_pool_set(const cmdmap_t& cmdmap,
       p.set_flag(n);
     } else {
       p.unset_flag(n);
-    }
-  } else if (var == "supports_omap") {
-    if ((val == "true") && osdmap.require_osd_release < ceph_release_t::umbrella) {
-      ss << "supports_omap cannot be enabled until require_osd_release is set to umbrella or later";
-      return -EPERM;
-    }
-    // Disabling omap support will leave omap data in RocksDB which cannot be cleaned up
-    // It will also break any services that depend on this pool to store metadata
-    if ((val == "false") && (p.has_flag(pg_pool_t::FLAG_OMAP))) {
-      ss << "supports_omap cannot be disabled once enabled";
-      return -EINVAL;
-    }
-    // This restriction is temporary until omap support is well tested in Fast EC pools
-    if ((val == "true") && p.is_erasure()) {
-      ss << "supports_omap cannot be enabled in ec pools";
-      return -EINVAL;
-    }
-    if (val == "true") {
-      p.flags |= pg_pool_t::FLAG_OMAP;
     }
   } else if (var == "target_max_objects") {
     if (interr.length()) {

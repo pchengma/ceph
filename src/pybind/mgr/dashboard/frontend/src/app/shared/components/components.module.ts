@@ -45,6 +45,7 @@ import {
   LayerModule,
   ThemeModule
 } from 'carbon-components-angular';
+import { ProductiveCardComponent } from './productive-card/productive-card.component';
 import EditIcon from '@carbon/icons/es/edit/16';
 import CodeIcon from '@carbon/icons/es/code/16';
 import { MotdComponent } from '~/app/shared/components/motd/motd.component';
@@ -132,17 +133,17 @@ import Locked16 from '@carbon/icons/es/locked/16';
 import WebServicesCluster20 from '@carbon/icons/es/web-services--cluster/20';
 import WebServicesCluster32 from '@carbon/icons/es/web-services--cluster/32';
 import CloudMonitoring16 from '@carbon/icons/es/cloud--monitoring/16';
+import Temperature16 from '@carbon/icons/es/temperature/16';
 
 import { TearsheetStepComponent } from './tearsheet-step/tearsheet-step.component';
 import { PageHeaderComponent } from './page-header/page-header.component';
 import { SidebarLayoutComponent } from './sidebar-layout/sidebar-layout.component';
 import { NumberWithUnitComponent } from './number-with-unit/number-with-unit.component';
-import { ProductiveCardComponent } from './productive-card/productive-card.component';
+import { OverviewComponent } from './resource-overview-card/resource-overview-card.component';
 
 @NgModule({
   imports: [
     CommonModule,
-    ProductiveCardComponent,
     FormsModule,
     ReactiveFormsModule,
     NgbAlertModule,
@@ -186,7 +187,8 @@ import { ProductiveCardComponent } from './productive-card/productive-card.compo
     TagModule,
     LinkModule,
     LayerModule,
-    ThemeModule
+    ThemeModule,
+    ProductiveCardComponent
   ],
   declarations: [
     SparklineComponent,
@@ -235,7 +237,8 @@ import { ProductiveCardComponent } from './productive-card/productive-card.compo
     TearsheetStepComponent,
     PageHeaderComponent,
     SidebarLayoutComponent,
-    NumberWithUnitComponent
+    NumberWithUnitComponent,
+    OverviewComponent
   ],
   providers: [provideCharts(withDefaultRegisterables())],
   exports: [
@@ -282,6 +285,7 @@ import { ProductiveCardComponent } from './productive-card/productive-card.compo
     PageHeaderComponent,
     SidebarLayoutComponent,
     NumberWithUnitComponent,
+    OverviewComponent,
     ProductiveCardComponent
   ]
 })
@@ -326,7 +330,8 @@ export class ComponentsModule {
       Locked16,
       WebServicesCluster20,
       WebServicesCluster32,
-      CloudMonitoring16
+      CloudMonitoring16,
+      Temperature16
     ]);
   }
 }

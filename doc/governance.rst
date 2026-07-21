@@ -86,6 +86,7 @@ Current Members
  * Adam King <adking@redhat.com>
  * Afreen Misbah <afreen@ibm.com>
  * Anthony D'Atri <anthony.datri@gmail.com>
+ * Aviv Caro <Aviv.Caro@ibm.com>
  * Casey Bodley <cbodley@redhat.com>
  * Dan van der Ster <dan.vanderster@clyso.com>
  * David Orman <ormandj@1111systems.com>
@@ -99,12 +100,14 @@ Current Members
  * Joseph Mundackal <jmundackal@bloomberg.net>
  * Josh Durgin <jdurgin@redhat.com>
  * João Eduardo Luis <joao@clyso.com>
+ * Kyle Bader <kbader@ibm.com>
  * Laura Flores <lflores@ibm.com>
  * Mark Nelson <mark.nelson@clyso.com>
  * Matan Breizman <mbreizma@redhat.com>
  * Matt Benjamin <mbenjami@redhat.com>
  * Mike Perez <miperez@redhat.com>
  * Myoungwon Oh <ohmyoungwon@gmail.com>
+ * Sage McTaggart <sagemct@ibm.com>
  * Neha Ojha <nojha@redhat.com>
  * Patrick Donnelly <pdonnell@ibm.com>
  * Radoslaw Zarzynski <rzarzyns@redhat.com>

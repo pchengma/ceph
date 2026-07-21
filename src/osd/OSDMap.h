@@ -1356,7 +1356,7 @@ public:
     if (poolit->second.is_erasure()) {
       for (uint8_t i = 0; i < acting.size(); ++i) {
 	if (acting[i] == *primary) {
-	  *out = spg_t(pgid, pgtemp_undo_primaryfirst(poolit->second, pgid, shard_id_t(i)));
+	  *out = spg_t(pgid, shard_id_t(i));
 	  return true;
 	}
       }
@@ -1638,6 +1638,7 @@ private: // Bunch of internal functions used only by calc_pg_upmaps (result of c
 
 typedef std::vector<std::pair<pg_t, mempool::osdmap::vector<std::pair<int, int>>>>
   candidates_t;
+typedef std::map<int, candidates_t> candidates_by_osd_t;
 
 bool try_drop_remap_underfull(
     CephContext *cct,
@@ -1669,7 +1670,7 @@ bool try_drop_remap_underfull(
     const std::map<int,float> osd_deviation
   );
 
-  candidates_t build_candidates(
+  candidates_by_osd_t build_candidates_by_osd(
     CephContext *cct,
     const OSDMap& tmp_osd_map,
     const std::set<pg_t> to_skip,

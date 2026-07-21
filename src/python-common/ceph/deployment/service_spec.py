@@ -1424,6 +1424,7 @@ class NFSServiceSpec(ServiceSpec):
                  tls_min_version: Optional[str] = None,
                  tls_ciphers: Optional[str] = None,
                  colocation_ports: Optional[List[Dict[str, int]]] = None,
+                 enable_nfsv3: bool = False,
                  ):
         assert service_type == 'nfs'
         super(NFSServiceSpec, self).__init__(
@@ -1452,6 +1453,7 @@ class NFSServiceSpec(ServiceSpec):
         self.rdma_port = rdma_port
         self.cluster_qos_config = cluster_qos_config
         self.cluster_qos_port = cluster_qos_port
+        self.enable_nfsv3 = enable_nfsv3
 
         # colocation_ports is a list of port dicts for ADDITIONAL colocated daemons
         # The first daemon always uses port and monitoring_port from the spec
@@ -1533,6 +1535,11 @@ class NFSServiceSpec(ServiceSpec):
 
     def validate(self) -> None:
         super(NFSServiceSpec, self).validate()
+
+        if self.placement is not None and self.placement.count_per_host is not None:
+            raise SpecValidationError(
+                "Placement 'count_per_host' is not supported for nfs service."
+            )
 
         if self.virtual_ip and (self.ip_addrs or self.networks):
             raise SpecValidationError("Invalid NFS spec: Cannot set virtual_ip and "
@@ -4350,11 +4357,28 @@ class NodeProxySpec(ServiceSpec):
     def __init__(self,
                  service_type: str,
                  placement: Optional[PlacementSpec] = None,
+                 ssl: Optional[bool] = True,
+                 certificate_source: Optional[str] = None,
+                 unmanaged: bool = False,
+                 preview_only: bool = False,
+                 extra_container_args: Optional[GeneralArgList] = None,
+                 extra_entrypoint_args: Optional[GeneralArgList] = None,
+                 custom_configs: Optional[List[CustomConfig]] = None,
                  ) -> None:
         assert service_type == 'node-proxy'
-        super(NodeProxySpec, self).__init__('node-proxy', placement=placement)
-        self.ssl: bool = True
+        super(NodeProxySpec, self).__init__(
+            'node-proxy',
+            placement=placement,
+            ssl=ssl,
+            certificate_source=certificate_source,
+            unmanaged=unmanaged,
+            preview_only=preview_only,
+            extra_container_args=extra_container_args,
+            extra_entrypoint_args=extra_entrypoint_args,
+            custom_configs=custom_configs,
+        )
         self.validate()
 
 
+yaml.add_representer(NodeProxySpec, ServiceSpec.yaml_representer)
 yaml.add_representer(SMBSpec, ServiceSpec.yaml_representer)

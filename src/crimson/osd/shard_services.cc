@@ -20,7 +20,6 @@
 #include "crimson/mon/MonClient.h"
 #include "crimson/net/Messenger.h"
 #include "crimson/net/Connection.h"
-#include "crimson/os/cyanstore/cyan_store.h"
 #include "crimson/osd/osdmap_service.h"
 #include "crimson/osd/osd_operations/pg_advance_map.h"
 #include "crimson/osd/pg.h"
@@ -1093,9 +1092,6 @@ seastar::future<> ShardServices::dispatch_context_transaction(
   LOG_PREFIX(OSDSingletonState::dispatch_context_transaction);
   if (ctx.transaction.empty()) {
     DEBUG("empty transaction");
-    co_await crimson::os::with_store_do_transaction(
-      get_store(store_index),
-      col, ceph::os::Transaction{});
     Context* on_commit(
       ceph::os::Transaction::collect_all_contexts(ctx.transaction));
     if (on_commit) {

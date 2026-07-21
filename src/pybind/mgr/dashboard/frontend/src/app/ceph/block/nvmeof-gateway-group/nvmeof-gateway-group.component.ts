@@ -69,7 +69,7 @@ export class NvmeofGatewayGroupComponent implements OnInit, OnDestroy {
   selection: CdTableSelection = new CdTableSelection();
   gatewayGroup$: Observable<CephServiceSpec[]> = of([]);
   subject = new BehaviorSubject<CephServiceSpec[]>([]);
-  context!: CdTableFetchDataContext;
+  context?: CdTableFetchDataContext;
   gatewayGroupName = '';
   subsystemCount = 0;
   gatewayCount = 0;
@@ -127,6 +127,14 @@ export class NvmeofGatewayGroupComponent implements OnInit, OnDestroy {
       canBePrimary: (selection: CdTableSelection) => !selection.hasSelection
     };
 
+    const editAction: CdTableAction = {
+      permission: 'update',
+      icon: Icons.edit,
+      routerLink: () => this.urlBuilder.getEdit(this.selection.first()?.name),
+      name: this.actionLabels.EDIT,
+      canBePrimary: (selection: CdTableSelection) => selection.hasSingleSelection
+    };
+
     const viewAction: CdTableAction = {
       permission: 'read',
       icon: Icons.eye,
@@ -143,7 +151,7 @@ export class NvmeofGatewayGroupComponent implements OnInit, OnDestroy {
       canBePrimary: (selection: CdTableSelection) => selection.hasMultiSelection
     };
 
-    this.tableActions = [createAction, viewAction, deleteAction];
+    this.tableActions = [createAction, editAction, viewAction, deleteAction];
 
     this.gatewayGroup$ = this.subject.pipe(
       switchMap(() =>
@@ -322,6 +330,14 @@ export class NvmeofGatewayGroupComponent implements OnInit, OnDestroy {
       return;
     }
     this.router.navigate([this.viewUrl, groupName]);
+  }
+
+  editSelectedGatewayGroup(): void {
+    const selectedGroup = this.selection.first();
+    if (!selectedGroup) {
+      return;
+    }
+    this.router.navigate([this.urlBuilder.getEdit(selectedGroup.name)]);
   }
 
   ngOnDestroy(): void {

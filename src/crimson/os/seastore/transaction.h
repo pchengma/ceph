@@ -444,6 +444,26 @@ public:
     std::for_each(existing_block_list.begin(), existing_block_list.end(), f);
   }
 
+  template <typename F>
+  void for_each_mutated_extent(F &&f) {
+    std::for_each(
+      retired_set.begin(),
+      retired_set.end(),
+      [&f](auto &link) {
+        std::invoke(f, *link.extent);
+      });
+    std::for_each(
+      mutated_block_list.begin(),
+      mutated_block_list.end(),
+      [&f](auto &e) {
+        if (!e->is_valid() ||
+            e->is_exist_mutation_pending()) {
+          return;
+        }
+        std::invoke(f, *e->get_prior_instance());
+      });
+  }
+
   const io_stat_t& get_fresh_block_stats() const {
     return fresh_block_stats;
   }
@@ -547,7 +567,6 @@ public:
     ool_write_stats = {};
     rewrite_stats = {};
     conflicted = false;
-    need_wait_visibility = false;
     force_rewrite_conflict = false;
     assert(backref_entries.empty());
     if (!has_reset) {
@@ -569,13 +588,19 @@ public:
     uint64_t num_erases = 0;
     uint64_t num_updates = 0;
     int64_t extents_num_delta = 0;
+    uint64_t lookup_count = 0;
+    uint64_t nodes_visited = 0;
+    uint64_t string_cmp_count = 0;
 
     bool is_clear() const {
       return (depth == 0 &&
               num_inserts == 0 &&
               num_erases == 0 &&
               num_updates == 0 &&
-	      extents_num_delta == 0);
+	      extents_num_delta == 0 &&
+              lookup_count == 0 &&
+              nodes_visited == 0 &&
+              string_cmp_count == 0);
     }
   };
   tree_stats_t& get_onode_tree_stats() {
@@ -669,7 +694,6 @@ public:
 
   btree_cursor_stats_t cursor_stats;
 
-  bool need_wait_visibility = false;
   bool force_rewrite_conflict = false;
 
   using update_copied_lba_key_func_t =
@@ -967,7 +991,6 @@ constexpr bool should_use_no_conflict_publish(const Transaction &t,
 
   return !t.force_rewrite_conflict && is_rewrite_transaction(t.get_src());
 }
-
 
 }
 

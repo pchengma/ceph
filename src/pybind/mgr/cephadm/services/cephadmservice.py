@@ -969,6 +969,7 @@ class CephadmService(metaclass=ABCMeta):
         spec: Optional[ServiceSpec],
         curr_deps: List[str],
         last_deps: List[str],
+        daemon: Optional[DaemonDescription] = None,
     ) -> utils.NextDaemonStep:
         """Given the scheduled_action, service spec, daemon_type, and
         current and previous dependency lists return the next action that
@@ -1567,7 +1568,7 @@ class RgwService(CephService):
         if spec.ssl:
             san_list = spec.zonegroup_hostnames or []
             custom_sans = san_list + [f"*.{h}" for h in san_list] if spec.wildcard_enabled else san_list
-            tls_creds = self.get_certificates(daemon_spec, custom_sans)
+            tls_creds = self.get_certificates(daemon_spec, custom_sans=custom_sans)
             pem = f'{tls_creds.key.rstrip()}\n{tls_creds.cert.lstrip()}'
             rgw_cert_name = daemon_spec.name() if spec.generate_cert else spec.service_name()
             ret, out, err = self.mgr.check_mon_command({
@@ -1737,6 +1738,11 @@ class RgwService(CephService):
         return daemon_spec
 
     def get_keyring(self, rgw_id: str) -> str:
+        """
+        SMB and NFS services embed librgw. If the RGW service capabilities are
+        updated, verify whether the same changes are required for these
+        services as well.
+        """
         keyring = self.get_keyring_with_caps(self.get_auth_entity(rgw_id),
                                              ['mon', 'allow *',
                                               'mgr', 'allow rw',
@@ -1997,6 +2003,7 @@ class CephExporterService(CephService):
         spec: Optional[ServiceSpec],
         curr_deps: List[str],
         last_deps: List[str],
+        daemon: Optional[DaemonDescription] = None,
     ) -> utils.NextDaemonStep:
         """Given the scheduled_action, service spec, daemon_type, and
         current and previous dependency lists return the next action that

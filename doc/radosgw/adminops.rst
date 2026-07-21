@@ -2939,14 +2939,12 @@ Dedup
 =====
 
 The Admin Operations API can be used to manage RGW object deduplication.
-See `Full RGW Object Dedup`_ for additional details on the dedup feature and
+See :ref:`radosgw-s3-dedup` for additional details on the dedup feature and
 CLI commands.
-
-.. _Full RGW Object Dedup: ../s3_objects_dedup
 
 To view dedup status, the user must have ``dedup=read`` capability. To
 control dedup operations, the user must have ``dedup=write`` capability.
-See the `Admin Guide`_ for details.
+See the :ref:`radosgw-admin-guide` for details.
 
 Get Dedup Stats
 ~~~~~~~~~~~~~~~

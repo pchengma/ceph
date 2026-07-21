@@ -96,6 +96,8 @@ import ShareIcon from '@carbon/icons/es/share/16';
 import ViewIcon from '@carbon/icons/es/view/16';
 import PasswordIcon from '@carbon/icons/es/password/16';
 import ArrowDownIcon from '@carbon/icons/es/arrow--down/16';
+import ChevronDownIcon from '@carbon/icons/es/chevron--down/16';
+import ChevronUpIcon from '@carbon/icons/es/chevron--up/16';
 import ProgressBarRoundIcon from '@carbon/icons/es/progress-bar--round/32';
 import ToolsIcon from '@carbon/icons/es/tools/32';
 import UserAccessLocked from '@carbon/icons/es/user--access-locked/16';
@@ -106,7 +108,10 @@ import { AreaChartComponent } from '~/app/shared/components/area-chart/area-char
 import { CephSharedModule } from '../shared/ceph-shared.module';
 import { RgwUserAccountsComponent } from './rgw-user-accounts/rgw-user-accounts.component';
 import { RgwUserAccountsFormComponent } from './rgw-user-accounts-form/rgw-user-accounts-form.component';
-import { RgwUserAccountsDetailsComponent } from './rgw-user-accounts-details/rgw-user-accounts-details.component';
+import { RgwUserAccountsResourceSidebarComponent } from './rgw-user-accounts-resource-sidebar/rgw-user-accounts-resource-sidebar.component';
+import { RgwUserAccountsResourcePageComponent } from './rgw-user-accounts-resource-page/rgw-user-accounts-resource-page.component';
+import { RgwAccountDetailsResolver } from './rgw-user-accounts-resource-page/rgw-account-details.resolver';
+import { RgwAccountDetailsBreadcrumbResolver } from './rgw-user-accounts-resource-page/rgw-account-details-breadcrumb.resolver';
 import { RgwStorageClassDetailsComponent } from './rgw-storage-class-details/rgw-storage-class-details.component';
 import { RgwStorageClassFormComponent } from './rgw-storage-class-form/rgw-storage-class-form.component';
 import { RgwBucketTieringFormComponent } from './rgw-bucket-tiering-form/rgw-bucket-tiering-form.component';
@@ -185,7 +190,6 @@ import { RgwAccountRoleFormComponent } from './rgw-account-role-form/rgw-account
     RgwBucketDetailsComponent,
     RgwUserListComponent,
     RgwUserDetailsComponent,
-    RgwBucketFormComponent,
     RgwUserFormComponent,
     RgwUserSwiftKeyModalComponent,
     RgwUserS3KeyModalComponent,
@@ -220,7 +224,8 @@ import { RgwAccountRoleFormComponent } from './rgw-account-role-form/rgw-account
     RgwMultisiteTabsComponent,
     RgwUserAccountsComponent,
     RgwUserAccountsFormComponent,
-    RgwUserAccountsDetailsComponent,
+    RgwUserAccountsResourceSidebarComponent,
+    RgwUserAccountsResourcePageComponent,
     RgwStorageClassListComponent,
     RgwStorageClassDetailsComponent,
     RgwStorageClassFormComponent,
@@ -248,6 +253,8 @@ export class RgwModule {
       ViewIcon,
       PasswordIcon,
       ArrowDownIcon,
+      ChevronDownIcon,
+      ChevronUpIcon,
       ProgressBarRoundIcon,
       ToolsIcon,
       UserAccessLocked
@@ -287,12 +294,33 @@ const routes: Routes = [
       {
         path: URLVerbs.CREATE,
         component: RgwUserAccountsFormComponent,
-        data: { breadcrumbs: ActionLabels.CREATE }
+        data: { breadcrumbs: $localize`Create account` }
       },
       {
         path: `${URLVerbs.EDIT}/:id`,
         component: RgwUserAccountsFormComponent,
         data: { breadcrumbs: ActionLabels.EDIT }
+      },
+      {
+        path: ':accountName',
+        component: RgwUserAccountsResourceSidebarComponent,
+        data: { breadcrumbs: RgwAccountDetailsBreadcrumbResolver },
+        resolve: {
+          account: RgwAccountDetailsResolver
+        },
+        children: [
+          { path: '', redirectTo: 'overview', pathMatch: 'full' },
+          {
+            path: 'overview',
+            component: RgwUserAccountsResourcePageComponent,
+            data: { breadcrumbs: 'Overview', section: 'overview' }
+          },
+          {
+            path: 'roles',
+            component: RgwUserAccountsResourcePageComponent,
+            data: { breadcrumbs: 'Roles', section: 'roles' }
+          }
+        ]
       }
     ]
   },

@@ -33,6 +33,9 @@ Cache::Cache(
   ExtentPlacementManager &epm,
   store_index_t store_index)
   : epm(epm),
+    delta_based_overwrite_enabled(
+      crimson::common::get_conf<Option::size_t>(
+        "seastore_data_delta_based_overwrite") > 0),
     pinboard(create_extent_pinboard(
       crimson::common::get_conf<Option::size_t>(
        "seastore_cachepin_size_pershard")))
@@ -1391,7 +1394,6 @@ record_t Cache::prepare_record(
     }
     if (should_use_no_conflict_publish(t, i->get_type())) {
       i->new_committer(t);
-      i->committer->block_trans(t);
     }
     assert(i->is_exist_mutation_pending() ||
 	   i->prior_instance);
@@ -1672,8 +1674,6 @@ record_t Cache::prepare_record(
       assert(!i->get_prior_instance()->committer);
       i->new_committer(t);
       assert(i->committer);
-      auto &committer = *i->committer;
-      committer.block_trans(t);
       i->get_prior_instance()->set_io_wait(
         CachedExtent::extent_state_t::CLEAN,
         should_use_no_conflict_publish(t, i->get_type()));
@@ -1708,8 +1708,6 @@ record_t Cache::prepare_record(
       i->new_committer(t);
       assert(i->committer);
       i->get_prior_instance()->committer = i->committer;
-      auto &committer = *i->committer;
-      committer.block_trans(t);
       i->get_prior_instance()->set_io_wait(
         CachedExtent::extent_state_t::CLEAN, true);
     }
@@ -2047,7 +2045,6 @@ void Cache::complete_commit(
       }
       touch_extent_fully(prior, &t_src, t.get_cache_hint());
       committer.sync_version();
-      committer.unblock_trans(t);
       prior.complete_io();
       i->committer.reset();
       prior.committer.reset();
@@ -2128,7 +2125,6 @@ void Cache::complete_commit(
       auto &committer = *i->committer;
       committer.commit_state();
       committer.sync_checksum();
-      committer.unblock_trans(t);
       auto &prior = *i->prior_instance;
       prior.pending_for_transaction = TRANS_ID_NULL;
       ceph_assert(prior.is_valid());

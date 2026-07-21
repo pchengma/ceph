@@ -1176,6 +1176,11 @@ def _generate_config(conf: _ClusterConf) -> Dict[str, Any]:
     cluster_global_opts['smb ports'] = str(_smb_port(cluster))
     _set_debug_level(cluster_global_opts, conf)
 
+    # Disable NFS ACE handling for macOS compatibility
+    # See https://tracker.ceph.com/issues/78052 for rationale and follow-up.
+    if cluster.is_macos_compatibility_enabled:
+        cluster_global_opts['fruit:nfs_aces'] = 'no'
+
     # Check if cluster has RGW shares and add global RGW options
     has_rgw_shares = any(share.resource.rgw for share in conf.shares)
     if has_rgw_shares:
@@ -1536,7 +1541,14 @@ def _save_pending_rgw_config(
         rgw = sc.resource.rgw
         assert rgw is not None
         assert rgw.credential_ref is not None
-        cred = cred_map[rgw.credential_ref]
+        cred = cred_map.get(rgw.credential_ref)
+        if cred is None:
+            log.error(
+                "share %r references missing RGW credential %r",
+                sc.resource.name,
+                rgw.credential_ref,
+            )
+            continue
         access_key = cred.access_key_id or ''
         secret_key = cred.secret_access_key or ''
         merge_shares[sc.resource.name] = {

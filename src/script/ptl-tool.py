@@ -30,6 +30,7 @@
 #  - PTL_TOOL_GITHUB_TOKEN (your github Personal access token, or what is stored in ~/.github_token)
 #  - PTL_TOOL_REDMINE_API_KEY (your redmine api key, or what is stored in ~/redmine_key)
 #  - PTL_TOOL_USER (your desired username embedded in test branch names)
+#  - PTL_TOOL_PR_NUMBER (the PR number to audit/merge when running in CI mode)
 
 import argparse
 from dataclasses import dataclass, field
@@ -68,6 +69,8 @@ except ImportError:
 
 try:
     import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
 except ImportError:
     MISSING_DEPS.append("requests")
 
@@ -106,6 +109,7 @@ REDMINE_CUSTOM_FIELD_ID_QA_RUNS = 27
 REDMINE_CUSTOM_FIELD_ID_QA_RELEASE = 28
 REDMINE_CUSTOM_FIELD_ID_QA_TAGS = 3
 REDMINE_CUSTOM_FIELD_ID_GIT_BRANCH = 29
+REDMINE_CUSTOM_FIELD_ID_CEPH_PR_LABEL = 45
 REDMINE_ENDPOINT = "https://tracker.ceph.com"
 REDMINE_TRACKER_ID_BACKPORT = 9
 REDMINE_STATUS_ID_REJECTED = 6
@@ -122,6 +126,18 @@ except FileNotFoundError:
     pass
 REDMINE_API_KEY = os.getenv("PTL_TOOL_REDMINE_API_KEY", REDMINE_API_KEY)
 SPECIAL_BRANCHES = ('main', 'luminous', 'jewel', 'HEAD')
+SUPPORTED_QA_TAGS = {
+    'cephadm',
+    'cephfs',
+    'core',
+    'dashboard',
+    'libcephsqlite',
+    'nvme',
+    'orch',
+    'rbd',
+    'rgw',
+    'upgrades',
+}
 TEST_BRANCH = os.getenv("PTL_TOOL_TEST_BRANCH", "wip-{user}-testing-%Y%m%d.%H%M%S")
 USER = os.getenv("PTL_TOOL_USER", getuser())
 
@@ -148,12 +164,6 @@ NEW_CONTRIBUTORS = {}
 
 BZ_MATCH = re.compile("(.*https?://bugzilla.redhat.com/.*)")
 TRACKER_MATCH = re.compile("(.*https?://tracker.ceph.com/.*)")
-
-@dataclass
-class AuditLabels:
-    queue: str = None
-    passed: str = None
-    failed: str = None
 
 
 class SkipToMerge(Exception):
@@ -187,6 +197,19 @@ class BaseAuditCheck:
         raise NotImplementedError
 
 class AuditReport:
+    # Declarative display priority (lower numbers render first in the report)
+    SECTION_PRIORITY = {
+        "Base Conflicts": 10,
+        "Redmine Linkage": 20,
+        "Multiple Source PRs": 30,
+        "Invalid Commit Format": 40,
+        "Unmerged Cherry-Picks": 50,
+        "Scrambled Commits": 60,
+        "Parity Mismatch": 70,
+        "Simulation Failure": 90,
+        "Conflict/Deviation": 100,
+    }
+
     def __init__(self):
         self.issues: List[Tuple[str, str]] = []
         self.interactive_failures: int = 0
@@ -214,13 +237,28 @@ class AuditReport:
         return len(self._get_active_issues()) > 0 or self.interactive_failures > 0
 
     def get_consolidated_text(self) -> str:
-        blocks = []
-        for cat, text in self._get_active_issues():
-            if text:
-                blocks.append(text)
-        
-        if self.visualizer_md_table and blocks:
+        active_issues = [(cat, text) for cat, text in self._get_active_issues() if text]
+        if not active_issues and not self.visualizer_md_table:
+            return ""
+
+        # Sort all report sections cleanly by their declarative priority
+        active_issues.sort(key=lambda x: self.SECTION_PRIORITY.get(x[0], 50))
+
+        pre_visualizer_blocks = []
+        post_visualizer_blocks = []
+
+        for cat, text in active_issues:
+            # Place conflicts and simulation failures after the visualizer table
+            if self.SECTION_PRIORITY.get(cat, 50) >= 90:
+                post_visualizer_blocks.append(text)
+            else:
+                pre_visualizer_blocks.append(text)
+
+        blocks = list(pre_visualizer_blocks)
+        if self.visualizer_md_table and (blocks or post_visualizer_blocks):
             blocks.append(f"### Commit Parity Visualizer\n\n{self.visualizer_md_table}")
+
+        blocks.extend(post_visualizer_blocks)
 
         blocks.append(textwrap.dedent("""\n\n
             🛟 **Need Help?**
@@ -232,50 +270,93 @@ class AuditReport:
             To override the audit failure, apply `releng-audit-override` label or comment `/audit override`.
             """))
             
-        return "\n\n---\n\n".join(blocks)
+        return "# Ceph Release Engineering Audit Report\n\n" + "\n\n---\n\n".join(blocks)
+
+    def _hide_previous_bot_reviews(self, session: requests.Session, pr: int, dry_run: bool = False):
+        """
+        Fetches previous reviews on the PR and cleans up older automated audit reports.
+        To maintain clean review threads during iterative backport work, older reports are
+        dismissed via REST API and minimized as OUTDATED via GraphQL.
+        """
+        endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/pulls/{pr}/reviews"
+        try:
+            for page in get(session, endpoint):
+                for review in page:
+                    user_login = review.get('user', {}).get('login', '')
+                    user_type = review.get('user', {}).get('type', '')
+                    is_bot_user = (user_type == 'Bot' or 'github-actions' in user_login or user_login.endswith('[bot]'))
+
+                    if not is_bot_user:
+                        continue
+
+                    body = review.get('body', '')
+                    if '# Ceph Release Engineering Audit Report' not in body:
+                        continue
+
+                    review_id = review.get('id')
+                    node_id = review.get('node_id')
+                    state = review.get('state')
+
+                    # 1. Dismiss REQUEST_CHANGES or APPROVED reviews via REST API
+                    if state in ('REQUEST_CHANGES', 'APPROVED'):
+                        if dry_run:
+                            log.info(f"[DRY RUN] Would dismiss older review ID {review_id} on PR #{pr}")
+                        else:
+                            dismiss_url = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/pulls/{pr}/reviews/{review_id}/dismissal"
+                            session.put(dismiss_url, auth=GithubBearerAuth(), json={'message': 'Superseded by new automated audit run.'})
+                            log.info(f"Dismissed older review ID {review_id} on PR #{pr}")
+
+                    # 2. Minimize any review or comment via GraphQL as OUTDATED
+                    if node_id:
+                        if dry_run:
+                            log.info(f"[DRY RUN] Would minimize review node {node_id} as OUTDATED")
+                        else:
+                            graphql_url = "https://api.github.com/graphql"
+                            query = """
+                            mutation($id: ID!) {
+                              minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) {
+                                minimizedComment { isMinimized }
+                              }
+                            }
+                            """
+                            try:
+                                session.post(graphql_url, auth=GithubBearerAuth(), json={'query': query, 'variables': {'id': node_id}})
+                                log.info(f"Minimized older bot review node {node_id} as OUTDATED")
+                            except Exception as e:
+                                log.debug(f"Could not minimize comment {node_id}: {e}")
+        except Exception as e:
+            log.debug(f"Failed to fetch or clean up previous bot reviews on PR #{pr}: {e}")
 
     def post_consolidated_review(self, session: requests.Session, pr: int, dry_run: bool = False, ci_mode: bool = False):
         """
-        Combines all collected md_text in self.issues into a single 
-        GitHub review payload and posts it via the API.
+        Combines all collected md_text in self.issues into a single GitHub review payload
+        and posts it via the API.
+
+        In CI mode, we post review findings as COMMENT events rather than REQUEST_CHANGES.
+        The GitHub commit status and state labels (managed by the workflow router)
+        serve as the formal gating mechanisms, avoiding redundant review blocking states.
         """
         consolidated_text = self.get_consolidated_text()
         if consolidated_text:
             if ci_mode:
                 footer = "\n\n---\n\n⚠️ **Note**: Automated audit checks will be suspended on future pushes to prevent comment spam while you work.\n\nWhen you are ready for a new audit, please **remove the `releng-audit-fail` label** or comment `/audit retest`."
-                
-                if os.getenv("GITHUB_ACTIONS") == "true":
-                    gh_server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
-                    gh_repo = os.getenv("GITHUB_REPOSITORY", f"{BASE_PROJECT}/{BASE_REPO}")
-                    gh_run_id = os.getenv("GITHUB_RUN_ID", "nil")
-                    footer += f"\n\n**CI Run Log**: [View Workflow Details]({gh_server}/{gh_repo}/actions/runs/{gh_run_id})"
-
                 consolidated_text += footer
 
+                self._hide_previous_bot_reviews(session, pr, dry_run=dry_run)
+
+            consolidated_text = append_workflow_link(consolidated_text)
 
             if dry_run:
                 log.info(f"[DRY RUN] Would post consolidated review to PR #{pr}:\n{consolidated_text}")
             else:
                 payload = {'body': consolidated_text, 'event': 'REQUEST_CHANGES'}
                 if ci_mode:
-                    # The CI check failure is sufficient to block merge.
+                    # In CI mode, the GitHub commit status failure is sufficient to block branch merging.
+                    # Posting as COMMENT prevents stale REQUEST_CHANGES reviews from blocking after override.
                     payload['event'] = 'COMMENT'
 
                 endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/pulls/{pr}/reviews"
                 session.post(endpoint, auth=GithubBearerAuth(), json=payload)
-
-
-def parse_audit_labels(value):
-    if not value:
-        return None
-    parts = [p.strip() for p in value.split(',')]
-    if len(parts) == 1:
-        return AuditLabels(queue=parts[0])
-    if len(parts) == 2:
-        return AuditLabels(passed=parts[0], failed=parts[1])
-    if len(parts) == 3:
-        return AuditLabels(queue=parts[0], passed=parts[1], failed=parts[2])
-    raise argparse.ArgumentTypeError("Audit labels must be 'queue', 'passed,failed', or 'queue,passed,failed'")
 
 class GithubBearerAuth(requests.auth.AuthBase):
     def __call__(self, r):
@@ -283,6 +364,16 @@ class GithubBearerAuth(requests.auth.AuthBase):
             r.headers['Authorization'] = f'Bearer {GITHUB_TOKEN}'
         r.headers['Accept'] = 'application/vnd.github.v3+json'
         return r
+
+def append_workflow_link(text: str) -> str:
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        gh_server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+        gh_repo = os.getenv("GITHUB_REPOSITORY", f"{BASE_PROJECT}/{BASE_REPO}")
+        gh_run_id = os.getenv("GITHUB_RUN_ID", "nil")
+        link_str = f"\n\n[View workflow run]({gh_server}/{gh_repo}/actions/runs/{gh_run_id})"
+        if link_str not in text and "[View workflow run]" not in text and "[View Workflow Details]" not in text:
+            return text + link_str
+    return text
 
 _PR_CACHE = {}
 def get_pr_info(session, pr):
@@ -295,7 +386,18 @@ def get_pr_info(session, pr):
 def get_pr_tracker_string(session, pr, response=None):
     if not response:
         response = get_pr_info(session, pr)
-    return f'* "PR #{pr}":{response["html_url"]} -- {response["title"].strip()}'
+
+    pr_tags = []
+    for lbl in response.get('labels', []):
+        lbl_name = lbl.get('name', '')
+        if lbl_name.lower() in SUPPORTED_QA_TAGS:
+            pr_tags.append(lbl_name.lower())
+
+    labels_str = ", ".join(sorted(pr_tags))
+    author = response.get('user', {}).get('login', '')
+    title = response["title"].strip().replace('|', '&#124;')
+    pr_link = f'"PR #{pr}":{response["html_url"]}'
+    return f'| {pr_link} | {author} | {labels_str} | {title} |'
 
 def get(session, url, params=None, paging=True):
     if params is None:
@@ -697,70 +799,63 @@ class CommitParityCheck(BaseAuditCheck):
             visualizer_lines.append("COMMIT PARITY VISUALIZER")
             visualizer_lines.append("=" * 80)
             
-            visualizer_md_lines.append(f"| BACKPORT PR #{pr} | SOURCE PR | SOURCE STATUS |")
+            # Add <img> to make sure the column is shrunk down.
+            visualizer_md_lines.append(f"| BACKPORT PR #{pr} | SOURCE PR <picture><img width=\"120\" height=\"1\"></picture> | SOURCE STATUS |")
             visualizer_md_lines.append("|---|---|---|")
 
-            bp_to_source = {}
-            for pr_name, commit_list in pr_mapping.items():
-                for item in commit_list:
-                    if item['bp_commit']:
-                        bp_to_source[item['bp_commit'].hexsha] = (pr_name, item)
-                        
-            unprinted_missing = {}
-            for pr_name, o_sha, o_summary, m_sha in missing_commits:
-                if pr_name not in unprinted_missing:
-                    unprinted_missing[pr_name] = []
-                unprinted_missing[pr_name].append((o_sha, o_summary))
-            
             visualizer_lines.append(f"BACKPORT PR #{pr}".ljust(47) + "SOURCE PR / STATUS")
             visualizer_lines.append("-" * 80)
             
-            current_pr = None
+            bp_commits_mapped = set()
+            bp_to_source = {}
+            for pr_name, commit_list in pr_mapping.items():
+                for item in commit_list:
+                    if item.get('bp_commit'):
+                        bp_to_source[item['bp_commit'].hexsha] = (str(pr_name), item)
+                        bp_commits_mapped.add(item['bp_commit'].hexsha)
+
+            ordered_prs = []
             for bp_c in pr_commits:
                 if bp_c.hexsha in bp_to_source:
-                    pr_name, item = bp_to_source[bp_c.hexsha]
-                    if current_pr is not None and pr_name != current_pr:
-                        if current_pr in unprinted_missing:
-                            for m_sha, m_summary in unprinted_missing[current_pr]:
-                                prefix = " " * (len(current_pr) + 1)
-                                visualizer_lines.append(format_parity_row(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                                visualizer_md_lines.append(format_parity_row_md(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                            del unprinted_missing[current_pr]
-                        visualizer_lines.append("")
-                        
-                    prefix = f"{pr_name} " if pr_name != current_pr else " " * (len(pr_name) + 1)
-                    current_pr = pr_name
-                    visualizer_lines.append(format_parity_row(bp_c.hexsha, bp_c.summary, item['o_sha'], item['o_summary'], right_prefix=prefix))
-                    visualizer_md_lines.append(format_parity_row_md(bp_c.hexsha, bp_c.summary, item['o_sha'], item['o_summary'], right_prefix=prefix))
-                else:
-                    if current_pr is not None:
-                        if current_pr in unprinted_missing:
-                            for m_sha, m_summary in unprinted_missing[current_pr]:
-                                prefix = " " * (len(current_pr) + 1)
-                                visualizer_lines.append(format_parity_row(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                                visualizer_md_lines.append(format_parity_row_md(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                            del unprinted_missing[current_pr]
-                        visualizer_lines.append("")
-                    current_pr = None
+                    p_name = bp_to_source[bp_c.hexsha]
+                    if p_name not in ordered_prs:
+                        ordered_prs.append(p_name)
+            for pr_name in sorted(list(pr_mapping.keys()), key=lambda x: str(x)):
+                p_name = str(pr_name)
+                if p_name not in ordered_prs:
+                    ordered_prs.append(p_name)
+            
+            first_pr_block = True
+            for pr_name_str in ordered_prs:
+                dict_key = next((k for k in pr_mapping.keys() if str(k) == pr_name_str), None)
+                if dict_key is None:
+                    continue
+                
+                if not first_pr_block:
+                    visualizer_lines.append("")
+                first_pr_block = False
+
+                first_commit_in_pr = True
+                for item in pr_mapping[dict_key]:
+                    prefix = f"{pr_name_str} " if first_commit_in_pr else " " * (len(pr_name_str) + 1)
+                    first_commit_in_pr = False
+
+                    bp_c = item.get('bp_commit')
+                    if bp_c:
+                        visualizer_lines.append(format_parity_row(bp_c.hexsha, bp_c.summary, item['o_sha'], item['o_summary'], right_prefix=prefix))
+                        visualizer_md_lines.append(format_parity_row_md(bp_c.hexsha, bp_c.summary, item['o_sha'], item['o_summary'], right_prefix=prefix))
+                    else:
+                        visualizer_lines.append(format_parity_row(None, None, item['o_sha'], item['o_summary'], is_missing=True, right_prefix=prefix))
+                        visualizer_md_lines.append(format_parity_row_md(None, None, item['o_sha'], item['o_summary'], is_missing=True, right_prefix=prefix))
+
+            extra_commits = [c for c in pr_commits if c.hexsha not in bp_commits_mapped]
+            if extra_commits:
+                if not first_pr_block:
+                    visualizer_lines.append("")
+                for bp_c in extra_commits:
                     visualizer_lines.append(format_parity_row(bp_c.hexsha, bp_c.summary, None, None, is_extra=True))
                     visualizer_md_lines.append(format_parity_row_md(bp_c.hexsha, bp_c.summary, None, None, is_extra=True))
-            
-            if current_pr is not None and current_pr in unprinted_missing:
-                for m_sha, m_summary in unprinted_missing[current_pr]:
-                    prefix = " " * (len(current_pr) + 1)
-                    visualizer_lines.append(format_parity_row(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                    visualizer_md_lines.append(format_parity_row_md(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                del unprinted_missing[current_pr]
-                
-            for pr_name, missing_list in unprinted_missing.items():
-                visualizer_lines.append("")
-                first = True
-                for m_sha, m_summary in missing_list:
-                    prefix = f"{pr_name} " if first else " " * (len(pr_name) + 1)
-                    visualizer_lines.append(format_parity_row(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                    visualizer_md_lines.append(format_parity_row_md(None, None, m_sha, m_summary, is_missing=True, right_prefix=prefix))
-                    first = False
-    
+
             visualizer_lines.append("=" * 80)
             
             visualizer_text = "\n".join(visualizer_lines)
@@ -925,6 +1020,69 @@ class CommitParityCheck(BaseAuditCheck):
         if vis_md:
             ctx.report.set_visualizer(vis_md)
 
+        # Check for scrambled commits relative to the original PR chronological sequences
+        bp_to_source = {}
+        for pr_name, commit_list in mapping['pr_mapping'].items():
+            for item in commit_list:
+                if item['bp_commit']:
+                    bp_to_source[item['bp_commit'].hexsha] = (str(pr_name), item)
+
+        mapped_sequence = []
+        for bp_c in ctx.pr_commits:
+            if bp_c.hexsha in bp_to_source:
+                pr_name_str, item = bp_to_source[bp_c.hexsha]
+                dict_key = next((k for k in mapping['pr_mapping'].keys() if str(k) == pr_name_str), None)
+                if dict_key is not None:
+                    orig_commits = [x['o_sha'] for x in mapping['pr_mapping'][dict_key]]
+                    if item['o_sha'] in orig_commits:
+                        idx = orig_commits.index(item['o_sha'])
+                        mapped_sequence.append((pr_name_str, idx))
+
+        is_scrambled = False
+        scramble_reasons = []
+        if mapped_sequence:
+            pr_blocks = [k for k, _ in itertools.groupby([x[0] for x in mapped_sequence])]
+            if len(pr_blocks) != len(set(pr_blocks)):
+                is_scrambled = True
+                scramble_reasons.append("Commits from different original PRs are interleaved/scrambled together.")
+
+            for pr_name in mapping['pr_mapping']:
+                pr_name_str = str(pr_name)
+                pr_bp_indices = [idx for name, idx in mapped_sequence if name == pr_name_str]
+                if pr_bp_indices != sorted(pr_bp_indices):
+                    is_scrambled = True
+                    scramble_reasons.append(f"Commits from {pr_name_str} are applied out of their original chronological order.")
+
+        if is_scrambled:
+            scramble_msg = "### Automated Backport Parity Review - Scrambled Commits Detected\n\n"
+            scramble_msg += "The backport contains commits that are scrambled or out of order relative to the original PR(s).\n\n"
+            for reason in scramble_reasons:
+                scramble_msg += f"* {reason}\n"
+            scramble_msg += "\nBackports should apply cherry-picks in the exact same chronological order as they were merged into the main branch to ensure clean history and avoid subtle regression risks.\n"
+
+            if ctx.args.ci_mode:
+                ctx.report.add("Scrambled Commits", scramble_msg)
+            else:
+                print("\033[91m" + "="*80)
+                print("WARNING: Scrambled commits detected in the backport!")
+                for reason in scramble_reasons:
+                    print(f"  - {reason}")
+                print("="*80 + "\033[0m")
+                while True:
+                    ans = input("Do you want to request changes for scrambled commits? [p/r/m/q] (p=proceed anyway, r=add to review, m=skip to merge, q=quit): ").strip().lower()
+                    if ans == 'm':
+                        raise SkipToMerge()
+                    elif ans == 'r':
+                        ctx.report.add("Scrambled Commits", scramble_msg)
+                        ctx.report.record_failure()
+                        break
+                    elif ans == 'q':
+                        sys.exit(1)
+                    elif ans == 'p':
+                        break
+                    else:
+                        print("Invalid choice. Please enter p, r, m, or q.")
+
         if invalid_format_commits:
             self._handle_invalid_formats(ctx, invalid_format_commits)
 
@@ -975,7 +1133,12 @@ class ConflictSimulationCheck(BaseAuditCheck):
             for commit in pr_commits:
                 if len(commit.parents) > 1:
                     log.error(f"Commit {commit.hexsha[:8]} is a merge commit. Not allowed.")
-                    sys.exit(1)
+                    if args.ci_mode:
+                        report.add("Invalid Commit Format", f"### Automated PR Review - Merge Commit Not Allowed\n\nCommit `{commit.hexsha[:8]}` is a merge commit. Merge commits are not allowed in backports.")
+                        report.record_failure()
+                        break
+                    else:
+                        sys.exit(1)
                 
                 m = cp_regex.search(commit.message)
                 is_cherry_pick = bool(m)
@@ -1180,13 +1343,48 @@ class ConflictSimulationCheck(BaseAuditCheck):
                             continue
                 else:
                     log.info(f"Applying branch-specific commit {commit.hexsha[:8]} ...")
-                    wt_repo.git(c=SANDBOX_CFG).cherry_pick("--allow-empty", commit.hexsha)
+                    try:
+                        wt_repo.git(c=SANDBOX_CFG).cherry_pick("--allow-empty", commit.hexsha)
+                    except git.exc.GitCommandError:
+                        log.error(f"Failed to apply branch-specific commit {commit.hexsha[:8]}! The PR likely has conflicts with the base branch and needs a rebase.")
+                        wt_repo.git.cherry_pick('--abort')
+
+                        if args.ci_mode:
+                            md_text = f"### Automated PR Review - Rebase Required\n\nBranch-specific commit `{commit.hexsha[:8]}` failed to apply cleanly to the base branch during simulation. The PR likely has conflicts and needs a rebase."
+                            report.add("Simulation Failure", md_text)
+                            raise SkipToMerge()
+
+                        while True:
+                            ans = input("How do you want to handle this? [p/m/r/o/q] (p=proceed simulation anyway, m=skip to merge, r=add to review and skip simulation, o=open PR in browser, q=quit) ").strip().lower()
+                            if ans == 'o':
+                                url = f"https://github.com/{BASE_PROJECT}/{BASE_REPO}/pull/{pr}"
+                                open_in_browser([url])
+                                print(f"Opened {url} in browser.")
+                            elif ans == 'm':
+                                raise SkipToMerge()
+                            elif ans == 'r':
+                                md_text = f"### Automated PR Review - Rebase Required\n\nBranch-specific commit `{commit.hexsha[:8]}` failed to apply cleanly to the base branch during simulation. The PR likely has conflicts and needs a rebase."
+                                report.add("Simulation Failure", md_text)
+                                report.record_failure()
+                                raise SkipToMerge()
+                            elif ans == 'q':
+                                sys.exit(1)
+                            elif ans == 'p':
+                                break
+                            else:
+                                print("Invalid choice. Please enter p, m, r, o, or q.")
             
             if recorded_deviations:
                 md_text = """
-                ### Automated Backport Parity Review - Backport Deviation Alert
+                ### Automated Backport Parity Review - Cherry-Pick Conflicts / Deviations
                 
-                A conflict or unapproved deviation was detected during the simulation of this backport. The code in this PR does not match a clean cherry-pick of the upstream commits.
+                **⚠️ WARNING: Cherry-pick conflicts or deviations were found that require component lead review.**
+
+                A conflict or deviation was detected during the simulation of this backport. The code in this PR does not match a clean cherry-pick of the upstream commits.
+
+                **This does not necessarily indicate an issue but a maintainer should review.**
+
+                <details><summary>**Click to expand conflict summaries.**</summary>
                 
                 """
                 md_text = textwrap.dedent(md_text)
@@ -1206,6 +1404,8 @@ class ConflictSimulationCheck(BaseAuditCheck):
                     md_text += f"**Range Diff**\n<details><summary>Click to expand</summary>\n\n```diff\n{dev['diff_text']}\n```\n</details>\n\n"
 
                 footer = """
+                </details>
+
                 **How to proceed:**
                 * **Authors (Genuine Conflicts):** If this is a genuine conflict requiring manual resolution, ensure your resolution is correct. You **must** explain the conflict resolution in the commit message (e.g., leave the standard Git `Conflicts:` block intact) and include an explanation for changes.
                 * **Authors (Need Help?):** Reach out to the Component Lead for technical guidance on complex code conflicts.
@@ -1462,6 +1662,28 @@ class MergeConflictCheck(BaseAuditCheck):
                     else:
                         print("Invalid choice. Please enter p, r, m, q, or o.")
 
+def write_ci_summary(pr: int, passed: bool, exit_code: int = 1):
+    if not passed:
+        print(f"::error title=Backport Audit Failed::PTL tool detected parity or conflict issues (exit code {exit_code}). See PR review comments or check this step's logs for details.", file=sys.stderr)
+
+    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_file:
+        return
+
+    try:
+        with open(summary_file, "a", encoding="utf-8") as f:
+            if passed:
+                f.write("### ✅ Backport Audit Passed\n")
+                f.write(f"All parity and conflict checks completed successfully for PR #{pr}.\n")
+            else:
+                f.write("### ❌ Backport Audit Failed\n")
+                f.write(f"The backport audit script detected issues with PR #{pr} (exit code `{exit_code}`).\n\n")
+                f.write("**How to proceed:**\n")
+                f.write(f"- 💬 **Review Comments:** Check the automated review feedback posted directly to PR #{pr}.\n")
+                f.write("- 📜 **Detailed Logs:** Expand the **Run PTL Audit** step in the job logs below to view full debug output and parity visualization.\n")
+    except Exception as e:
+        log.warning(f"Failed to write to GITHUB_STEP_SUMMARY: {e}")
+
 def verify_pr_readiness(G, session, R, pr, pr_commits, tip, base, args):
     report = AuditReport()
     ctx = AuditContext(G, session, R, pr, pr_commits, tip, base, args, report)
@@ -1483,21 +1705,31 @@ def verify_pr_readiness(G, session, R, pr, pr_commits, tip, base, args):
             except SkipToMerge:
                 log.info(f"Skipping remaining checks for PR #{pr}.")
                 break
-    except SystemExit:
+    except SystemExit as e:
+        if args.ci_mode:
+            write_ci_summary(pr, passed=False, exit_code=e.code if isinstance(e.code, int) else 1)
         if not args.audit:
             raise
         return False
+    except Exception:
+        if args.ci_mode:
+            write_ci_summary(pr, passed=False, exit_code=1)
+        raise
 
     if report.has_errors():
         log.error(f"Audit failed for PR #{pr}.")
         if args.ci_mode:
             report.post_consolidated_review(session, pr, dry_run=args.dry_run, ci_mode=args.ci_mode)
+            write_ci_summary(pr, passed=False, exit_code=1)
         else:
             consolidated_text = report.get_consolidated_text()
             if consolidated_text:
                 post_draft_review(session, pr, consolidated_text, base=base)
         return False
-        
+
+    if args.ci_mode:
+        report._hide_previous_bot_reviews(session, pr, dry_run=args.dry_run)
+        write_ci_summary(pr, passed=True)
     return True
 
 def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description, base, created_branch):
@@ -1528,6 +1760,8 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
         custom_fields.append({'id': REDMINE_CUSTOM_FIELD_ID_QA_RELEASE, 'value': args.qa_release})
     if args.qa_tags:
         custom_fields.append({'id': REDMINE_CUSTOM_FIELD_ID_QA_TAGS, 'value': args.qa_tags})
+    if args.pr_label:
+        custom_fields.append({'id': REDMINE_CUSTOM_FIELD_ID_CEPH_PR_LABEL, 'value': args.pr_label})
 
     if not args.no_tag and tag:
         origin_url = f'{BASE_PROJECT}/{CI_REPO}/commits/{tag.name}'
@@ -1546,6 +1780,18 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
     if args.qa_private:
         issue_kwargs['is_private'] = True
 
+    pr_tags = set()
+    for pr in prs:
+        pr_info = get_pr_info(session, pr)
+        for lbl in pr_info.get('labels', []):
+            lbl_name = lbl.get('name', '')
+            if lbl_name.lower() in SUPPORTED_QA_TAGS:
+                pr_tags.add(lbl_name.lower())
+
+    if pr_tags:
+        log.info(f"Adding supported Redmine tags from PR labels: {', '.join(sorted(list(pr_tags)))}")
+        issue_kwargs['tag_list'] = sorted(list(pr_tags))
+
     if args.update_qa:
         issue = R.issue.get(args.update_qa)
         if issue.project.id != project.id:
@@ -1554,6 +1800,20 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
         if issue.tracker.id != tracker.id:
             log.error(f"issue {issue.url} tracker {issue.tracker} does not match {tracker}")
             sys.exit(1)
+
+        if hasattr(issue, 'tag_list') and issue.tag_list:
+            if isinstance(issue.tag_list, (list, tuple)):
+                pr_tags.update(str(t) for t in issue.tag_list)
+            elif isinstance(issue.tag_list, str):
+                pr_tags.update(t.strip() for t in issue.tag_list.split(',') if t.strip())
+        elif hasattr(issue, 'tags') and issue.tags:
+            if isinstance(issue.tags, (list, tuple)):
+                pr_tags.update(str(t) for t in issue.tags)
+            elif isinstance(issue.tags, str):
+                pr_tags.update(t.strip() for t in issue.tags.split(',') if t.strip())
+
+        if pr_tags:
+            issue_kwargs['tag_list'] = sorted(list(pr_tags))
 
         old_branch = "unknown"
         for cf in issue.custom_fields:
@@ -1564,7 +1824,7 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
 
         old_prs = set()
         if hasattr(issue, 'description') and issue.description:
-            for match in re.finditer(r'\* "PR #(\d+)":', issue.description):
+            for match in re.finditer(r'"PR #(\d+)":', issue.description):
                 old_prs.add(int(match.group(1)))
 
         new_prs = set(int(p) for p in prs)
@@ -1585,6 +1845,7 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
         notes = textwrap.dedent(notes)
         if old_prs:
             notes += "**Previous PRs included in that run:**\n"
+            notes += "|_. PR |_. Author |_. Labels |_. Title |\n"
             for old_pr in sorted(old_prs):
                 notes += get_pr_tracker_string(session, old_pr) + "\n"
         else:
@@ -1604,32 +1865,35 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
                 log.error(f"failed to update {issue}")
                 sys.exit(1)
 
-        for pr in added_prs:
-            body = f"This PR has been added to [{issue.subject}]({issue_url})."
-            if args.dry_run:
-                log.info(f"[DRY RUN] Would post comment to added PR #{pr}: {body}")
-            else:
-                endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/comments"
-                r = session.post(endpoint, auth=GithubBearerAuth(), data=json.dumps({'body':body}))
-                if r.status_code == 201:
-                    log.info(f"Successfully posted added comment to PR #{pr}")
+        if getattr(issue, 'is_private', False):
+            log.info(f"QA ticket {issue.url} is private. Skipping GitHub PR updates for added/removed PRs.")
+        else:
+            for pr in added_prs:
+                body = append_workflow_link(f"This PR has been added to [{issue.subject}]({issue_url}).")
+                if args.dry_run:
+                    log.info(f"[DRY RUN] Would post comment to added PR #{pr}: {body}")
                 else:
-                    log.error(f"Failed to post comment: {r.status_code} {r.text}")
+                    endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/comments"
+                    r = session.post(endpoint, auth=GithubBearerAuth(), data=json.dumps({'body':body}))
+                    if r.status_code == 201:
+                        log.info(f"Successfully posted added comment to PR #{pr}")
+                    else:
+                        log.error(f"Failed to post comment: {r.status_code} {r.text}")
 
-        for pr in removed_prs:
-            body = f"This PR has been removed from [{issue.subject}]({issue_url})."
-            if args.dry_run:
-                log.info(f"[DRY RUN] Would post comment to removed PR #{pr}: {body}")
-            else:
-                endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/comments"
-                r = session.post(endpoint, auth=GithubBearerAuth(), data=json.dumps({'body':body}))
-                if r.status_code == 201:
-                    log.info(f"Successfully posted removed comment to PR #{pr}")
+            for pr in removed_prs:
+                body = append_workflow_link(f"This PR has been removed from [{issue.subject}]({issue_url}).")
+                if args.dry_run:
+                    log.info(f"[DRY RUN] Would post comment to removed PR #{pr}: {body}")
                 else:
-                    log.error(f"Failed to post comment: {r.status_code} {r.text}")
+                    endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/comments"
+                    r = session.post(endpoint, auth=GithubBearerAuth(), data=json.dumps({'body':body}))
+                    if r.status_code == 201:
+                        log.info(f"Successfully posted removed comment to PR #{pr}")
+                    else:
+                        log.error(f"Failed to post comment: {r.status_code} {r.text}")
 
     elif args.create_qa:
-        now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d-%H:%M")
+        now_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d-%H:%M")
         default_subject = f"{base} integration testing by {USER} started {now_str}"
         issue_kwargs['subject'] = args.qa_subject if args.qa_subject else default_subject
 
@@ -1642,19 +1906,22 @@ def manage_qa_tracker(args, R, session, branch, prs, tag, qa_tracker_description
             log.info("created redmine qa issue: %s", issue.url)
             issue_url = issue.url
 
-        for pr in prs:
-            log.debug(f"Posting QA Run in comment for ={pr}")
-            subject = issue_kwargs['subject']
-            body = f"This PR has been added to [{subject}]({issue_url})."
-            if args.dry_run:
-                log.info(f"[DRY RUN] Would post comment to PR #{pr}: {body}")
-            else:
-                endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/comments"
-                r = session.post(endpoint, auth=GithubBearerAuth(), data=json.dumps({'body':body}))
-                if r.status_code == 201:
-                    log.info(f"Successfully posted comment to PR #{pr}")
+        if args.qa_private:
+            log.info("QA ticket is private. Skipping GitHub PR updates.")
+        else:
+            for pr in prs:
+                log.debug(f"Posting QA Run in comment for ={pr}")
+                subject = issue_kwargs['subject']
+                body = append_workflow_link(f"This PR has been added to [{subject}]({issue_url}).")
+                if args.dry_run:
+                    log.info(f"[DRY RUN] Would post comment to PR #{pr}: {body}")
                 else:
-                    log.error(f"Failed to post comment: {r.status_code} {r.text}")
+                    endpoint = f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/comments"
+                    r = session.post(endpoint, auth=GithubBearerAuth(), data=json.dumps({'body':body}))
+                    if r.status_code == 201:
+                        log.info(f"Successfully posted comment to PR #{pr}")
+                    else:
+                        log.error(f"Failed to post comment: {r.status_code} {r.text}")
 
 def build_branch(args):
     base = args.base
@@ -1662,6 +1929,14 @@ def build_branch(args):
     merge_branch_name = args.merge_branch_name
 
     session = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504],
+        raise_on_status=False
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    session.mount("http://", HTTPAdapter(max_retries=retries))
 
     if label:
         # Check the label format
@@ -1675,22 +1950,8 @@ def build_branch(args):
 
     G = git.Repo(args.git)
 
-    try:
-        c = resolve_ref(G, 'main', BASE_REMOTE_URL, args.always_fetch)
-        githubmap_content = G.git.show(f"{c.hexsha}:.githubmap")
-        comment = re.compile(r"\s*#")
-        patt = re.compile(r"([\w-]+)\s+(.*)")
-        for line in githubmap_content.splitlines():
-            if comment.match(line):
-                continue
-            m = patt.match(line)
-            if m:
-                CONTRIBUTORS[m.group(1)] = m.group(2)
-    except git.exc.GitCommandError as e:
-        raise SystemExit(f"Could not fetch .githubmap from {BASE_REMOTE_URL}:main:\n{e}")
-
     R = None
-    if args.create_qa or args.update_qa or args.audit or args.final_merge:
+    if args.create_qa or args.update_qa or args.audit or args.final_merge or args.qe_label:
         log.info("connecting to %s", REDMINE_ENDPOINT)
         R = Redmine(REDMINE_ENDPOINT, username=REDMINE_USER, key=REDMINE_API_KEY)
         log.debug("connected")
@@ -1715,18 +1976,32 @@ def build_branch(args):
                 prs.append(n)
     log.info("Will merge PRs: {}".format(prs))
 
-    # PRE-FLIGHT: Auto-detect base from the first PR if necessary
-    if prs and base is None:
-        first_pr = prs[0]
-        detected_base = get_pr_info(session, first_pr).get("base", {}).get("ref")
+
+    # PRE-FLIGHT: Validate base consistency and auto-detect base from PRs if necessary
+    if prs and (base is None or args.qe_label or args.integration):
+        bases_seen = {}
+        for pr_num in prs:
+            ref = get_pr_info(session, pr_num).get("base", {}).get("ref")
+            if not ref:
+                raise SystemExit(f"Could not determine base branch for PR #{pr_num}")
+            bases_seen[pr_num] = ref
         
-        if detected_base:
-            log.info(f"Auto-detected target base from PR #{first_pr}: {detected_base}")
+        unique_bases = set(bases_seen.values())
+        if len(unique_bases) > 1:
+            log.error("PRs target multiple different base branches! Ambiguity is not allowed.")
+            for p_num, b_ref in bases_seen.items():
+                log.error(f"  PR #{p_num} -> targets '{b_ref}'")
+            sys.exit(1)
+
+        detected_base = list(unique_bases)[0]
+        if base is None:
+            log.info(f"Auto-detected target base from PRs: {detected_base}")
             base = detected_base
             if args.merge_branch_name is False:
                 merge_branch_name = detected_base
-        else:
-            raise SystemExit(f"Could not auto-detect base for PR #{first_pr}. Use hard-coded --base")
+        elif base != detected_base:
+            log.error(f"Provided --base '{base}' does not match the target base branch '{detected_base}' of the PRs!")
+            sys.exit(1)
 
     if args.integration:
         if not base or base == 'HEAD':
@@ -1739,8 +2014,73 @@ def build_branch(args):
         args.always_fetch = True
         args.skip_conflict_check = True
 
+    if args.qe_label and not args.update_qa:
+        log.info(f"Searching Redmine for open QA tickets matching Ceph PR Label '{args.qe_label}'...")
+        filters = {
+            f"cf_{REDMINE_CUSTOM_FIELD_ID_CEPH_PR_LABEL}": args.qe_label,
+            "status_id": "open"
+        }
+        open_tickets = list(R.issue.filter(**filters))
+
+        matching_tickets = []
+        for t in open_tickets:
+            t_release = get_custom_field(t, REDMINE_CUSTOM_FIELD_ID_QA_RELEASE)
+            if t_release and t_release != base:
+                log.error(f"Open QA ticket #{t.id} ({REDMINE_ENDPOINT}/issues/{t.id}) uses label '{args.qe_label}' but targets release '{t_release}' (expected '{base}')! Release mismatch not allowed.")
+                sys.exit(1)
+            matching_tickets.append(t)
+
+        if len(matching_tickets) > 1:
+            log.error(f"Ambiguity error: Found {len(matching_tickets)} open QA tickets matching label '{args.qe_label}' for release '{base}':")
+            for t in matching_tickets:
+                log.error(f"  #{t.id}: {t.subject} ({REDMINE_ENDPOINT}/issues/{t.id})")
+            sys.exit(1)
+        elif len(matching_tickets) == 1:
+            t = matching_tickets[0]
+            t_url = f"{REDMINE_ENDPOINT}/issues/{t.id}"
+            print(f"\nFound existing open QA ticket: #{t.id} - {t.subject}")
+            print(f"Link: {t_url}")
+            while True:
+                ans = input("Do you want to update this existing QA ticket? [y/n/o/q] (y=update existing, n=create new, o=open in browser, q=quit): ").strip().lower()
+                if ans == 'y':
+                    args.update_qa = t.id
+                    log.info(f"Will update existing QA ticket #{t.id}.")
+                    break
+                elif ans == 'n':
+                    log.info("Will create a new QA ticket instead.")
+                    args.create_qa = True
+                    break
+                elif ans == 'o':
+                    open_in_browser([t_url])
+                    print(f"Opened {t_url} in browser.")
+                elif ans == 'q':
+                    log.info("Exiting script.")
+                    sys.exit(0)
+                elif ans == '':
+                    continue
+                else:
+                    print("Invalid choice. Please enter y, n, o, or q.")
+        else:
+            log.info("No open QA tickets found for this label. Will create a new QA ticket.")
+            args.create_qa = True
+
+    if args.credits:
+        try:
+            c = resolve_ref(G, 'main', BASE_REMOTE_URL, args.always_fetch)
+            githubmap_content = G.git.show(f"{c.hexsha}:.githubmap")
+            comment = re.compile(r"\s*#")
+            patt = re.compile(r"([\w-]+)\s+(.*)")
+            for line in githubmap_content.splitlines():
+                if comment.match(line):
+                    continue
+                m = patt.match(line)
+                if m:
+                    CONTRIBUTORS[m.group(1)] = m.group(2)
+        except git.exc.GitCommandError as e:
+            raise SystemExit(f"Could not fetch .githubmap from {BASE_REMOTE_URL}:main:\n{e}")
+
     # Compute branch names now that integration flags and auto-detect have settled
-    branch = datetime.datetime.utcnow().strftime(args.branch).format(user=USER)
+    branch = datetime.datetime.now(datetime.UTC).strftime(args.branch).format(user=USER)
     if args.branch_release:
         branch = branch + "-" + args.branch_release
     if args.branch_append:
@@ -1763,7 +2103,7 @@ def build_branch(args):
         # So we know that we're not on an old test branch, detach HEAD onto ref:
         assert G.head.is_detached
 
-    qa_tracker_description = []
+    qa_tracker_description = ["|_. PR |_. Author |_. Labels |_. Title |"] if prs else []
     all_audits_passed = True
 
     for pr in prs:
@@ -1803,29 +2143,6 @@ def build_branch(args):
 
         if args.audit:
             log.info(f"Audit of PR #{pr} {'passed' if audit_passed else 'failed'}. Skipping merge.")
-            audit = args.audit_label
-            if audit:
-                if audit.queue:
-                    if args.dry_run:
-                        log.info(f"[DRY RUN] Would remove label {audit.queue} from PR #{pr}")
-                    else:
-                        req = session.delete(f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/labels/{audit.queue}", auth=GithubBearerAuth())
-                        if req.status_code in (200, 204):
-                            log.info(f"Removed label {audit.queue} from PR #{pr}")
-                        else:
-                            log.warning(f"Failed to remove label {audit.queue} from PR #{pr}: {req.status_code}")
-
-                target_label = audit.passed if audit_passed else audit.failed
-                if target_label:
-                    if args.dry_run:
-                        log.info(f"[DRY RUN] Would add label {target_label} to PR #{pr}")
-                    else:
-                        req = session.post(f"https://api.github.com/repos/{BASE_PROJECT}/{BASE_REPO}/issues/{pr}/labels", data=json.dumps([target_label]), auth=GithubBearerAuth())
-                        if req.status_code == 200:
-                            log.info(f"Added label {target_label} to PR #{pr}")
-                        else:
-                            raise SystemExit(f"Failed to add label {target_label} to PR #{pr}: {req.status_code}")
-
             # Skip merge
             continue
 
@@ -1903,6 +2220,8 @@ def build_branch(args):
         log.warning("Resuming execution.")
         new_head = G.head.commit
         if old_head != new_head:
+            if qa_tracker_description:
+                qa_tracker_description.append("")
             rev = f'{old_head}..{new_head}'
             for commit in G.iter_commits(rev=rev):
                 qa_tracker_description.append(f'* "commit {commit}":{CI_REMOTE_URL}/commit/{commit} -- {commit.summary}')
@@ -1999,6 +2318,7 @@ def main():
     group = parser.add_argument_group('GitHub PR Options')
     group.add_argument('--label', dest='label', action='store', default=default_label, help='label PRs for testing')
     group.add_argument('--pr-label', dest='pr_label', action='store', help='source PRs to merge via label')
+    group.add_argument('--qe-label', dest='qe_label', action='store', help='variant of --integration that merges PRs by label and creates/updates an associated Redmine QA ticket')
 
     group = parser.add_argument_group('Branch Control Options')
     group.add_argument('--always-fetch', dest='always_fetch', action='store_true', help='always fetch commits from remote (bypass local cache)')
@@ -2036,7 +2356,6 @@ def main():
 
     group = parser.add_argument_group('Backport Verification')
     group.add_argument('--audit', dest='audit', action='store_true', help='run parity and conflict simulations')
-    group.add_argument('--audit-label', dest='audit_label', type=parse_audit_labels, help='swap labels on success/failure. Format: "queue", "passed,failed", or "queue,passed,failed"')
     group.add_argument('--skip-conflict-check', dest='skip_conflict_check', action='store_true', help='skip conflict resolution simulation')
     group.add_argument('--ci-mode', dest='ci_mode', action='store_true', help='run non-interactively and post multiple separate reviews for failures')
 
@@ -2054,9 +2373,24 @@ def main():
 
     args = parser.parse_args(argv)
 
-    # Make --audit-label redundant when --ci-mode is invoked
-    if args.ci_mode and not args.audit_label:
-        args.audit_label = parse_audit_labels("releng-audit-pass,releng-audit-fail")
+    if not args.prs and (args.audit or args.ci_mode):
+        pr_env = os.getenv("PTL_TOOL_PR_NUMBER")
+        if pr_env:
+            try:
+                args.prs.append(int(pr_env))
+                log.info(f"Pulled PR #{args.prs[0]} from PTL_TOOL_PR_NUMBER environment variable.")
+            except ValueError:
+                log.error(f"Invalid PR number in PTL_TOOL_PR_NUMBER: {pr_env}")
+                sys.exit(1)
+        else:
+            parser.error("At least one PR number must be specified via CLI arguments or PTL_TOOL_PR_NUMBER when running with --audit or --ci-mode.")
+
+    if args.qe_label:
+        if args.ci_mode:
+            log.error("--qe-label cannot be used with --ci-mode at this time.")
+            sys.exit(1)
+        args.integration = True
+        args.pr_label = args.qe_label
 
     if args.examples:
         examples_text = textwrap.dedent("""
@@ -2090,12 +2424,6 @@ def main():
         print(examples_text.strip())
         sys.exit(0)
 
-    if args.audit_label and args.audit_label.queue:
-        if args.pr_label:
-            log.error("--audit-label with a queue label and --pr-label are mutually exclusive")
-            sys.exit(1)
-        args.pr_label = args.audit_label.queue
-
     if args.create_qa and args.update_qa:
         log.error("--create-qa and --update-qa are mutually exclusive switches")
         sys.exit(1)
@@ -2115,7 +2443,7 @@ def main():
         log.error("or set the PTL_TOOL_GITHUB_TOKEN environment variable.")
         sys.exit(1)
 
-    if args.create_qa or args.update_qa or args.audit or args.final_merge:
+    if args.create_qa or args.update_qa or args.audit or args.final_merge or args.qe_label:
         if Redmine is None:
             log.error("redmine library is not available so cannot create qa tracker ticket or audit")
             sys.exit(1)

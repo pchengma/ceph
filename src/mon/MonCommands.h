@@ -1294,7 +1294,6 @@ COMMAND("osd pool set "
           "|scrub_priority"
           "|set_pool_flags"
           "|size"
-          "|supports_omap"
           "|target_max_bytes"
           "|target_max_objects"
           "|target_size_bytes"
@@ -1578,6 +1577,10 @@ COMMAND("nvme-gw show"
    " name=group,type=CephString",
    " show nvmeof gateways within (pool, group)",
    "mon", "r")
+
+COMMAND("nvme-gw show-all",
+  " Dump nvmeof gateways for all pools and groups",
+  "mon", "r")
 
 COMMAND("nvme-gw listeners"
 	" name=pool,type=CephString"

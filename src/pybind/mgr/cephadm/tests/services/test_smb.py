@@ -233,5 +233,32 @@ def test_smb_get_dependencies(cephadm_module):
 
     deps = SMBService.get_dependencies(cephadm_module, spec, spec.service_type)
     assert deps == [
-        'smb+meta:ceph_cluster_config.exo=sha256:859b001f76df4d184b858b9c3e323ca8ff85a311414d0405f4484d17aa481ef3'
+        'smb+meta:ceph_cluster_config.exo=sha256:859b001f76df4d184b858b9c3e323ca8ff85a311414d0405f4484d17aa481ef3',
+        'smb+field:features=domain',
+        'smb+field:rgw_creds_uri=rados:mon-config-key:smb/config/foxtrot/config.smb.rgw',
+    ]
+
+
+def test_pool_caps_from_uri(cephadm_module):
+    from cephadm.services.smb import SMBService
+
+    smb_service = SMBService(cephadm_module)
+
+    # objects living in the shared .smb pool must be scoped to the
+    # cluster's own namespace.
+    assert smb_service._pool_caps_from_uri(
+        'rados://.smb/foxtrot/config.json'
+    ) == [
+        'allow r pool=.smb namespace=foxtrot',
+        'allow rwx pool=.smb namespace=foxtrot object_prefix cluster.meta.',
+    ]
+
+    # the empty-namespace uri shape that RADOSConfigEntry.uri can produce
+    # (rados://<pool>//<key>) must still scope the read cap consistently
+    # with the existing rwx cap.
+    assert smb_service._pool_caps_from_uri(
+        'rados://.smb//config.smb'
+    ) == [
+        'allow r pool=.smb namespace=',
+        'allow rwx pool=.smb namespace= object_prefix cluster.meta.',
     ]

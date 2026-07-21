@@ -47,7 +47,7 @@ from ceph.deployment.service_spec import (
 from ceph.deployment.drive_group import DeviceSelection
 from ceph.utils import str_to_datetime, datetime_to_str, datetime_now
 from ceph.cryptotools.select import choose_crypto_caller
-from cephadm.serve import CephadmServe, REQUIRES_POST_ACTIONS
+from cephadm.serve import CephadmServe
 from cephadm.services.cephadmservice import CephadmDaemonDeploySpec
 from cephadm.http_server import CephadmHttpServer
 from cephadm.agent import CephadmAgentHelpers
@@ -1123,8 +1123,14 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule):
                     'running': DaemonDescriptionStatus.running,
                     'stopped': DaemonDescriptionStatus.stopped,
                     'error': DaemonDescriptionStatus.error,
-                    'unknown': DaemonDescriptionStatus.error,
+                    'unknown': DaemonDescriptionStatus.unknown,
                 }[d['state']]
+
+            cached_dd = None
+            try:
+                cached_dd = self.cache.get_daemon(d['name'], host)
+            except OrchestratorError:
+                self.log.debug(f'Could not find daemon {d["name"]} in cache')
 
             sd = orchestrator.DaemonDescription(
                 daemon_type=daemon_type,
@@ -1155,15 +1161,9 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule):
                 rank_generation=rank_generation,
                 extra_container_args=d.get('extra_container_args'),
                 extra_entrypoint_args=d.get('extra_entrypoint_args'),
+                pending_daemon_config=cached_dd.pending_daemon_config if cached_dd else False,
+                user_stopped=cached_dd.user_stopped if cached_dd else False,
             )
-
-            if daemon_type in REQUIRES_POST_ACTIONS:
-                # If post action is required for daemon, then restore value of pending_daemon_config
-                try:
-                    cached_dd = self.cache.get_daemon(sd.name(), host)
-                    sd.update_pending_daemon_config(cached_dd.pending_daemon_config)
-                except orchestrator.OrchestratorError:
-                    pass
 
             dm[sd.name()] = sd
         self.log.debug('Refreshed host %s daemons (%d)' % (host, len(dm)))
@@ -1180,14 +1180,24 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule):
     def offline_hosts_remove(self, host: str) -> None:
         if host in self.offline_hosts:
             self.offline_hosts.remove(host)
+            self._invalidate_all_host_metadata_and_kick_serve(host)
 
     def update_failed_daemon_health_check(self) -> None:
         failed_daemons = []
         for dd in self.cache.get_error_daemons():
-            if dd.daemon_type != 'agent':  # agents tracked by CEPHADM_AGENT_DOWN
-                failed_daemons.append('daemon %s on %s is in %s state' % (
-                    dd.name(), dd.hostname, dd.status_desc
-                ))
+            if dd.daemon_type == 'agent':  # agents tracked by CEPHADM_AGENT_DOWN
+                continue
+            assert dd.daemon_type is not None
+            svc_type = daemon_type_to_service(dd.daemon_type)
+            if (svc_type in ServiceSpec.REQUIRES_SERVICE_ID
+                    and dd.service_name() in self.spec_store.spec_deleted):
+                # Service is being removed; daemon failure will be
+                # resolved by orphan cleanup. Don't raise a health
+                # alert that clears itself once removal completes.
+                continue
+            failed_daemons.append('daemon %s on %s is in %s state' % (
+                dd.name(), dd.hostname, dd.status_desc
+            ))
         self.remove_health_warning('CEPHADM_FAILED_DAEMON')
         if failed_daemons:
             self.set_health_warning('CEPHADM_FAILED_DAEMON', f'{len(failed_daemons)} failed cephadm daemon(s)', len(
@@ -3088,8 +3098,12 @@ Then run the following:
                     out, err, code = self.wait_async(CephadmServe(self)._run_cephadm(
                         daemon_spec.host, name, 'unit',
                         ['--name', name, a]))
-            except Exception:
-                self.log.exception(f'`{daemon_spec.host}: cephadm unit {name} {a}` failed')
+            except Exception as exp:
+                if a == 'reset-failed' and daemon_spec.daemon_type in ['nfs'] and 'not loaded' in str(exp):
+                    # Don't log exception if reset-failed fails because the unit is not loaded
+                    pass
+                else:
+                    self.log.exception(f'`{daemon_spec.host}: cephadm unit {name} {a}` failed')
         self.cache.invalidate_host_daemons(daemon_spec.host)
         msg = "{} {} from host '{}'".format(action, name, daemon_spec.host)
         self.events.for_daemon(name, 'INFO', msg)
@@ -3120,6 +3134,7 @@ Then run the following:
         d = self.cache.get_daemon(daemon_name)
         assert d.daemon_type is not None
         assert d.daemon_id is not None
+        assert d.hostname
 
         if (action == 'redeploy' or action == 'restart') and self.daemon_is_self(d.daemon_type, d.daemon_id) \
                 and not self.mgr_service.mgr_map_has_standby():
@@ -3138,6 +3153,14 @@ Then run the following:
                 raise OrchestratorError(
                     f'key rotation not supported for {d.daemon_type}'
                 )
+
+        # Track user-initiated stop/start actions
+        if action == 'stop':
+            d.update_user_stopped_status(True)
+            self.cache.save_host(d.hostname)
+        elif action in ['start', 'restart']:
+            d.update_user_stopped_status(False)
+            self.cache.save_host(d.hostname)
 
         self._daemon_action_set_image(action, image, d.daemon_type, d.daemon_id)
 
@@ -3242,10 +3265,19 @@ Then run the following:
                 for h, ls in osds_msg.items():
                     msg += f'\thost {h}: {" ".join([f"osd.{id}" for id in ls])}'
                 raise OrchestratorError(
-                    f'If {service_name} is removed then the following OSDs '
-                    f'will remain, --force to proceed anyway\n{msg}'
-                )
+                    f'If {service_name} is removed then the following OSDs will remain, --force to proceed anyway\n{msg}')
+        elif service_name.startswith('nfs.'):
+            # check if its using old node id style and remove from mon store
+            nfs_services = self.get_store('nfs_services_with_old_nodeid')
+            if nfs_services:
+                nfs_services = nfs_services.split(',')
+                if service_name in nfs_services:
+                    nfs_services.remove(service_name)
+                    val = ','.join(nfs_services) if nfs_services else None
+                    self.set_store('nfs_services_with_old_nodeid', val)
 
+        spec = self.spec_store[service_name].spec
+        CephadmServe(self)._remove_service_config(spec)
         found = self.spec_store.rm(service_name, force_delete_data)
         if found and service_name.startswith('osd.'):
             self.spec_store.finally_rm(service_name)

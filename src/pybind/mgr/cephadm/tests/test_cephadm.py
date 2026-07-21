@@ -284,6 +284,7 @@ class TestCephadm(object):
                         'is_active': False,
                         'ports': [],
                         'pending_daemon_config': False,
+                        'user_stopped': False
                     }
                 ]
 
@@ -417,6 +418,48 @@ class TestCephadm(object):
             CephadmServe(cephadm_module)._refresh_host_daemons('myhost')
             dds = wait(cephadm_module, cephadm_module.list_daemons())
             assert {d.name() for d in dds} == {'rgw.myrgw.foobar', 'haproxy.test.bar'}
+
+    @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm(
+        json.dumps([
+            dict(
+                name='rgw.myrgw.running',
+                style='cephadm',
+                fsid='fsid',
+                container_id='container_id',
+                state='running',
+            ),
+            dict(
+                name='rgw.myrgw.unknown',
+                style='cephadm',
+                fsid='fsid',
+                container_id='container_id',
+                state='unknown',
+            ),
+            dict(
+                name='rgw.myrgw.error',
+                style='cephadm',
+                fsid='fsid',
+                container_id='container_id',
+                state='error',
+            ),
+        ])
+    ))
+    def test_unknown_state_not_error(self, cephadm_module: CephadmOrchestrator):
+        # Verify that daemons with state='unknown' from cephadm ls are not
+        # treated as errors and do not trigger CEPHADM_FAILED_DAEMON.
+        # See https://tracker.ceph.com/issues/65728
+        cephadm_module.service_cache_timeout = 10
+        with with_host(cephadm_module, 'myhost'):
+            CephadmServe(cephadm_module)._refresh_host_daemons('myhost')
+            dds = {d.name(): d for d in wait(cephadm_module, cephadm_module.list_daemons())}
+            # unknown should map to DaemonDescriptionStatus.unknown, not error
+            assert dds['rgw.myrgw.unknown'].status == DaemonDescriptionStatus.unknown
+            assert dds['rgw.myrgw.error'].status == DaemonDescriptionStatus.error
+            assert dds['rgw.myrgw.running'].status == DaemonDescriptionStatus.running
+            # only the error daemon should appear in get_error_daemons
+            error_names = {d.name() for d in cephadm_module.cache.get_error_daemons()}
+            assert 'rgw.myrgw.error' in error_names
+            assert 'rgw.myrgw.unknown' not in error_names
 
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
     def test_daemon_action(self, cephadm_module: CephadmOrchestrator):
@@ -1814,6 +1857,46 @@ class TestCephadm(object):
                 'CEPHADM_INVALID_CONFIG_OPTION']['summary']
             assert 'Ignoring invalid mgr config option test' in cephadm_module.health_checks[
                 'CEPHADM_INVALID_CONFIG_OPTION']['detail']
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.check_mon_command")
+    @mock.patch("cephadm.module.CephadmOrchestrator.get_foreign_ceph_option")
+    def test_remove_service_config(self, get_foreign_ceph_option, check_mon_command, cephadm_module: CephadmOrchestrator):
+        get_foreign_ceph_option.return_value = 'foo'
+        ps = PlacementSpec(hosts=['test'], count=1)
+        spec = ServiceSpec('nfs', service_id='a', placement=ps, config={'rados_replica_read_policy': 'localize'})
+        CephadmServe(cephadm_module)._remove_service_config(spec)
+        check_mon_command.assert_called_once_with({
+            'prefix': 'config rm',
+            'name': 'rados_replica_read_policy',
+            'who': 'client.nfs.a',
+        })
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.check_mon_command")
+    @mock.patch("cephadm.module.CephadmOrchestrator.get_foreign_ceph_option")
+    def test_remove_service_config_skips_invalid(self, get_foreign_ceph_option, check_mon_command, cephadm_module: CephadmOrchestrator):
+        get_foreign_ceph_option.side_effect = KeyError
+        ps = PlacementSpec(hosts=['test'], count=1)
+        spec = ServiceSpec('nfs', placement=ps, config={'invalid_key': 'val'})
+        CephadmServe(cephadm_module)._remove_service_config(spec)
+        check_mon_command.assert_not_called()
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.check_mon_command")
+    @mock.patch("cephadm.module.CephadmOrchestrator.get_foreign_ceph_option")
+    @mock.patch("cephadm.module.CephadmOrchestrator._kick_serve_loop")
+    def test_remove_service_cleans_spec_config(
+        self, _kick_serve_loop, get_foreign_ceph_option, check_mon_command, cephadm_module: CephadmOrchestrator
+    ):
+        get_foreign_ceph_option.return_value = 'foo'
+        ps = PlacementSpec(hosts=['test'], count=1)
+        spec = ServiceSpec('rgw', service_id='foo', placement=ps, config={'rgw_frontends': 'beast port=8080'})
+        cephadm_module.spec_store.save(spec)
+        cephadm_module.remove_service('rgw.foo')
+        check_mon_command.assert_called_once_with({
+            'prefix': 'config rm',
+            'name': 'rgw_frontends',
+            'who': 'client.rgw.foo',
+        })
+        assert 'rgw.foo' in cephadm_module.spec_store.spec_deleted
 
     @mock.patch("cephadm.module.CephadmOrchestrator.get_foreign_ceph_option")
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm")

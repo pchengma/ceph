@@ -89,7 +89,11 @@ export enum ActionLabels {
   /* Multi-cluster */
   CONNECT = 'connect',
   RECONNECT = 'reconnect',
-  VIEW = 'View'
+  VIEW = 'View',
+
+  /* Hosts */
+  MAINTENANCE = 'Maintenance',
+  DRAIN = 'Drain'
 }
 
 @Injectable({
@@ -165,6 +169,7 @@ export class ActionLabelsI18n {
   SETUP_MULTISITE_REPLICATION: string;
   NFS_EXPORT: string;
   VIEW: string;
+  EDIT_GATEWAYS_GROUP: string;
   constructor() {
     /* Create a new item */
     this.CREATE = $localize`Create`;
@@ -257,6 +262,7 @@ export class ActionLabelsI18n {
 
     this.NFS_EXPORT = $localize`Create NFS Share`;
     this.VIEW = $localize`View`;
+    this.EDIT_GATEWAYS_GROUP = $localize`Edit gateways group`;
   }
 }
 

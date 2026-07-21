@@ -28,7 +28,9 @@ import {
   RadioModule,
   TilesModule,
   LayerModule,
-  AccordionModule
+  AccordionModule,
+  MenuButtonModule,
+  ContextMenuModule
 } from 'carbon-components-angular';
 import Analytics from '@carbon/icons/es/analytics/16';
 import CloseFilled from '@carbon/icons/es/close--filled/16';
@@ -60,8 +62,8 @@ import { CreateClusterStep3Component } from './create-cluster/create-cluster-ste
 import { CreateClusterStep4Component } from './create-cluster/create-cluster-step-4/create-cluster-step-4.component';
 import { CreateClusterComponent } from './create-cluster/create-cluster.component';
 import { CrushmapComponent } from './crushmap/crushmap.component';
-import { HostDetailsComponent } from './hosts/host-details/host-details.component';
-import { HostDetailsSectionComponent } from './hosts/host-details/host-details-section.component';
+import { HostSidebarComponent } from './hosts/host-resource-sidebar/host-resource-sidebar.component';
+import { HostResourcePageComponent } from './hosts/host-resource-page/host-resource-page.component';
 import { HostFormComponent } from './hosts/host-form/host-form.component';
 import { HostsComponent } from './hosts/hosts.component';
 import { InventoryDevicesComponent } from './inventory/inventory-devices/inventory-devices.component';
@@ -102,6 +104,7 @@ import { MultiClusterFormComponent } from './multi-cluster/multi-cluster-form/mu
 import { MultiClusterListComponent } from './multi-cluster/multi-cluster-list/multi-cluster-list.component';
 import { DashboardV3Module } from '../dashboard-v3/dashboard-v3.module';
 import { MultiClusterDetailsComponent } from './multi-cluster/multi-cluster-details/multi-cluster-details.component';
+import { CertificateAuthorityFormComponent } from '~/app/shared/components/certificate-authority-form/certificate-authority-form.component';
 import { TextLabelListComponent } from '~/app/shared/components/text-label-list/text-label-list.component';
 
 @NgModule({
@@ -141,6 +144,7 @@ import { TextLabelListComponent } from '~/app/shared/components/text-label-list/
     TagModule,
     TabsModule,
     TextLabelListComponent,
+    CertificateAuthorityFormComponent,
     SelectModule,
     LayoutModule,
     NumberModule,
@@ -148,7 +152,9 @@ import { TextLabelListComponent } from '~/app/shared/components/text-label-list/
     RadioModule,
     TilesModule,
     LayerModule,
-    AccordionModule
+    AccordionModule,
+    MenuButtonModule,
+    ContextMenuModule
   ],
   declarations: [
     MonitorComponent,
@@ -157,8 +163,8 @@ import { TextLabelListComponent } from '~/app/shared/components/text-label-list/
     OsdDetailsComponent,
     OsdScrubModalComponent,
     OsdFlagsModalComponent,
-    HostDetailsComponent,
-    HostDetailsSectionComponent,
+    HostSidebarComponent,
+    HostResourcePageComponent,
     ConfigurationDetailsComponent,
     ConfigurationFormComponent,
     OsdReweightModalComponent,
