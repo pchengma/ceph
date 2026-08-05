@@ -3960,7 +3960,13 @@ static void set_copy_attrs(map<string, bufferlist>& src_attrs,
 {
   switch (attrs_mod) {
   case RGWRados::ATTRSMOD_NONE:
-    attrs = src_attrs;
+    {
+      auto tags = attrs.extract(RGW_ATTR_TAGS);
+      attrs = src_attrs;
+      if (!tags.empty()) {
+        attrs[RGW_ATTR_TAGS] = std::move(tags.mapped());
+      }
+    }
     break;
   case RGWRados::ATTRSMOD_REPLACE:
     if (!attrs[RGW_ATTR_ETAG].length()) {
@@ -3970,6 +3976,13 @@ static void set_copy_attrs(map<string, bufferlist>& src_attrs,
       auto ttiter = src_attrs.find(RGW_ATTR_TAIL_TAG);
       if (ttiter != src_attrs.end()) {
         attrs[RGW_ATTR_TAIL_TAG] = src_attrs[RGW_ATTR_TAIL_TAG];
+      }
+    }
+    // the tag-set is copied from the source unless the request replaced it
+    if (attrs.find(RGW_ATTR_TAGS) == attrs.end()) {
+      auto titer = src_attrs.find(RGW_ATTR_TAGS);
+      if (titer != src_attrs.end()) {
+        attrs[RGW_ATTR_TAGS] = titer->second;
       }
     }
     break;
@@ -10826,14 +10839,14 @@ int RGWRados::gc_operate(const DoutPrefixProvider *dpp, string& oid, librados::O
   return rgw_rados_operate(dpp, gc_pool_ctx, oid, std::move(op), pbl, y);
 }
 
-int RGWRados::list_gc_objs(int *index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool *truncated, bool& processing_queue)
+int RGWRados::list_gc_objs(int& index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool& truncated, bool& processing_queue, std::optional<int> shard_id)
 {
-  return gc->list(index, marker, max, expired_only, result, truncated, processing_queue);
+  return gc->list(index, marker, max, expired_only, result, truncated, processing_queue, shard_id);
 }
 
-int RGWRados::process_gc(bool expired_only, optional_yield y)
+int RGWRados::process_gc(bool expired_only, optional_yield y, std::optional<int> shard_id)
 {
-  return gc->process(expired_only, y);
+  return gc->process(expired_only, y, shard_id);
 }
 
 int RGWRados::process_lc(const std::unique_ptr<rgw::sal::Bucket>& optional_bucket)

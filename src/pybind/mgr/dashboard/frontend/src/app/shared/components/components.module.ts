@@ -59,6 +59,7 @@ import { ConfigOptionComponent } from './config-option/config-option.component';
 import { ConfirmationModalComponent } from './confirmation-modal/confirmation-modal.component';
 import { Copy2ClipboardButtonComponent } from './copy2clipboard-button/copy2clipboard-button.component';
 import { DeleteConfirmationModalComponent } from './delete-confirmation-modal/delete-confirmation-modal.component';
+import { DeleteGuardModalComponent } from './delete-guard-modal/delete-guard-modal.component';
 import { CustomLoginBannerComponent } from './custom-login-banner/custom-login-banner.component';
 import { DateTimePickerComponent } from './date-time-picker/date-time-picker.component';
 import { DocComponent } from './doc/doc.component';
@@ -120,6 +121,7 @@ import Plug16 from '@carbon/icons/es/plug/16';
 import VmdkDisk16 from '@carbon/icons/es/vmdk-disk/16';
 import WarningAlt16 from '@carbon/icons/es/warning--alt/16';
 import CheckMarkOutline16 from '@carbon/icons/es/checkmark--outline/16';
+import ArrowRight16 from '@carbon/icons/es/arrow--right/16';
 import ArrowUpRight16 from '@carbon/icons/es/arrow--up-right/16';
 import InProgress16 from '@carbon/icons/es/in-progress/16';
 import ArrowDown16 from '@carbon/icons/es/arrow--down/16';
@@ -199,6 +201,7 @@ import { OverviewComponent } from './resource-overview-card/resource-overview-ca
     LoadingPanelComponent,
     ModalComponent,
     DeleteConfirmationModalComponent,
+    DeleteGuardModalComponent,
     ConfirmationModalComponent,
     LanguageSelectorComponent,
     GrafanaComponent,
@@ -318,6 +321,7 @@ export class ComponentsModule {
       VmdkDisk16,
       WarningAlt16,
       CheckMarkOutline16,
+      ArrowRight16,
       ArrowUpRight16,
       InProgress16,
       ArrowDown16,
