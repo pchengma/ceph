@@ -14,6 +14,7 @@
 
 #include "include/buffer.h"
 #include "crimson/os/seastore/seastore_types.h"
+#include "crimson/os/seastore/seastore_dma_alloc.h"
 #include "crimson/common/errorator.h"
 
 struct btree_lba_manager_test;
@@ -44,7 +45,7 @@ void intrusive_ptr_release(CachedExtent *);
 inline ceph::bufferptr create_extent_ptr_rand(extent_len_t len) {
   assert(is_aligned(len, CEPH_PAGE_SIZE));
   assert(len > 0);
-  return ceph::bufferptr(buffer::create_page_aligned(len));
+  return ceph::bufferptr(alloc_dma_or_page_aligned(len));
 }
 
 inline ceph::bufferptr create_extent_ptr_zero(extent_len_t len) {
@@ -420,6 +421,8 @@ public:
    * this purpose.
    */
   virtual void on_fully_loaded() {}
+
+  virtual void on_set_bptr() {}
 
   /**
    * on_clean_read
@@ -1185,9 +1188,11 @@ protected:
   /// set bufferptr
   void set_bptr(ceph::bufferptr &&nptr) {
     ptr = nptr;
+    on_set_bptr();
   }
   void set_bptr(ceph::bufferptr &nptr) {
     ptr = nptr;
+    on_set_bptr();
   }
 
   /**

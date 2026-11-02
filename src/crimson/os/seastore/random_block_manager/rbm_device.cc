@@ -47,7 +47,7 @@ RBMDevice::mkfs_ret RBMDevice::do_primary_mkfs(device_config_t config,
   const size_t cur_block_size = (*st).block_size;
   const size_t cur_total_size = (*st).size;
   ceph_assert_always(journal_size > 0 ||
-                     config.spec.dtype == device_type_t::RANDOM_BLOCK_HDD);
+                     config.spec.dtype == device_type_t::HDD);
   ceph_assert_always(cur_total_size >= journal_size);
   ceph_assert_always(shard_num > 0);
 
@@ -70,6 +70,7 @@ RBMDevice::mkfs_ret RBMDevice::do_primary_mkfs(device_config_t config,
     std::move(config),
     std::move(shard_infos));
   DEBUG("super {} ", super);
+  ceph_assert(super.config.spec.id == device_id);
 
   // write super block
   co_await open(get_device_path(),
@@ -105,7 +106,7 @@ write_ertr::future<> RBMDevice::write_rbm_superblock()
 
   bufferlist bl;
   encode(super, bl);
-  auto bp = bufferptr(ceph::buffer::create_page_aligned(super.block_size));
+  auto bp = bufferptr(alloc_io_buffer(super.block_size));
   bp.zero();
   // magic at offset 0, followed by 37 bytes of null padding (just zeroed)
   std::memcpy(bp.c_str(),
@@ -122,7 +123,7 @@ read_ertr::future<device_superblock_t> RBMDevice::read_rbm_superblock(
 {
   LOG_PREFIX(RBMDevice::read_rbm_superblock);
   assert(super.block_size > 0);
-  auto bptr = bufferptr(ceph::buffer::create_page_aligned(super.block_size));
+  auto bptr = bufferptr(alloc_io_buffer(super.block_size));
   co_await read(addr, bptr);
 
   // verify magic at offset 0
@@ -179,6 +180,7 @@ read_ertr::future<device_superblock_t> RBMDevice::read_rbm_superblock(
     ceph_assert_always(crc == (checksum_t)-1);
   }
   super_block.crc = crc;
+  ceph_assert(super_block.config.spec.id == device_id);
   super = super_block;
   DEBUG("got {} ", super);
   co_return co_await read_ertr::future<device_superblock_t>(
@@ -254,15 +256,26 @@ read_ertr::future<uint32_t> RBMDevice::get_shard_nums()
       "Invalid error in RBMDevice::get_shard_nums")
   );
 
+  // The root device is only opened for this probe; the sharded devices open
+  // their own. Close it so the SPDK qpair and controller reference are
+  // released.
+  co_await close();
   co_return sb.shard_num;
 }
 
-EphemeralRBMDeviceRef create_test_ephemeral(uint64_t journal_size, uint64_t data_size) {
+EphemeralRBMDeviceRef create_test_ephemeral(
+  device_id_t id,
+  uint64_t journal_size,
+  uint64_t data_size)
+{
+  std::string path;
   return EphemeralRBMDeviceRef(
     new EphemeralRBMDevice(
+      path,
+      DEVICE_ID_RANDOM_BLOCK_MIN + id,
       (journal_size + data_size) * seastar::this_smp_shard_count() +
 	random_block_device::RBMDevice::get_shard_reserved_size(),
-	EphemeralRBMDevice::TEST_BLOCK_SIZE));
+      EphemeralRBMDevice::TEST_BLOCK_SIZE));
 }
 
 open_ertr::future<> EphemeralRBMDevice::open(

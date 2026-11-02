@@ -2,7 +2,7 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import { Observable, throwError } from 'rxjs';
-import { NFSCluster } from '~/app/ceph/nfs/models/nfs-cluster-config';
+import { NFSCluster } from '~/app/ceph/nfs/models/nfs.model';
 
 import { NfsFSAbstractionLayer, SUPPORTED_FSAL } from '~/app/ceph/nfs/models/nfs.fsal';
 import { ApiClient } from '~/app/shared/api/api-client';
@@ -58,7 +58,7 @@ export class NfsService extends ApiClient {
 
   list(clusterId?: string) {
     return this.http.get(`${this.apiPath}/export`, {
-      params: { cluster_id: clusterId }
+      params: clusterId ? { cluster_id: clusterId } : {}
     });
   }
 
@@ -87,9 +87,10 @@ export class NfsService extends ApiClient {
     });
   }
 
-  listClusters() {
-    return this.http.get(`${this.apiPath}/cluster`, {
-      headers: { Accept: this.getVersionHeaderValue(0, 1) }
+  listClusters(info = true): Observable<NFSCluster[]> {
+    return this.http.get<NFSCluster[]>(`${this.apiPath}/cluster`, {
+      headers: { Accept: this.getVersionHeaderValue(0, 1) },
+      params: { info: String(info) }
     });
   }
 
@@ -106,12 +107,5 @@ export class NfsService extends ApiClient {
 
   filesystems() {
     return this.http.get(`${this.uiApiPath}/cephfs/filesystems`);
-  }
-
-  nfsClusterList(): Observable<NFSCluster[]> {
-    return this.http.get<NFSCluster[]>(`${this.apiPath}/cluster`, {
-      headers: { Accept: this.getVersionHeaderValue(0, 1) },
-      params: { info: true }
-    });
   }
 }

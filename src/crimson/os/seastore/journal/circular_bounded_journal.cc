@@ -267,7 +267,7 @@ RecordScanner::read_ret CircularBoundedJournal::read(paddr_t start, size_t len)
   LOG_PREFIX(CircularBoundedJournal::read);
   rbm_abs_addr addr = convert_paddr_to_abs_addr(start);
   DEBUG("reading data from addr {} read length {}", addr, len);
-  auto bptr = bufferptr(ceph::buffer::create_page_aligned(len));
+  auto bptr = bufferptr(cjs.get_device().alloc_io_buffer(len));
   return cjs.read(addr, bptr 
   ).safe_then([bptr=std::move(bptr)]() {
     return read_ret(
@@ -432,15 +432,17 @@ void CircularBoundedJournal::register_metrics()
       sm::make_gauge(
 	"submit_record_latency_average",
 	[this] {
-	  return stats.submit_record_latency_total.count() /
-	    stats.submit_record_count;
+	  return stats.submit_record_count > 0 ?
+	    stats.submit_record_latency_total.count() /
+	    stats.submit_record_count : 0.0;
 	}
       ),
       sm::make_gauge(
 	"submit_record_size_average",
 	[this] {
-	  return stats.submit_record_size /
-	    stats.submit_record_count;
+	  return stats.submit_record_count > 0 ?
+	    stats.submit_record_size /
+	    stats.submit_record_count : 0;
 	}
       ),
       sm::make_gauge(
@@ -458,8 +460,9 @@ void CircularBoundedJournal::register_metrics()
       sm::make_gauge(
 	"submit_record_roll_latency_average",
 	[this] {
-	  return stats.submit_record_roll_latency_total.count() /
-	    stats.submit_record_roll_count;
+	  return stats.submit_record_roll_count > 0 ?
+	    stats.submit_record_roll_latency_total.count() /
+	    stats.submit_record_roll_count : 0.0;
 	}
       ),
       sm::make_gauge(
@@ -477,8 +480,9 @@ void CircularBoundedJournal::register_metrics()
       sm::make_gauge(
 	"submit_record_wait_latency_average",
 	[this] {
-	  return stats.submit_record_wait_latency_total.count() /
-	    stats.submit_record_wait_count;
+	  return stats.submit_record_wait_count > 0 ?
+	    stats.submit_record_wait_latency_total.count() /
+	    stats.submit_record_wait_count : 0.0;
 	}
       )
     }

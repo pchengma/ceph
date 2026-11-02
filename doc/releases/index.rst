@@ -21,6 +21,7 @@ security fixes.
    :maxdepth: 1
    :hidden:
 
+   Umbrella (v21.2.*) <umbrella>
    Tentacle (v20.2.*) <tentacle>
    Squid (v19.2.*) <squid>
 
@@ -61,13 +62,18 @@ receive bug fixes or backports).
 Release timeline
 ----------------
 
-.. ceph_timeline_gantt:: releases.yml tentacle squid reef
-.. ceph_timeline:: releases.yml tentacle squid reef
+.. ceph_timeline_gantt:: releases.yml umbrella tentacle squid
+.. ceph_timeline:: releases.yml umbrella tentacle squid
+
+.. _Umbrella: umbrella
+.. _21.2.0: umbrella#v21-2-0-umbrella
 
 .. _Tentacle: tentacle
 .. _20.2.0: tentacle#v20-2-0-tentacle
 .. _20.2.1: tentacle#v20-2-1-tentacle
 .. _20.2.2: tentacle#v20-2-2-tentacle
+.. _20.2.3: tentacle#v20-2-3-tentacle
+.. _20.2.4: tentacle#v20-2-4-tentacle
 
 .. _Squid: squid
 .. _19.2.0: squid#v19-2-0-squid
@@ -76,6 +82,8 @@ Release timeline
 .. _19.2.3: squid#v19-2-3-squid
 .. _19.2.4: squid#v19-2-4-squid
 .. _19.2.5: squid#v19-2-5-squid
+.. _19.2.6: squid#v19-2-6-squid
+.. _19.2.7: squid#v19-2-7-squid
 
 .. _Reef: reef
 .. _18.2.0: reef#v18-2-0-reef

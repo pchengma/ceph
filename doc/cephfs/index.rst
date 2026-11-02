@@ -84,6 +84,8 @@ Administration
     MDS failover and standby configuration <standby>
     MDS Cache Configuration <cache-configuration>
     MDS Configuration Settings <mds-config-ref>
+    MDS Phase Times <mds-phase-times>
+    MDS Quality of Service <mds-qos>
     Manual: ceph-mds <../../man/8/ceph-mds>
     Export over NFS <nfs>
     Application best practices <app-best-practices>
@@ -147,7 +149,7 @@ CephFS Concepts
     File layouts <file-layouts>
     Distributed Metadata Cache <mdcache>
     Dynamic Metadata Management in CephFS <dynamic-metadata-management>
-    CephFS IO Path <cephfs-io-path>
+    CephFS I/O Path <cephfs-io-path>
     Case Sensitivity and Normalization <charmap>
     LazyIO <lazyio>
     Directory fragmentation <dirfrags>
@@ -172,6 +174,7 @@ Troubleshooting and Disaster Recovery
 
     Client eviction <eviction>
     Scrubbing the File System <scrub>
+    Damaged ranks <damaged-rank>
     Handling full file systems <full>
     Metadata repair <disaster-recovery-experts>
     Troubleshooting <troubleshooting>

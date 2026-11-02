@@ -4,12 +4,14 @@
 #pragma once
 
 #include <boost/intrusive/set.hpp>
+#include <seastar/core/condition-variable.hh>
 #include <seastar/core/metrics_types.hh>
 
 #include "common/ceph_time.h"
 
 #include "osd/osd_types.h"
 
+#include "crimson/common/config_proxy.h"
 #include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/os/seastore/segment_manager.h"
@@ -1292,6 +1294,17 @@ public:
 
   virtual void release_projected_usage(std::size_t) = 0;
 
+  // Returns true when the allocator is full (failsafe limit) and writes should
+  // be refused. Only RBMCleaner overrides this; SegmentCleaner returns false.
+  virtual bool is_storage_full() const { return false; }
+
+  // Deferred-free backpressure (RBM only); no-ops for SegmentCleaner.
+  virtual void account_conflict_pending_free(std::size_t) {}
+  virtual void deaccount_conflict_pending_free(std::size_t) {}
+  virtual seastar::future<> wait_for_conflict_drain() {
+    return seastar::now();
+  }
+
   virtual bool should_block_io_on_clean() const = 0;
 
   virtual bool can_clean_space() const = 0;
@@ -1847,10 +1860,11 @@ public:
 
   store_statfs_t get_stat() const final {
     store_statfs_t st;
+    auto used = get_used_bytes();
     st.total = get_total_bytes();
-    st.available = get_total_bytes() - get_journal_bytes() - stats.used_bytes;
-    st.allocated = get_journal_bytes() + stats.used_bytes;
-    st.data_stored = get_journal_bytes() + stats.used_bytes;
+    st.available = get_total_bytes() - get_journal_bytes() - used;
+    st.allocated = get_journal_bytes() + used;
+    st.data_stored = get_journal_bytes() + used;
     return st;
   }
 
@@ -1866,6 +1880,10 @@ public:
 
   void mark_space_free(paddr_t, extent_len_t) final;
 
+  void account_conflict_pending_free(std::size_t bytes) final;
+  void deaccount_conflict_pending_free(std::size_t bytes) final;
+  seastar::future<> wait_for_conflict_drain() final;
+
   void commit_space_used(paddr_t, extent_len_t) final;
 
   bool try_reserve_projected_usage(std::size_t) final;
@@ -1874,6 +1892,19 @@ public:
 
   bool should_block_io_on_clean() const final {
     return false;
+  }
+
+  bool is_storage_full() const final {
+    auto st = get_stat();
+    if (st.total == 0) {
+      return false;
+    }
+    // Failsafe limit: full once the used fraction reaches the same ratio
+    // classic uses for its failsafe check (osd_failsafe_full_ratio, default
+    // 0.97), i.e. free fraction drops below (1 - ratio).
+    const double failsafe_full_ratio =
+      crimson::common::get_conf<double>("osd_failsafe_full_ratio");
+    return st.available < st.total * (1.0 - failsafe_full_ratio);
   }
 
   bool can_clean_space() const final {
@@ -1959,6 +1990,25 @@ public:
     return total;
   }
 
+  // Allocator-view used bytes across all RBM devices (data section only).
+  uint64_t get_allocator_used_bytes() const {
+    uint64_t used = 0;
+    for (auto *rbm : rb_group->get_rb_managers()) {
+      uint64_t data = rbm->get_size();
+      uint64_t free = static_cast<uint64_t>(rbm->get_free_blocks())
+                     * rbm->get_block_size();
+      used += (data > free) ? (data - free) : 0;
+    }
+    return used;
+  }
+
+  // Used bytes for statfs and metrics; stats.used_bytes until the allocator
+  // is populated at mount.
+  uint64_t get_used_bytes() const {
+    return background_callback->is_ready()
+         ? get_allocator_used_bytes() : stats.used_bytes;
+  }
+
   // Testing interfaces
 
   bool check_usage(bool has_cold_tier) final;
@@ -1994,6 +2044,11 @@ private:
      */
     uint64_t projected_used_bytes = 0;
   } stats;
+
+  // Deferred frees of conflicted in-flight OOL writes; gates new OOL writes.
+  std::size_t conflict_pending_free_bytes = 0;
+  seastar::condition_variable conflict_drained;
+
   seastar::metrics::metric_group metrics;
   void register_metrics();
 

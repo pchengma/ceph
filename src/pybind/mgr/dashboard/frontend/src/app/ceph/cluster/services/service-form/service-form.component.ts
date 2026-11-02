@@ -39,6 +39,7 @@ import {
   CephServiceCertificate,
   CephServiceSpec,
   CertificateType,
+  CertMode,
   QatOptions,
   QatSepcs
 } from '~/app/shared/models/service.interface';
@@ -56,6 +57,7 @@ export class ServiceFormComponent extends CdForm implements OnInit {
   public sub = new Subscription();
 
   readonly CertificateType = CertificateType;
+  readonly CertMode = CertMode;
   readonly MDS_SVC_ID_PATTERN = /^[a-zA-Z_.-][a-zA-Z0-9_.-]*$/;
   readonly SNMP_DESTINATION_PATTERN = /^[^\:]+:[0-9]/;
   readonly SNMP_ENGINE_ID_PATTERN = /^[0-9A-Fa-f]{10,64}/g;
@@ -302,6 +304,10 @@ export class ServiceFormComponent extends CdForm implements OnInit {
       ],
       // RGW
       rgw_frontend_port: [
+        null,
+        [CdValidators.number(false), Validators.min(1), Validators.max(65535)]
+      ],
+      rgw_frontend_http_port: [
         null,
         [CdValidators.number(false), Validators.min(1), Validators.max(65535)]
       ],
@@ -674,6 +680,15 @@ export class ServiceFormComponent extends CdForm implements OnInit {
       allowlist_domains: [null],
       ssl_insecure_skip_verify: [false]
     });
+    this.serviceForm.addValidators(
+      CdValidators.doNotMatch(
+        'rgw_frontend_port',
+        'rgw_frontend_http_port',
+        (form: AbstractControl) =>
+          form.get('service_type')?.value === 'rgw' && !!form.get('ssl')?.value,
+        443
+      )
+    );
   }
 
   resolveRoute() {
@@ -818,6 +833,9 @@ export class ServiceFormComponent extends CdForm implements OnInit {
               this.serviceForm
                 .get('rgw_frontend_port')
                 .setValue(response[0].spec?.rgw_frontend_port);
+              this.serviceForm
+                .get('rgw_frontend_http_port')
+                .setValue(response[0].spec?.rgw_frontend_http_port);
               this.setRgwFields(
                 response[0].spec?.rgw_realm,
                 response[0].spec?.rgw_zonegroup,
@@ -1024,6 +1042,13 @@ export class ServiceFormComponent extends CdForm implements OnInit {
         }
       });
     }
+
+    // The HTTP port only applies with SSL: drop it when SSL is switched off
+    this.serviceForm.get('ssl')?.valueChanges.subscribe((ssl: boolean) => {
+      if (!ssl) {
+        this.serviceForm.get('rgw_frontend_http_port')?.setValue(null);
+      }
+    });
   }
 
   getDefaultsEntitiesForRgw(
@@ -1400,11 +1425,17 @@ export class ServiceFormComponent extends CdForm implements OnInit {
     const realmControl = this.serviceForm.get('realm_name');
     const zonegroupControl = this.serviceForm.get('zonegroup_name');
     const zoneControl = this.serviceForm.get('zone_name');
+    const virtualHostControl = this.serviceForm.get('virtual_host_enabled');
 
     if (this.realmList.length === 0) {
       realmControl.disable({ emitEvent: false });
+      virtualHostControl.setValue(false, { emitEvent: false });
+      virtualHostControl.disable({ emitEvent: false });
     } else {
       realmControl.enable({ emitEvent: false });
+      if (this.rgwModuleEnabled) {
+        virtualHostControl.enable({ emitEvent: false });
+      }
     }
 
     if (this.filteredZonegroupList.length === 0) {
@@ -1454,7 +1485,7 @@ export class ServiceFormComponent extends CdForm implements OnInit {
     this.rgwMultisiteService.getRgwModuleStatus().subscribe((enabled: boolean) => {
       this.rgwModuleEnabled = enabled;
       const virtualHostControl = this.serviceForm.get('virtual_host_enabled');
-      if (enabled) {
+      if (enabled && this.realmList.length > 0) {
         virtualHostControl.enable({ emitEvent: false });
         if (this.serviceForm.get('zonegroup_hostnames').value?.length) {
           virtualHostControl.setValue(true, { emitEvent: false });
@@ -1630,6 +1661,13 @@ export class ServiceFormComponent extends CdForm implements OnInit {
         case 'rgw':
           if (_.isNumber(values['rgw_frontend_port']) && values['rgw_frontend_port'] > 0) {
             serviceSpec['rgw_frontend_port'] = values['rgw_frontend_port'];
+          }
+          if (
+            values['ssl'] &&
+            _.isNumber(values['rgw_frontend_http_port']) &&
+            values['rgw_frontend_http_port'] > 0
+          ) {
+            serviceSpec['rgw_frontend_http_port'] = values['rgw_frontend_http_port'];
           }
           serviceSpec['ssl'] = values['ssl'];
           if (values['virtual_host_enabled'] && values['zonegroup_hostnames']?.length > 0) {

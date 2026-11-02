@@ -609,7 +609,10 @@ namespace rgw::sal {
     return op_target.obj_omap_set_val_by_key(dpp, key, val, must_exist);
   }
 
-  int DBObject::chown(User& new_user, const DoutPrefixProvider* dpp, optional_yield y)
+  int DBObject::chown(const DoutPrefixProvider* dpp,
+                      const rgw_owner& new_owner,
+                      const std::string& new_owner_name,
+                      optional_yield y)
   {
     return 0;
   }
@@ -2017,7 +2020,11 @@ namespace rgw::sal {
     return 0;
   }
 
-  void DBStore::get_ratelimit(RGWRateLimitInfo& bucket_ratelimit, RGWRateLimitInfo& user_ratelimit, RGWRateLimitInfo& anon_ratelimit)
+  void DBStore::get_ratelimit(
+      RGWRateLimitInfo& bucket_ratelimit,
+      RGWRateLimitInfo& user_ratelimit,
+      RGWRateLimitInfo& account_ratelimit,
+      RGWRateLimitInfo& anon_ratelimit)
   {
     return;
   }

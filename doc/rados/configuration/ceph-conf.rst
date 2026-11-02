@@ -488,16 +488,37 @@ example, ``osd/rack:foo`` would refer to all OSD daemons under the ``foo`` CRUSH
 When configuration options are displayed, the section name and any mask are presented
 in separate fields or columns to make them more readable.
 
-Commands
---------
+.. _configuring-ceph-api:
+
+Configuration Commands
+----------------------
 
 The following CLI commands are used to configure the cluster:
 
 * ``ceph config dump`` dumps the entire Monitor central configuration database.
 
+* ``ceph config ls`` lists the names of all configuration options, including
+  Manager module options. Option names do not form a hierarchy, so no command
+  lists the options under a partial name. Filter the list with ``grep``
+  instead:
+
+  .. prompt:: bash $
+
+     ceph config ls | grep ^osd_recovery
+     ceph config ls | grep ^mgr/balancer/
+
+  Only Manager module options contain slashes, in names of the form
+  ``mgr/<module>/<option>``.
+
 * ``ceph config get <who>`` dumps the configuration options stored in
   the Monitor configuration database for a specific daemon or client
-  (for example, ``mds.a``).
+  (for example, ``mds.a``). ``<who>`` names a daemon or client, such as
+  ``osd.1`` or ``client.admin``, or a type of daemon or client, such as
+  ``osd``. ``global`` is a section of the database, not a daemon or client,
+  so ``ceph config get global`` fails with
+  ``unrecognized entity 'global'`` even though ``ceph config set global``
+  works. To see the values stored in ``global``, run ``ceph config dump``
+  and look for ``global`` in the ``WHO`` column.
 
 * ``ceph config get <who> <option>`` shows either a configuration value
   stored in the Monitor configuration database for a specific daemon or client
@@ -523,6 +544,12 @@ The following CLI commands are used to configure the cluster:
 
 * ``ceph config show-with-defaults <who>`` is like the above,
   but also shows all defaults, and for changed values, where they are changed.
+
+* ``ceph config generate-minimal-conf`` generates a minimal ``ceph.conf`` file
+  necessary to bootstrap connections to the cluster. Further configuration
+  can be done via the ``ceph config`` interface.
+
+  .. note:: Some configs only affect startup behavior for clients or daemons. In that case, modifying the local ``ceph.conf`` is required.
 
 * ``ceph config assimilate-conf -i <input_file> -o <output_file>`` ingests a
   configuration file from *input_file* and sets any valid options found into the

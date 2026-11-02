@@ -11,6 +11,7 @@ import { FeatureTogglesGuardService } from '~/app/shared/services/feature-toggle
 import { ModuleStatusGuardService } from '~/app/shared/services/module-status-guard.service';
 import { SharedModule } from '~/app/shared/shared.module';
 import { TextLabelListComponent } from '~/app/shared/components/text-label-list/text-label-list.component';
+import { CertificateAuthorityFormComponent } from '~/app/shared/components/certificate-authority-form/certificate-authority-form.component';
 import { IscsiSettingComponent } from './iscsi-setting/iscsi-setting.component';
 import { IscsiTabsComponent } from './iscsi-tabs/iscsi-tabs.component';
 import { IscsiTargetDetailsComponent } from './iscsi-target-details/iscsi-target-details.component';
@@ -152,7 +153,8 @@ import { NvmeofEditAuthenticationComponent } from './nvmeof-edit-authentication/
     ThemeModule,
     NvmeofSetupCardsComponent,
     NvmeofGatewayGroupFilterComponent,
-    TextLabelListComponent
+    TextLabelListComponent,
+    CertificateAuthorityFormComponent
   ],
   declarations: [
     RbdListComponent,
@@ -294,7 +296,10 @@ const routes: Routes = [
       {
         path: ':image_spec',
         component: RbdImageResourceSidebarComponent,
-        data: { breadcrumbs: RbdImageResourceBreadcrumbResolver },
+        data: {
+          breadcrumbs: RbdImageResourceBreadcrumbResolver,
+          showBreadcrumbsLayout: false
+        },
         children: [
           { path: '', redirectTo: 'overview', pathMatch: 'full' },
           {
@@ -426,7 +431,10 @@ const routes: Routes = [
           {
             path: `${URLVerbs.VIEW}/:group`,
             component: NvmeGatewayViewComponent,
-            data: { breadcrumbs: NvmeGatewayViewBreadcrumbResolver },
+            data: {
+              breadcrumbs: NvmeGatewayViewBreadcrumbResolver,
+              showBreadcrumbsLayout: false
+            },
             children: [
               { path: '', redirectTo: 'nodes', pathMatch: 'full' },
               {
@@ -476,7 +484,10 @@ const routes: Routes = [
           {
             path: ':subsystem_nqn',
             component: NvmeSubsystemViewComponent,
-            data: { breadcrumbs: NvmeSubsystemViewBreadcrumbResolver },
+            data: {
+              breadcrumbs: NvmeSubsystemViewBreadcrumbResolver,
+              showBreadcrumbsLayout: false
+            },
             children: [
               { path: '', redirectTo: 'overview', pathMatch: 'full' },
               {

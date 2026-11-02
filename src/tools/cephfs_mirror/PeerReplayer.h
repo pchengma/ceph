@@ -51,6 +51,10 @@ public:
   // remove a directory from queue
   void remove_directory(std::string_view dir_root, bool purging = false);
 
+  static std::string sync_stat_omap_prefix(const Filesystem &filesystem);
+  static std::string sync_stat_omap_prefix(const Filesystem &filesystem,
+                                           const Peer &peer);
+
   // admin socket helpers
   void peer_status(Formatter *f);
 
@@ -62,7 +66,6 @@ private:
 
   inline static const std::string SERVICE_DAEMON_FAILED_DIR_COUNT_KEY = "failure_count";
   inline static const std::string SERVICE_DAEMON_RECOVERED_DIR_COUNT_KEY = "recovery_count";
-  inline static const std::string PEER_SYNC_STAT_KEY_PREFIX = "sync_stat";
 
   using Snapshot = std::pair<std::string, uint64_t>;
 
@@ -158,7 +161,7 @@ private:
   };
 
   struct DirRegistry {
-    int fd;
+    int fd = -1;
     bool canceled = false;
     SnapshotReplayerThread *replayer;
   };
@@ -725,6 +728,7 @@ private:
   SnapshotDataReplayers m_data_replayers;
   std::unique_ptr<TickThread> m_tick_thread;
   std::atomic<int> m_active_datasync_threads{0};
+  ceph::mutex m_mirror_obj_write_l = ceph::make_mutex("PeerReplayer::m_mirror_obj_write_l");
 
   ceph::mutex smq_lock;
   ceph::condition_variable smq_cv;
@@ -784,9 +788,21 @@ private:
 
 
   int build_snap_map(const std::string &dir_root, std::map<uint64_t, std::string> *snap_map,
-                     bool is_remote=false);
+                     bool is_remote=false, SnapMetadataMap *snap_metadata_map = nullptr);
 
   void initialize_checkpoints(const std::string &dir_root);
+  // An already-COMPLETE checkpoint eligible for pruning. metadata_keys is the
+  // checkpoint key set read during initialize_checkpoints(), so prune does not
+  // re-fetch snapshot metadata.
+  struct CompleteCheckpoint {
+    uint64_t snap_id;
+    std::string snap_name;
+    std::set<std::string> metadata_keys;
+  };
+  void prune_old_synced_checkpoints(
+      const std::string &dir_root,
+      const std::vector<CompleteCheckpoint> &already_complete,
+      size_t newly_complete);
   void checkpoint_sync_complete(const std::string &dir_root, uint64_t synced_snap_id,
                                 const std::string &snap_name);
   void checkpoint_sync_failed(const std::string &dir_root, uint64_t snap_id,

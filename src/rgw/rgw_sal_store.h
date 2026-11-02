@@ -183,6 +183,7 @@ class StoreUser : public User {
     virtual void set_attrs(Attrs& _attrs) override { attrs = _attrs; }
     virtual bool empty() const override { return info.user_id.id.empty(); }
     virtual RGWUserInfo& get_info() override { return info; }
+    virtual const RGWUserInfo& get_info() const override { return info; }
     virtual void set_info(RGWQuotaInfo& _quota) override {
       info.quota.user_quota.max_size = _quota.max_size;
       info.quota.user_quota.max_objects = _quota.max_objects;
@@ -378,6 +379,10 @@ class StoreObject : public Object {
 			   const DoutPrefixProvider* dpp,
 			   optional_yield y) override {
       return -1;
+    }
+    virtual int update_olh(const DoutPrefixProvider* dpp, optional_yield y,
+                           uint32_t flags) override {
+      return 0;
     }
     jspan_context& get_trace() override { return trace_ctx; }
     void set_trace (jspan_context&& _trace_ctx) override { trace_ctx = std::move(_trace_ctx); }

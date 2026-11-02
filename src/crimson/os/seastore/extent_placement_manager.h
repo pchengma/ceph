@@ -375,11 +375,11 @@ public:
       max_data_allocation_size(crimson::common::get_conf<Option::size_t>(
 	  "seastore_max_data_allocation_size")),
       write_through_size(crimson::common::get_conf<Option::size_t>(
-	  "seastore_write_through_size")),
+	  "seastore_lbc_write_through_size")),
       test_workload(crimson::common::get_conf<bool>(
-          "seastore_logical_bucket_cache_test_stress")),
+          "seastore_lbc_test_stress")),
       write_through_probability(crimson::common::get_conf<double>(
-          "seastore_test_workload_write_through_probability"))
+          "seastore_lbc_test_write_through_probability"))
   {
     LOG_PREFIX(ExtentPlacementManager::ExtentPlacementManager);
     devices_by_id.resize(DEVICE_ID_MAX, nullptr);
@@ -619,7 +619,7 @@ public:
     std::map<ExtentOolWriter*, std::list<CachedExtentRef>>;
   struct dispatch_result_t {
     extents_by_writer_t alloc_map;
-    std::list<CachedExtentRef> delayed_extents;
+    std::vector<CachedExtentRef> delayed_extents;
     io_usage_t usage;
   };
 
@@ -648,7 +648,7 @@ public:
    */
   alloc_paddr_iertr::future<> write_preallocated_ool_extents(
     Transaction &t,
-    std::list<CachedExtentRef> &extents);
+    std::vector<CachedExtentRef>& extents);
 
   seastar::future<> stop_background() {
     return background_process.stop_background();
@@ -692,6 +692,15 @@ public:
 
   void release_projected_usage(const io_usage_t &usage) {
     background_process.release_projected_usage(usage);
+  }
+
+  bool is_storage_full() const {
+    auto *cleaner = background_process.get_main_cleaner();
+    return cleaner ? cleaner->is_storage_full() : false;
+  }
+
+  void account_conflict_pending_free(paddr_t addr, extent_len_t len) {
+    background_process.account_conflict_pending_free(addr, len);
   }
 
   backend_type_t get_main_backend_type() const {
@@ -915,11 +924,11 @@ private:
         using crimson::common::get_conf;
         eviction_state.init(
           crimson::common::get_conf<double>(
-            "seastore_multiple_tiers_stop_evict_ratio"),
+            "seastore_cold_evict_stop_ratio"),
           crimson::common::get_conf<double>(
-            "seastore_multiple_tiers_default_evict_ratio"),
+            "seastore_cold_evict_start_ratio"),
           crimson::common::get_conf<double>(
-            "seastore_multiple_tiers_fast_evict_ratio"),
+            "seastore_cold_evict_fast_ratio"),
           hot_tier_generations);
 
         pinboard = _pinboard;
@@ -927,20 +936,20 @@ private:
         pinboard->set_background_callback(this);
 
         logical_bucket_demote_size_per_cycle =
-          get_conf<Option::size_t>("seastore_logical_bucket_proceed_size_per_cycle");
+          get_conf<Option::size_t>("seastore_lbc_demote_size_per_cycle");
         logical_bucket = create_logical_bucket(
-          get_conf<Option::size_t>("seastore_logical_bucket_capacity"),
+          get_conf<Option::size_t>("seastore_lbc_index_memory"),
           logical_bucket_demote_size_per_cycle);
         logical_bucket->set_background_callback(this);
       }
       LOG_PREFIX(BackgroundProcess::init);
       test_workload = crimson::common::get_conf<bool>(
-        "seastore_logical_bucket_cache_test_stress");
+        "seastore_lbc_test_stress");
       force_process_half_life = crimson::common::get_conf<uint64_t>(
-        "seastore_test_workload_force_process_background_tasks_period");
+        "seastore_lbc_test_force_background_period");
       force_background_timer.set_callback([this] { wake_half_life(); });
       write_through_probability = crimson::common::get_conf<double>(
-        "seastore_test_workload_write_through_probability");
+        "seastore_lbc_test_write_through_probability");
       SUBINFO(seastore_epm, "crimson test workload supported, enabled: {}", test_workload);
       if (test_workload) {
         set_next_force_process();
@@ -1041,6 +1050,22 @@ private:
       }
     }
 
+    // Routed like mark_space_free(), so it reaches the cleaner of the
+    // writer that later deaccounts it. Not gated on state: the deaccount
+    // side is not either.
+    void account_conflict_pending_free(paddr_t addr, extent_len_t len) {
+      if (!has_cold_tier()) {
+        assert(main_cleaner);
+        main_cleaner->account_conflict_pending_free(len);
+      } else {
+        auto id = addr.get_device_id();
+        assert(id < cleaners_by_device_id.size());
+        auto cleaner = cleaners_by_device_id[id];
+        assert(cleaner);
+        cleaner->account_conflict_pending_free(len);
+      }
+    }
+
     void commit_space_used(paddr_t addr, extent_len_t len) {
       if (state < state_t::SCAN_SPACE) {
         return;
@@ -1110,6 +1135,10 @@ private:
         return cold_cleaner->get_alive_ratio() >= 0.99;
       }
       return main_cleaner->get_alive_ratio() >= 0.99;
+    }
+
+    const AsyncCleaner* get_main_cleaner() const {
+      return main_cleaner.get();
     }
 
     void maybe_wake_background() final {

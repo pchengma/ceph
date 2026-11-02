@@ -43,7 +43,11 @@ import {
   TagModule,
   LinkModule,
   LayerModule,
-  ThemeModule
+  ThemeModule,
+  MenuButtonModule,
+  ContextMenuModule,
+  BreadcrumbModule,
+  SkeletonModule
 } from 'carbon-components-angular';
 import { ProductiveCardComponent } from './productive-card/productive-card.component';
 import EditIcon from '@carbon/icons/es/edit/16';
@@ -95,6 +99,7 @@ import { IconComponent } from './icon/icon.component';
 import { DetailsCardComponent } from './details-card/details-card.component';
 import { ToastComponent } from './notification-toast/notification-toast.component';
 import { TearsheetComponent } from './tearsheet/tearsheet.component';
+import { ClickableTileComponent } from './clickable-tile/clickable-tile.component';
 
 // Icons
 import InfoIcon from '@carbon/icons/es/information/16';
@@ -112,6 +117,7 @@ import Close16 from '@carbon/icons/es/close/16';
 import WarningAltFilled16 from '@carbon/icons/es/warning--alt--filled/16';
 import WarningAltFilled32 from '@carbon/icons/es/warning--alt--filled/32';
 import Help16 from '@carbon/icons/es/help/16';
+import Growth16 from '@carbon/icons/es/growth/16';
 import IncidentReporter16 from '@carbon/icons/es/incident-reporter/16';
 import IbmStreamSets16 from '@carbon/icons/es/ibm--streamsets/16';
 import DataEnrichment16 from '@carbon/icons/es/data-enrichment/16';
@@ -139,6 +145,7 @@ import Temperature16 from '@carbon/icons/es/temperature/16';
 
 import { TearsheetStepComponent } from './tearsheet-step/tearsheet-step.component';
 import { PageHeaderComponent } from './page-header/page-header.component';
+import { PageHeaderResourceComponent } from './page-header-resource/page-header-resource.component';
 import { SidebarLayoutComponent } from './sidebar-layout/sidebar-layout.component';
 import { NumberWithUnitComponent } from './number-with-unit/number-with-unit.component';
 import { OverviewComponent } from './resource-overview-card/resource-overview-card.component';
@@ -190,7 +197,11 @@ import { OverviewComponent } from './resource-overview-card/resource-overview-ca
     LinkModule,
     LayerModule,
     ThemeModule,
-    ProductiveCardComponent
+    ProductiveCardComponent,
+    MenuButtonModule,
+    ContextMenuModule,
+    BreadcrumbModule,
+    SkeletonModule
   ],
   declarations: [
     SparklineComponent,
@@ -238,7 +249,9 @@ import { OverviewComponent } from './resource-overview-card/resource-overview-ca
     ToastComponent,
     TearsheetComponent,
     TearsheetStepComponent,
+    ClickableTileComponent,
     PageHeaderComponent,
+    PageHeaderResourceComponent,
     SidebarLayoutComponent,
     NumberWithUnitComponent,
     OverviewComponent
@@ -285,7 +298,9 @@ import { OverviewComponent } from './resource-overview-card/resource-overview-ca
     ToastComponent,
     TearsheetComponent,
     TearsheetStepComponent,
+    ClickableTileComponent,
     PageHeaderComponent,
+    PageHeaderResourceComponent,
     SidebarLayoutComponent,
     NumberWithUnitComponent,
     OverviewComponent,
@@ -312,6 +327,7 @@ export class ComponentsModule {
       WarningAltFilled16,
       WarningAltFilled32,
       Help16,
+      Growth16,
       IncidentReporter16,
       IbmStreamSets16,
       DataEnrichment16,

@@ -32,6 +32,7 @@ public:
   virtual bool is_tier_type_s3() { return next->is_tier_type_s3(); }
   virtual const std::string& get_storage_class() override { return next->get_storage_class(); }
   virtual bool retain_head_object() override { return next->retain_head_object(); }
+  virtual bool retain_current_version() override { return next->retain_current_version(); }
   virtual bool allow_read_through() { return next->allow_read_through(); }
   virtual uint64_t get_read_through_restore_days() { return next->get_read_through_restore_days(); }
 
@@ -396,9 +397,11 @@ public:
 				      const std::map<std::string,
 				      std::string>& meta) override;
   virtual void get_quota(RGWQuota& quota) override;
-  virtual void get_ratelimit(RGWRateLimitInfo& bucket_ratelimit,
-			     RGWRateLimitInfo& user_ratelimit,
-			     RGWRateLimitInfo& anon_ratelimit) override;
+  virtual void get_ratelimit(
+      RGWRateLimitInfo& bucket_ratelimit,
+      RGWRateLimitInfo& user_ratelimit,
+      RGWRateLimitInfo& account_ratelimit,
+      RGWRateLimitInfo& anon_ratelimit) override;
   virtual int set_buckets_enabled(const DoutPrefixProvider* dpp,
 				  std::vector<rgw_bucket>& buckets,
 				  bool enabled, optional_yield y) override;
@@ -491,6 +494,18 @@ public:
 
   virtual const std::string& get_compression_type(const rgw_placement_rule& rule) override;
   virtual bool valid_placement(const rgw_placement_rule& rule) override;
+  int load_vector_bucket(const DoutPrefixProvider* dpp, const rgw_bucket& b,
+                          std::unique_ptr<VectorBucket>* bucket, optional_yield y) override {
+    return next->load_vector_bucket(dpp, b, bucket, y);
+  }
+  int list_vector_buckets(const DoutPrefixProvider* dpp,
+                           const rgw_owner& owner, const std::string& ns,
+                           const std::string& marker, const std::string& end_marker,
+                           uint64_t max, BucketList& buckets,
+                           optional_yield y) override {
+    return next->list_vector_buckets(dpp, owner, ns, marker,
+                                     end_marker, max, buckets, y);
+  }
 
   virtual void shutdown(void) override { next->shutdown(); };
 
@@ -554,6 +569,7 @@ public:
                   GroupList& listing) override;
 
   RGWUserInfo& get_info() override { return next->get_info(); }
+  const RGWUserInfo& get_info() const override { return next->get_info(); }
   virtual void print(std::ostream& out) const override { return next->print(out); }
 
   /* Internal to Filters */
@@ -813,6 +829,8 @@ public:
 
   virtual int load_obj_state(const DoutPrefixProvider *dpp, optional_yield y,
                              bool follow_olh = true) override;
+  virtual int update_olh(const DoutPrefixProvider* dpp, optional_yield y,
+                         uint32_t flags) override;
   virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
 			    Attrs* delattrs, optional_yield y, uint32_t flags) override;
   virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp) override;
@@ -912,8 +930,10 @@ public:
   virtual int omap_set_val_by_key(const DoutPrefixProvider *dpp,
 				  const std::string& key, bufferlist& val,
 				  bool must_exist, optional_yield y) override;
-  virtual int chown(User& new_user, const DoutPrefixProvider* dpp,
-		    optional_yield y) override;
+  virtual int chown(const DoutPrefixProvider* dpp,
+                    const rgw_owner& new_owner,
+                    const std::string& new_owner_name,
+                    optional_yield y) override;
 
   virtual std::unique_ptr<Object> clone() override {
     return std::make_unique<FilterObject>(*this);

@@ -19,6 +19,7 @@
 
 #include <rocksdb/version.h>
 
+#include "common/debug.h"
 #include "common/errno.h"
 #include "common/perf_counters_key.h"
 #include "crush/CrushWrapper.h"
@@ -167,7 +168,7 @@ PyObject *ActivePyModules::get_metadata_python(
     Py_RETURN_NONE;
   }
   auto l = without_gil([&] {
-    return std::lock_guard(lock);
+    return std::lock_guard(metadata->lock);
   });
   PyFormatter f;
   f.dump_string("hostname", metadata->hostname);
@@ -188,7 +189,7 @@ PyObject *ActivePyModules::get_daemon_status_python(
     Py_RETURN_NONE;
   }
   auto l = without_gil([&] {
-    return std::lock_guard(lock);
+    return std::lock_guard(metadata->lock);
   });
   PyFormatter f;
   for (const auto &[daemon, status] : metadata->service_status) {
@@ -675,13 +676,14 @@ std::optional<std::vector<std::byte>> ActivePyModules::dispatch_remote(
     const std::string &method,
     std::span<std::byte const> pickled_args,
     std::span<std::byte const> pickled_kwargs,
-    std::string *err)
+    std::string *err,
+    bool *crash_dump)
 {
   auto mod_iter = modules.find(other_module);
   ceph_assert(mod_iter != modules.end());
 
   return mod_iter->second->dispatch_remote(
-    method, pickled_args, pickled_kwargs, err);
+    method, pickled_args, pickled_kwargs, err, crash_dump);
 }
 
 
@@ -758,7 +760,15 @@ PyObject *ActivePyModules::get_store_prefix(const std::string &module_name,
   PyFormatter f;
   for (auto p = store_cache.lower_bound(global_prefix);
        p != store_cache.end() && p->first.find(global_prefix) == 0; ++p) {
-    f.dump_string(p->first.c_str() + base_prefix.size(), p->second);
+    PyObject *value = PyUnicode_FromStringAndSize(
+      p->second.c_str(), p->second.size());
+    if (!value) {
+      dout(1) << __func__ << " skipping key " << p->first
+              << " due to PyUnicode_FromStringAndSize failure" << dendl;
+      PyErr_Clear();
+      continue;
+    }
+    f.dump_pyobject(p->first.substr(base_prefix.size()).c_str(), value);
   }
   return f.get();
 }
@@ -1784,14 +1794,15 @@ void ActivePyModules::unregister_client(std::string_view name, std::string addrs
 
 PyObject* ActivePyModules::get_daemon_health_metrics()
 {
+  PyFormatter f;
   without_gil_t no_gil;
-  return daemon_state.with_daemons_by_server([&no_gil]
+  daemon_state.with_daemons_by_server([&no_gil, &f]
       (const std::map<std::string, DaemonStateCollection> &all) {
-      no_gil.acquire_gil();
-      PyFormatter f;
-      for (const auto &[hostname, daemon_state] : all) {
-        for (const auto &[key, state] : daemon_state) {
-          f.open_array_section(ceph::to_string(key));
+    for (const auto &[hostname, daemon_state] : all) {
+      for (const auto &[key, state] : daemon_state) {
+        std::lock_guard l(state->lock);
+        with_gil(no_gil, [&f, key=ceph::to_string(key), state=state] {
+          f.open_array_section(key.c_str());
           for (const auto &metric : state->daemon_health_metrics) {
             f.open_object_section(metric.get_type_name());
             f.dump_int("value", metric.get_n1());
@@ -1799,10 +1810,11 @@ PyObject* ActivePyModules::get_daemon_health_metrics()
             f.close_section();
           }
           f.close_section();
-        }
+        });
       }
-      return f.get();
+    }
   });
+  return f.get();
 }
 
 void ActivePyModules::check_all_modules_started(Context *modules_start_complete) {

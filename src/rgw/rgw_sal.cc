@@ -46,10 +46,6 @@
 #include "driver/d4n/rgw_sal_d4n.h" 
 #endif
 
-#ifdef WITH_RADOSGW_MOTR
-#include "driver/motr/rgw_sal_motr.h"
-#endif
-
 #ifdef WITH_RADOSGW_DAOS
 #include "driver/daos/rgw_sal_daos.h"
 #endif
@@ -67,9 +63,6 @@ extern rgw::sal::Driver* newDBStore(CephContext *cct);
 #ifdef WITH_RADOSGW_POSIX
 extern rgw::sal::Driver* newPOSIXDriver(CephContext *cct);
 #endif
-#ifdef WITH_RADOSGW_MOTR
-extern rgw::sal::Driver* newMotrStore(CephContext *cct);
-#endif
 #ifdef WITH_RADOSGW_DAOS
 extern rgw::sal::Driver* newDaosStore(CephContext *cct);
 #endif
@@ -82,7 +75,10 @@ extern rgw::sal::Driver* newD4NFilter(rgw::sal::Driver* next, boost::asio::io_co
 
 #ifdef WITH_RADOSGW_RADOS
 extern std::optional<neorados::RADOS>
-make_neorados(CephContext* cct, boost::asio::io_context& io_context);
+make_neorados(
+    CephContext* cct,
+    boost::asio::io_context& io_context,
+    std::optional<std::string> objecter_admin_socket_name);
 #endif
 
 rgw::sal::Driver* DriverManager::init_storage_provider(const DoutPrefixProvider* dpp,
@@ -137,7 +133,7 @@ rgw::sal::Driver* DriverManager::init_storage_provider(const DoutPrefixProvider*
   }
 #ifdef WITH_RADOSGW_RADOS
   else if (cfg.store_name.compare("d3n") == 0) {
-    auto neorados = make_neorados(cct, io_context);
+    auto neorados = make_neorados(cct, io_context, "RadosStore");
     if (!neorados) {
       return nullptr;
     }
@@ -203,19 +199,6 @@ rgw::sal::Driver* DriverManager::init_storage_provider(const DoutPrefixProvider*
       delete driver;
       return nullptr;
     }
-  }
-#endif
-
-#ifdef WITH_RADOSGW_MOTR
-  else if (cfg.store_name.compare("motr") == 0) {
-    driver = newMotrStore(cct);
-    if (driver == nullptr) {
-      ldpp_dout(dpp, 0) << "newMotrStore() failed!" << dendl;
-      return driver;
-    }
-    ((rgw::sal::MotrStore *)driver)->init_metadata_cache(dpp, cct);
-
-    return driver;
   }
 #endif
 
@@ -313,12 +296,6 @@ rgw::sal::Driver* DriverManager::init_raw_storage_provider(const DoutPrefixProvi
 #else
     driver = nullptr;
 #endif
-  } else if (cfg.store_name.compare("motr") == 0) {
-#ifdef WITH_RADOSGW_MOTR
-    driver = newMotrStore(cct);
-#else
-    driver = nullptr;
-#endif
   } else if (cfg.store_name.compare("daos") == 0) {
 #ifdef WITH_RADOSGW_DAOS
     driver = newDaosStore(cct);
@@ -396,11 +373,6 @@ DriverManager::Config DriverManager::get_config(bool admin, CephContext* cct)
 #ifdef WITH_RADOSGW_POSIX
   else if (config_store == "posix") {
     cfg.store_name = "posix";
-  }
-#endif
-#ifdef WITH_RADOSGW_MOTR
-  else if (config_store == "motr") {
-    cfg.store_name = "motr";
   }
 #endif
 #ifdef WITH_RADOSGW_DAOS

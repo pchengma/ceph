@@ -355,7 +355,7 @@
             spacingClass="mb-3"
             i18n
           >
-            The RGW daemons for this service must be restarted to apply the updated realm,
+            The RGW service instances for this service must be restarted to apply the updated realm,
             zonegroup, or zone configuration.
           </cd-alert-panel>
         }
@@ -377,8 +377,9 @@
           >
             Enable
             <cd-help-text i18n>
-              If Unmanaged is selected, the orchestrator will not start or stop any daemons
-              associated with this service. Placement and all other properties will be ignored.
+              If Unmanaged is selected, the orchestrator will not start or stop any service
+              instances associated with this service. Placement and all other properties will be
+              ignored.
             </cd-help-text>
           </cds-checkbox>
         </fieldset>
@@ -416,6 +417,7 @@
         ) {
           <div class="form-item">
             <cds-combo-box
+              cdComboBoxSearchReset
               type="single"
               selectionFeedback="top-after-reopen"
               label="Label"
@@ -446,6 +448,7 @@
         ) {
           <div class="form-item">
             <cds-combo-box
+              cdComboBoxSearchReset
               type="multi"
               selectionFeedback="top-after-reopen"
               label="Hosts"
@@ -473,7 +476,7 @@
             formControlName="count"
             id="count"
             min="1"
-            helperText="Number of deamons that will be deployed"
+            helperText="Number of service instances that will be deployed"
             i18n-helperText
           >
           </cds-number>
@@ -492,7 +495,7 @@
             id="rgw_frontend_port"
             min="1"
             max="65535"
-            helperText="Number of deamons that will be deployed"
+            helperText="Port on which the service listens for HTTP or HTTPS client requests."
             i18n-helperText
             [invalid]="
               serviceForm.controls.rgw_frontend_port.invalid &&
@@ -519,6 +522,51 @@
           </ng-template>
         </div>
 
+        @if (serviceForm.controls.ssl.value) {
+          <!-- rgw_frontend_http_port -->
+          <div class="form-item">
+            <cds-number
+              label="HTTP Port"
+              formControlName="rgw_frontend_http_port"
+              id="rgw_frontend_http_port"
+              min="1"
+              max="65535"
+              helperText="Port on which the service listens for HTTP client requests."
+              i18n-helperText
+              [invalid]="
+                serviceForm.controls.rgw_frontend_http_port.invalid &&
+                serviceForm.controls.rgw_frontend_http_port.dirty
+              "
+              [invalidText]="invalidRgwFrontendHTTPPortError"
+            >
+            </cds-number>
+            <ng-template #invalidRgwFrontendHTTPPortError>
+              @if (serviceForm.showError('rgw_frontend_http_port', frm, 'min')) {
+                <span
+                  class="invalid-feedback"
+                  i18n
+                  >The value must be at least 1.</span
+                >
+              }
+              @if (serviceForm.showError('rgw_frontend_http_port', frm, 'max')) {
+                <span
+                  class="invalid-feedback"
+                  i18n
+                  >The value cannot exceed 65535.</span
+                >
+              }
+              @if (serviceForm.showError('rgw_frontend_http_port', frm, 'doNotMatch')) {
+                <span
+                  class="invalid-feedback"
+                  i18n
+                  >HTTP Port cannot be the same as the Port (443 by default when SSL is
+                  enabled).</span
+                >
+              }
+            </ng-template>
+          </div>
+        }
+
         @if (!rgwModuleEnabled) {
           <cd-alert-panel
             type="warning"
@@ -538,9 +586,16 @@
             formControlName="virtual_host_enabled"
           >
             Enable virtual-host style bucket access
-            <cd-help-text i18n>
-              Allows bucket access via hostnames such as mybucket.s3.example.com.
-            </cd-help-text>
+            @if (realmList.length === 0) {
+              <cd-help-text i18n>
+                Requires a multisite realm, zonegroup, and zone. Create a realm to enable
+                virtual-host style bucket access.
+              </cd-help-text>
+            } @else {
+              <cd-help-text i18n>
+                Allows bucket access via hostnames such as mybucket.s3.example.com.
+              </cd-help-text>
+            }
           </cds-checkbox>
         </div>
         @if (serviceForm.controls.virtual_host_enabled.value) {
@@ -1609,6 +1664,7 @@
         <!-- ssl_protocols -->
         <div class="form-item">
           <cds-combo-box
+            cdComboBoxSearchReset
             type="multi"
             label="SSL protocols"
             selectionFeedback="top-after-reopen"
@@ -1820,13 +1876,14 @@
               helperText="QAT compression is optional. Choose Hardware or Software to enable compression, or select None to disable it."
               i18n-helperText
             >
-              <option
-                *ngFor="let option of qatCompressionOptions"
-                [value]="option.value"
-                i18n
-              >
-                {{ option.label }}
-              </option>
+              @for (option of qatCompressionOptions; track option) {
+                <option
+                  [value]="option.value"
+                  i18n
+                >
+                  {{ option.label }}
+                </option>
+              }
             </cds-select>
           </div>
         }

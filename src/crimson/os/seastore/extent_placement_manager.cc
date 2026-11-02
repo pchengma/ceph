@@ -225,13 +225,20 @@ void ExtentPlacementManager::init(
         cold_tier_generations);
   ceph_assert(dynamic_max_rewrite_generation > MIN_REWRITE_GENERATION);
 
-  auto main_bw_limit = crimson::common::get_conf<
-    Option::size_t>("seastore_hot_backend_bw_throttle");
-  auto secondary_bw_limit = crimson::common::get_conf<
-    Option::size_t>("seastore_cold_backend_bw_throttle");
+  auto cache_bw_limit = crimson::common::get_conf<
+    Option::size_t>("seastore_cache_device_bw_throttle");
+  auto data_bw_limit = crimson::common::get_conf<
+    Option::size_t>("seastore_data_device_bw_throttle");
 
-  token_buckets.emplace_back(std::make_unique<TokenBucket>(main_bw_limit));
-  token_buckets.back()->start();
+  if (cold_cleaner) {
+    token_buckets.emplace_back(std::make_unique<TokenBucket>(cache_bw_limit));
+    token_buckets.back()->start();
+    token_buckets.emplace_back(std::make_unique<TokenBucket>(data_bw_limit));
+    token_buckets.back()->start();
+  } else {
+    token_buckets.emplace_back(std::make_unique<TokenBucket>(data_bw_limit));
+    token_buckets.back()->start();
+  }
 
   if (trimmer->get_backend_type() == backend_type_t::SEGMENTED) {
     DEBUG("initiating SegmentCleaner");
@@ -288,8 +295,6 @@ void ExtentPlacementManager::init(
   }
 
   if (cold_cleaner) {
-    token_buckets.emplace_back(std::make_unique<TokenBucket>(secondary_bw_limit));
-    token_buckets.back()->start();
     if (cold_cleaner->get_backend_type() == backend_type_t::SEGMENTED) {
       auto cold_segment_cleaner = static_cast<SegmentCleaner*>(cold_cleaner.get());
       for (rewrite_gen_t gen = hot_tier_generations; gen <= dynamic_max_rewrite_generation; ++gen) {
@@ -538,14 +543,14 @@ ExtentPlacementManager::dispatch_delayed_extents(Transaction &t)
   res.delayed_extents = t.get_delayed_alloc_list();
 
   // init projected usage
-  for (auto &extent : t.get_inline_block_list()) {
+  for (auto& extent : t.get_inline_block_list()) {
     if (extent->is_valid()) {
       res.usage.inline_usage += extent->get_length();
       res.usage.cleaner_usage.main_usage += extent->get_length();
     }
   }
 
-  for (auto &extent : res.delayed_extents) {
+  for (auto& extent : res.delayed_extents) {
     if (dispatch_delayed_extent(extent)) {
       res.usage.inline_usage += extent->get_length();
       res.usage.cleaner_usage.main_usage += extent->get_length();
@@ -590,8 +595,8 @@ ExtentPlacementManager::write_delayed_ool_extents(
 
 ExtentPlacementManager::alloc_paddr_iertr::future<>
 ExtentPlacementManager::write_preallocated_ool_extents(
-    Transaction &t,
-    std::list<CachedExtentRef> &extents)
+    Transaction& t,
+    std::vector<CachedExtentRef>& extents)
 {
   LOG_PREFIX(ExtentPlacementManager::write_preallocated_ool_extents);
   DEBUGT("start with {} allocated extents",
@@ -1285,18 +1290,32 @@ RandomBlockOolWriter::alloc_write_ool_extents(
     try {
       co_await trans_intr::make_interruptible(
         token_bucket.get(size));
+      // Backpressure on accumulated deferred frees of conflicted OOL writes.
+      co_await trans_intr::make_interruptible(
+        rb_cleaner->wait_for_conflict_drain());
       seastar::lw_shared_ptr<rbm_pending_ool_t> ptr =
           seastar::make_lw_shared<rbm_pending_ool_t>();
-      ptr->pending_extents = t.get_pre_alloc_list();
+      // Only this write's extents: pre_alloc_list also holds extents of other
+      // tiers' writers, which rb_cleaner neither owns nor accounts.
+      ptr->pending_extents.assign(extents.begin(), extents.end());
       assert(!t.is_conflicted());
       t.set_pending_ool(ptr);
+      // Conflict check, frees and clear_pending_ool() run in the completion
+      // continuation itself: atomic w.r.t. task interleaving and on every exit
+      // path. t outlives the future (the submit fiber awaits this coroutine).
       co_await do_write(t, extents
-      ).finally([this, ptr=ptr] {
+      ).finally([this, ptr=ptr, &t] {
         if (ptr->is_conflicted) {
-          for (auto &e : ptr->pending_extents) {
+          std::size_t freed = 0;
+          for (auto &e : ptr->deferred_frees) {
             rb_cleaner->mark_space_free(e->get_paddr(), e->get_length());
+            freed += e->get_length();
+          }
+          if (freed > 0) {
+            rb_cleaner->deaccount_conflict_pending_free(freed);
           }
         }
+        t.clear_pending_ool();
       });
     } catch (...) {
       token_bucket.release(size);
@@ -1382,7 +1401,7 @@ RandomBlockOolWriter::do_write(
       for (auto &b : w.mergeable_bps) {
 	len += b.length();
       }
-      w.bp = ceph::bufferptr(ceph::buffer::create_page_aligned(len));
+      w.bp = create_extent_ptr_rand(len);
       extent_len_t cursor = 0;
       for (auto &b : w.mergeable_bps) {
 	w.bp.copy_in(cursor, b.length(), b.c_str());
@@ -1401,7 +1420,7 @@ RandomBlockOolWriter::do_write(
       trans_stats.num_records += writes.size();
       return alloc_write_ertr::parallel_for_each(writes,
         [](auto& info) {
-        return info.rbm->write(info.offset, info.bp
+        return info.rbm->write(info.offset, std::move(info.bp)
         ).handle_error(
           alloc_write_ertr::pass_further{},
           crimson::ct_error::assert_all(
