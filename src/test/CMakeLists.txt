@@ -49,6 +49,7 @@ if(NOT WIN32)
   if(WITH_RADOSGW)
     add_subdirectory(cls_rgw)
     add_subdirectory(cls_rgw_gc)
+    add_subdirectory(cls_timeindex)
     add_subdirectory(cls_user)
   endif(WITH_RADOSGW)
   add_subdirectory(cls_refcount)
@@ -548,6 +549,14 @@ target_link_libraries(ceph_test_snap_mapper osd global ${BLKID_LIBRARIES} ${UNIT
 install(TARGETS
   ceph_test_snap_mapper
   DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# unittest_scrubber_run
+add_executable(unittest_scrubber_run
+  test_scrubber_run.cc
+  $<TARGET_OBJECTS:unit-main>
+  )
+add_ceph_unittest(unittest_scrubber_run)
+target_link_libraries(unittest_scrubber_run osd global ${BLKID_LIBRARIES})
 endif(NOT WIN32)
 
 add_executable(ceph_test_stress_watch
@@ -705,6 +714,12 @@ add_ceph_test(run-cli-tests ${CMAKE_CURRENT_SOURCE_DIR}/run-cli-tests)
 #add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
 
 add_ceph_test(smoke.sh ${CMAKE_CURRENT_SOURCE_DIR}/smoke.sh)
+
+if(NOT WIN32)
+  # ceph-crash.in imports grp and pwd
+  add_ceph_test(test_ceph_crash.py
+    ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ceph_crash.py)
+endif()
 
 # unittest_admin_socket
 add_executable(unittest_admin_socket

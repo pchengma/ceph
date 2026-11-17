@@ -72,6 +72,14 @@ instances or all radosgw-admin options can be put into the ``[global]`` or the
 .. confval:: rgw_smb_run_lc_threads
 .. confval:: rgw_smb_run_sync_thread
 
+S3 RDMA Settings
+================
+
+For dependencies, build instructions, deployment examples, and the S3 RDMA
+request protocol, see :ref:`radosgw-s3rdma`. The guide includes the complete
+:ref:`S3 RDMA configuration reference <radosgw-cuobj-config-ref>` and
+:ref:`memory sizing and transfer limits <radosgw-cuobj-buffer-limits>`.
+
 Lifecycle Settings
 ==================
 
@@ -413,7 +421,7 @@ For more information, see `Bucket Notifications`_.
 
 The default behavior is to push indefinitely and as frequently as possible.
 With these settings you can control how long and how often to retry an
-unsuccessful notification by configuring the maximum retention time and/or or
+unsuccessful notification by configuring the maximum retention time and/or
 maximum number of retries.
 The interval between push retries can be configured via the sleep duration
 parameter.

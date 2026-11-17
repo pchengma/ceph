@@ -63,6 +63,7 @@
 #include "rgw_sal.h"
 #include "rgw_sal_rados.h"
 #ifdef WITH_RADOSGW_LANCEDB
+#include "rgw_rest_vector_bucket.h"
 #include "rgw_s3vector.h"
 #include "rgw_s3vector_background.h"
 #endif
@@ -2860,6 +2861,9 @@ void RadosStore::register_admin_apis(RGWRESTMgr* mgr)
 {
   mgr->register_resource("user", new RGWRESTMgr_User);
   mgr->register_resource("bucket", new RGWRESTMgr_Bucket);
+#ifdef WITH_RADOSGW_LANCEDB
+  mgr->register_resource("vectorbucket", new RGWRESTMgr_VectorBucket);
+#endif
   /*Registering resource for /admin/metadata */
   mgr->register_resource("metadata", new RGWRESTMgr_Metadata);
   mgr->register_resource("log", new RGWRESTMgr_Log);
@@ -3240,15 +3244,12 @@ int RadosObject::set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs, A
 {
   Attrs empty;
   const bool log_op = flags & rgw::sal::FLAG_LOG_OP;
-  // make a tiny adjustment to the existing mtime so that fetch_remote_obj()
-  // won't return ERR_NOT_MODIFIED when syncing the modified object
-  const auto mtime = log_op ? state.mtime + ceph::timespan{std::chrono::nanoseconds{1}} : state.mtime;
   return store->getRados()->set_attrs(dpp, rados_ctx,
 			bucket->get_info(),
 			get_obj(),
 			setattrs ? *setattrs : empty,
 			delattrs ? delattrs : nullptr,
-			y, log_op, mtime);
+			y, log_op);
 }
 
 int RadosObject::get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp)
@@ -4105,6 +4106,8 @@ int RadosObject::copy_object(const ACLOwner& owner,
 				bool high_precision_time,
 				const char* if_match,
 				const char* if_nomatch,
+				const char* dest_if_match,
+				const char* dest_if_nomatch,
 				AttrsMod attrs_mod,
 				bool copy_if_newer,
 				Attrs& attrs,
@@ -4138,6 +4141,8 @@ int RadosObject::copy_object(const ACLOwner& owner,
 				     high_precision_time,
 				     if_match,
 				     if_nomatch,
+				     dest_if_match,
+				     dest_if_nomatch,
 				     static_cast<RGWRados::AttrsMod>(attrs_mod),
 				     copy_if_newer,
 				     attrs,
@@ -4305,7 +4310,7 @@ int RadosMultipartUpload::abort(const DoutPrefixProvider *dpp, CephContext *cct,
   list<rgw_obj_index_key> remove_objs;
   bool truncated;
   int marker = 0;
-  int ret;
+  int ret = 0;
   uint64_t parts_accounted_size = 0;
 
   prefix_map_t processed_prefixes;
